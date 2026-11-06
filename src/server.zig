@@ -528,7 +528,11 @@ pub const Server = struct {
     // Input. These go out in order without waiting, so typing stays in order.
 
     pub fn sendKey(s: *Server, session_id: []const u8, block_id: []const u8, key: anytype) void {
-        const c = s.control orelse return;
+        const c = s.control orelse {
+            log.warn("key dropped: not connected", .{});
+            return;
+        };
+        if (std.c.getenv("COMPY_DEBUG") != null) log.info("key to {s}", .{block_id});
         c.fire("client.key", .{ .session_id = session_id, .block_id = block_id, .key = key });
     }
 
@@ -647,6 +651,8 @@ pub const Server = struct {
     }
 
     pub fn createSession(s: *Server, label: []const u8) void {
+        log.warn("creating a session", .{});
+        if (std.c.getenv("COMPY_DEBUG") != null) std.debug.dumpCurrentStackTrace(.{});
         if (s.control == null) return s.showMessage("Not connected to the server");
         s.call("session.create", .{
             .label = label,

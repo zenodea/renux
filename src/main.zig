@@ -16,4 +16,6 @@ test {
     _ = @import("server.zig");
     _ = @import("keys.zig");
     _ = @import("theme.zig");
+    _ = @import("boxdraw.zig");
+    _ = @import("links.zig");
 }

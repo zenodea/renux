@@ -123,7 +123,10 @@ pub const Control = struct {
             .id = id_str,
             .method = method,
             .payload = payload,
-        }, .{}) catch return false;
+        }, .{}) catch |err| {
+            std.log.warn("couldn't encode {s}: {s}", .{ method, @errorName(err) });
+            return false;
+        };
         defer gpa.free(text);
         if (c.socket_done) return false;
         return c.socket.sendText(text);

@@ -12,8 +12,11 @@ const pango = @import("pango");
 const pangocairo = @import("pangocairo");
 const keys = @import("keys.zig");
 const term = @import("term.zig");
+const term_mod = term;
 const Server = @import("server.zig").Server;
 const Stream = @import("stream.zig").Stream;
+const boxdraw = @import("boxdraw.zig");
+const links = @import("links.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -63,6 +66,15 @@ pub const TermView = struct {
     /// Lines of scrolling not yet applied, since touchpads report fractions.
     scroll_rest: f64 = 0,
     listening: bool = false,
+    title_label: ?*gtk.Label = null,
+    title_buf: [256]u8 = undefined,
+    title_len: usize = 0,
+    /// Where a selection drag started, in cells, and whether it has moved enough to select.
+    anchor: [2]u16 = .{ 0, 0 },
+    drag_origin: [2]f64 = .{ 0, 0 },
+    selecting: bool = false,
+    /// Whether the press that may start a selection belongs to the program, which takes the mouse.
+    drag_to_program: bool = false,
     /// Called when this pane is clicked, so the workspace can mark it focused.
     on_focus: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
 
@@ -98,6 +110,12 @@ pub const TermView = struct {
         _ = gtk.GestureClick.signals.released.connect(click, *TermView, &onReleased, v, .{});
         w.addController(click.as(gtk.EventController));
 
+        const drag = gtk.GestureDrag.new();
+        _ = gtk.GestureDrag.signals.drag_begin.connect(drag, *TermView, &onDragBegin, v, .{});
+        _ = gtk.GestureDrag.signals.drag_update.connect(drag, *TermView, &onDragUpdate, v, .{});
+        _ = gtk.GestureDrag.signals.drag_end.connect(drag, *TermView, &onDragEnd, v, .{});
+        w.addController(drag.as(gtk.EventController));
+
         const focus = gtk.EventControllerFocus.new();
         _ = gtk.EventControllerFocus.signals.enter.connect(focus, *TermView, &onFocusIn, v, .{});
         _ = gtk.EventControllerFocus.signals.leave.connect(focus, *TermView, &onFocusOut, v, .{});
@@ -119,9 +137,38 @@ pub const TermView = struct {
         return v.server.streams.get(v.block_id);
     }
 
+    pub fn term(v: *TermView) ?*term_mod.Term {
+        const st = v.stream() orelse return null;
+        return st.term;
+    }
+
     fn changed(ctx: *anyopaque) void {
         const v: *TermView = @ptrCast(@alignCast(ctx));
         v.widget().queueDraw();
+        v.updateTitle();
+    }
+
+    pub fn setTitleLabel(v: *TermView, label: *gtk.Label) void {
+        v.title_label = label;
+        v.title_len = std.math.maxInt(usize);
+        v.updateTitle();
+    }
+
+    /// Shows the title the program set, or the block's label until it sets one.
+    fn updateTitle(v: *TermView) void {
+        const label = v.title_label orelse return;
+        var buf: [256]u8 = undefined;
+        const title: []const u8 = blk: {
+            if (v.term()) |t| if (t.title(&buf)) |own| if (own.len > 0) break :blk own;
+            if (v.server.sessionView(v.session_id)) |sv| if (sv.windowOf(v.block_id)) |w| if (w.findBlock(v.block_id)) |b| if (b.label.len > 0) break :blk b.label;
+            break :blk "Terminal";
+        };
+        const n = @min(title.len, v.title_buf.len - 1);
+        if (n == v.title_len and std.mem.eql(u8, v.title_buf[0..n], title[0..n])) return;
+        @memcpy(v.title_buf[0..n], title[0..n]);
+        v.title_buf[n] = 0;
+        v.title_len = n;
+        label.setText(@ptrCast(&v.title_buf));
     }
 
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
@@ -196,11 +243,17 @@ pub const TermView = struct {
                 v.pasteClipboard();
                 return 1;
             }
-            if (keyval == 'C' or keyval == 'c') return 1;
+            if (keyval == 'C' or keyval == 'c') {
+                v.copySelection(false);
+                return 1;
+            }
         }
         if (mods & keys.super != 0) return 0; // leave shortcuts to the desktop
         const key = keys.fromGdk(keyval, gdk.keyvalToUnicode(keyval), mods) orelse return 0;
-        if (v.stream()) |st| if (st.term) |t| t.scrollToBottom();
+        if (v.term()) |t| {
+            t.scrollToBottom();
+            t.clearSelection();
+        }
         v.server.sendKey(v.session_id, v.block_id, key);
         return 1;
     }
@@ -264,24 +317,140 @@ pub const TermView = struct {
         };
     }
 
-    fn onPressed(gesture: *gtk.GestureClick, _: c_int, x: f64, y: f64, v: *TermView) callconv(.c) void {
+    fn modsNow(gesture: anytype) u4 {
+        const ev = gesture.as(gtk.EventController);
+        const bits: u32 = @bitCast(ev.getCurrentEventState());
+        return keys.modsFromGdk(bits);
+    }
+
+    /// Whether clicks go to the program: it asked for the mouse, and Shift isn't held to select.
+    fn programHasMouse(v: *TermView, mods: u4) bool {
+        const t = v.term() orelse return false;
+        return t.frame.mouse and mods & keys.shift == 0;
+    }
+
+    fn onPressed(gesture: *gtk.GestureClick, n_press: c_int, x: f64, y: f64, v: *TermView) callconv(.c) void {
         _ = v.widget().grabFocus();
         if (v.on_focus) |f| f.f(f.ctx, v.block_id);
-        const st = v.stream() orelse return;
-        const t = st.term orelse return;
-        if (t.frame.mouse) {
-            const cell = v.cellAt(x, y);
+        const t = v.term() orelse return;
+        const mods = modsNow(gesture);
+        const cell = v.cellAt(x, y);
+        const button = gesture.as(gtk.GestureSingle).getCurrentButton();
+        if (v.programHasMouse(mods)) {
             v.server.sendMouse(v.session_id, v.block_id, "press", buttonName(gesture), cell[0], cell[1]);
+            return;
+        }
+        if (button == 2) return v.pastePrimary();
+        if (button != 1) return;
+        if (n_press == 2) {
+            t.selectWord(cell[0], cell[1]);
+            v.copySelection(true);
+            v.widget().queueDraw();
+        } else if (n_press == 3) {
+            t.selectRange(0, cell[1], t.frame.cols -| 1, cell[1]);
+            v.copySelection(true);
+            v.widget().queueDraw();
         }
     }
 
-    fn onReleased(gesture: *gtk.GestureClick, _: c_int, x: f64, y: f64, v: *TermView) callconv(.c) void {
-        const st = v.stream() orelse return;
-        const t = st.term orelse return;
-        if (t.frame.mouse) {
-            const cell = v.cellAt(x, y);
+    fn onReleased(gesture: *gtk.GestureClick, n_press: c_int, x: f64, y: f64, v: *TermView) callconv(.c) void {
+        const t = v.term() orelse return;
+        const mods = modsNow(gesture);
+        const cell = v.cellAt(x, y);
+        if (v.programHasMouse(mods)) {
             v.server.sendMouse(v.session_id, v.block_id, "release", buttonName(gesture), cell[0], cell[1]);
+            return;
         }
+        if (gesture.as(gtk.GestureSingle).getCurrentButton() != 1 or n_press != 1 or v.selecting) return;
+        // Ctrl+click opens a link; a plain click drops the selection.
+        if (mods & keys.ctrl != 0) {
+            if (v.linkAt(t, cell[0], cell[1])) |url| {
+                defer gpa.free(url);
+                const launcher = gtk.UriLauncher.new(url.ptr);
+                launcher.launch(@ptrCast(@alignCast(v.widget().getRoot())), null, null, null);
+                return;
+            }
+        }
+        t.clearSelection();
+        v.widget().queueDraw();
+    }
+
+    /// The link at a cell: an OSC 8 hyperlink, or a web address written in the text.
+    fn linkAt(v: *TermView, t: *term_mod.Term, col: u16, row: u16) ?[:0]u8 {
+        _ = v;
+        if (t.hyperlinkAt(col, row)) |u| return u;
+        const f = &t.frame;
+        var rows: std.ArrayList([]u21) = .empty;
+        defer {
+            for (rows.items) |r| gpa.free(r);
+            rows.deinit(gpa);
+        }
+        for (0..f.rows) |y| {
+            const r = gpa.alloc(u21, f.cols) catch return null;
+            for (0..f.cols) |x| {
+                const cp = f.cell(x, y).cp;
+                r[x] = if (cp == 0 or cp > 0x10ffff) ' ' else @intCast(cp);
+            }
+            rows.append(gpa, r) catch return null;
+        }
+        const casted: []const []const u21 = @ptrCast(rows.items);
+        var link = (links.at(gpa, casted, col, row) catch return null) orelse return null;
+        defer link.deinit(gpa);
+        return gpa.dupeSentinel(u8, link.url, 0) catch null;
+    }
+
+    fn onDragBegin(gesture: *gtk.GestureDrag, x: f64, y: f64, v: *TermView) callconv(.c) void {
+        v.selecting = false;
+        v.drag_to_program = v.programHasMouse(modsNow(gesture));
+        v.drag_origin = .{ x, y };
+        const cell = v.cellAt(x, y);
+        v.anchor = .{ cell[0], cell[1] };
+    }
+
+    fn onDragUpdate(gesture: *gtk.GestureDrag, dx: f64, dy: f64, v: *TermView) callconv(.c) void {
+        if (v.drag_to_program) return;
+        if (gesture.as(gtk.GestureSingle).getCurrentButton() != 1) return;
+        if (!v.selecting and @abs(dx) < 4 and @abs(dy) < 4) return;
+        const t = v.term() orelse return;
+        v.selecting = true;
+        const cell = v.cellAt(v.drag_origin[0] + dx, v.drag_origin[1] + dy);
+        const last_col = t.frame.cols -| 1;
+        const last_row = t.frame.rows -| 1;
+        t.selectRange(@min(v.anchor[0], last_col), @min(v.anchor[1], last_row), @min(cell[0], last_col), @min(cell[1], last_row));
+        v.widget().queueDraw();
+    }
+
+    fn onDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, v: *TermView) callconv(.c) void {
+        if (v.selecting) v.copySelection(true);
+        // The release that ends a drag also reaches the click gesture, which checks this.
+        const Later = struct {
+            fn run(data: ?*anyopaque) callconv(.c) c_int {
+                const tv: *TermView = @ptrCast(@alignCast(data.?));
+                tv.selecting = false;
+                return 0;
+            }
+        };
+        _ = glib.idleAdd(&Later.run, v);
+    }
+
+    /// Copies the selection to the clipboard, or to the primary selection that middle-click pastes.
+    pub fn copySelection(v: *TermView, primary: bool) void {
+        const t = v.term() orelse return;
+        const text = t.selectionText() orelse return;
+        defer gpa.free(text);
+        const clipboard = if (primary) v.widget().getPrimaryClipboard() else v.widget().getClipboard();
+        clipboard.setText(text.ptr);
+    }
+
+    fn pastePrimary(v: *TermView) void {
+        const clipboard = v.widget().getPrimaryClipboard();
+        const ids = gpa.create(PasteTarget) catch return;
+        ids.* = .{
+            .server = v.server,
+            .session_id = gpa.dupe(u8, v.session_id) catch return,
+            .block_id = gpa.dupe(u8, v.block_id) catch return,
+        };
+        clipboard.readTextAsync(null, &pasted, ids);
     }
 
     fn onFocusIn(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
@@ -344,6 +513,19 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
             cr.rectangle(pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w * span + 0.5, v.cell_h);
             cr.fill();
         }
+        // Search matches, under the text.
+        if (t.finding()) {
+            var found: [128]term.Match = undefined;
+            const n = t.matches(&found);
+            for (found[0..n]) |m| {
+                if (m.y0 > y or m.y1 < y) continue;
+                const from: usize = if (m.y0 == y) m.x0 else 0;
+                const to: usize = if (m.y1 == y) m.x1 else f.cols -| 1;
+                setColor(cr, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.75 else 0.35);
+                cr.rectangle(pad + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
+                cr.fill();
+            }
+        }
         // Then text, in runs of one style. Anything outside ASCII is placed on its own cell,
         // since fallback fonts don't keep to the grid.
         x = 0;
@@ -353,13 +535,19 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
                 x += 1;
                 continue;
             }
+            if (boxdraw.handles(cl.cp)) {
+                setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
+                boxdraw.draw(cr, cl.cp, pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w, v.cell_h);
+                x += 1;
+                continue;
+            }
             const start = x;
             const colors = cellColors(f, cl);
             text.clearRetainingCapacity();
             while (x < f.cols) {
                 const n = f.cell(x, y);
                 if (x > start) {
-                    if (n.cp >= 0x80 or n.cp == 0 or n.flags.spacer or !sameStyle(cl, n) or cellColors(f, n).fg != colors.fg) break;
+                    if (n.cp >= 0x80 or n.cp == 0 or n.flags.spacer or boxdraw.handles(n.cp) or !sameStyle(cl, n) or cellColors(f, n).fg != colors.fg) break;
                 }
                 appendCell(&text, f, n);
                 x += if (n.flags.wide) 2 else 1;

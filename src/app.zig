@@ -32,13 +32,23 @@ const css =
     \\row:hover .row-more, row:selected .row-more { opacity: 0.6; }
     \\.session-heading { font-size: 0.82em; color: @compy_secondary; margin: 14px 12px 4px 12px; }
     \\.sidebar-footer { padding: 6px 10px 10px 10px; }
-    \\.window-card { background-color: @view_bg_color; border-radius: 12px; border: 1px solid @compy_stroke_subtle; margin: 8px 8px 8px 0; }
-    \\.window-card.alone { margin-left: 8px; }
-    \\.card-title { min-height: 38px; padding: 0 6px 0 14px; }
-    \\.card-title .title { font-weight: 500; }
+    \\.content .workspace { margin: 8px 8px 8px 0; }
+    \\.content.alone .workspace { margin: 0 8px 8px 8px; }
+    \\.top-strip { min-height: 38px; padding: 0 8px; }
+    \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; }
+    \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
+    \\.pane-card.floating { box-shadow: 0 8px 28px alpha(black, 0.45); }
+    \\.pane-card.floating.focused { box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 8px 28px alpha(black, 0.45); }
+    \\.pane-title { min-height: 34px; padding: 0 4px 0 12px; }
+    \\.pane-title .title { font-weight: 500; font-size: 0.95em; }
+    \\.pane-card:not(.focused) .pane-title .title { color: @compy_secondary; }
+    \\.pane-tools { opacity: 0; transition: opacity 120ms; }
+    \\.pane-card.focused .pane-tools, .pane-card:hover .pane-tools { opacity: 1; }
     \\.icon-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; opacity: 0.5; }
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
-    \\.workspace { background-color: @compy_stroke_subtle; }
+    \\.find-bar { padding: 8px 8px 0 0; }
+    \\.content.alone .find-bar { padding-left: 8px; }
+    \\.find-count { color: @compy_secondary; font-size: 0.9em; min-width: 52px; }
     \\.connect-box { margin: 0 24px; }
 ;
 
@@ -55,7 +65,10 @@ pub const App = struct {
     stack: *gtk.Stack = undefined,
     status: *adw.StatusPage = undefined,
     retry_button: *gtk.Button = undefined,
-    title: *gtk.Label = undefined,
+    find_bar: *gtk.Revealer = undefined,
+    find_entry: *gtk.SearchEntry = undefined,
+    find_count: *gtk.Label = undefined,
+    find_total: usize = 0,
     entry: *gtk.Entry = undefined,
     server: ?*Server = null,
     workspace: ?*Workspace = null,
@@ -117,30 +130,20 @@ pub const App = struct {
         side.addBottomBar(footer.as(gtk.Widget));
         side.setContent(scroller.as(gtk.Widget));
 
-        // Content: one rounded card with the window's title and pane buttons above its panes.
-        const title_row = gtk.Box.new(.horizontal, 2);
-        title_row.as(gtk.Widget).addCssClass("card-title");
-        // While the sidebar is hidden, the card carries the window controls and the toggle.
-        const start = gtk.Box.new(.horizontal, 2);
-        start.append(gtk.WindowControls.new(.start).as(gtk.Widget));
-        start.append(icons.button(.sidebar, "Show sidebar", "app.toggle-sidebar").as(gtk.Widget));
-        start.as(gtk.Widget).setVisible(0);
-        a.card_start = start.as(gtk.Widget);
-        title_row.append(start.as(gtk.Widget));
-        title_row.append(icons.image(.terminal, 16));
-        a.title = gtk.Label.new("Compy");
-        a.title.as(gtk.Widget).addCssClass("title");
-        a.title.setEllipsize(.end);
-        a.title.setXalign(0);
-        a.title.as(gtk.Widget).setHexpand(1);
-        a.title.as(gtk.Widget).setMarginStart(6);
-        title_row.append(a.title.as(gtk.Widget));
-        title_row.append(icons.button(.split_right, "Split right", "app.split-right").as(gtk.Widget));
-        title_row.append(icons.button(.split_down, "Split down", "app.split-down").as(gtk.Widget));
-        title_row.append(icons.button(.zoom, "Zoom pane", "app.zoom-pane").as(gtk.Widget));
-        title_row.append(icons.button(.close, "Close pane", "app.close-pane").as(gtk.Widget));
-        const handle = gtk.WindowHandle.new();
-        handle.setChild(title_row.as(gtk.Widget));
+        // Content: the panes, each its own card, on the window's background. While the sidebar is
+        // hidden, a slim strip above them carries the window controls and the sidebar toggle.
+        const strip = gtk.Box.new(.horizontal, 4);
+        strip.as(gtk.Widget).addCssClass("top-strip");
+        strip.append(gtk.WindowControls.new(.start).as(gtk.Widget));
+        strip.append(icons.button(.sidebar, "Show sidebar", "app.toggle-sidebar").as(gtk.Widget));
+        const strip_space = gtk.Box.new(.horizontal, 0);
+        strip_space.as(gtk.Widget).setHexpand(1);
+        strip.append(strip_space.as(gtk.Widget));
+        strip.append(gtk.WindowControls.new(.end).as(gtk.Widget));
+        const strip_handle = gtk.WindowHandle.new();
+        strip_handle.setChild(strip.as(gtk.Widget));
+        strip_handle.as(gtk.Widget).setVisible(0);
+        a.card_start = strip_handle.as(gtk.Widget);
 
         a.stack = gtk.Stack.new();
         a.stack.setTransitionType(.crossfade);
@@ -154,10 +157,32 @@ pub const App = struct {
         _ = a.stack.addNamed(a.status.as(gtk.Widget), "status");
         _ = a.stack.addNamed(a.connectPage(), "connect");
 
+        // Find, under the title.
+        const find_row = gtk.Box.new(.horizontal, 4);
+        find_row.as(gtk.Widget).addCssClass("find-bar");
+        a.find_entry = gtk.SearchEntry.new();
+        a.find_entry.as(gtk.Widget).setHexpand(1);
+        a.find_entry.setPlaceholderText("Find in pane");
+        _ = gtk.SearchEntry.signals.search_changed.connect(a.find_entry, *App, &findChanged, a, .{});
+        _ = gtk.SearchEntry.signals.activate.connect(a.find_entry, *App, &findNextSignal, a, .{});
+        _ = gtk.SearchEntry.signals.next_match.connect(a.find_entry, *App, &findNextSignal, a, .{});
+        _ = gtk.SearchEntry.signals.previous_match.connect(a.find_entry, *App, &findPrevSignal, a, .{});
+        _ = gtk.SearchEntry.signals.stop_search.connect(a.find_entry, *App, &findStopSignal, a, .{});
+        a.find_count = gtk.Label.new("");
+        a.find_count.as(gtk.Widget).addCssClass("find-count");
+        find_row.append(a.find_entry.as(gtk.Widget));
+        find_row.append(a.find_count.as(gtk.Widget));
+        find_row.append(icons.button(.up, "Newer match", "app.find-prev").as(gtk.Widget));
+        find_row.append(icons.button(.down, "Older match", "app.find-next").as(gtk.Widget));
+        find_row.append(icons.button(.close, "Close find", "app.find-close").as(gtk.Widget));
+        a.find_bar = gtk.Revealer.new();
+        a.find_bar.setChild(find_row.as(gtk.Widget));
+        a.find_bar.setTransitionType(.slide_down);
+
         const card = gtk.Box.new(.vertical, 0);
-        card.as(gtk.Widget).addCssClass("window-card");
-        card.as(gtk.Widget).setOverflow(.hidden);
-        card.append(handle.as(gtk.Widget));
+        card.as(gtk.Widget).addCssClass("content");
+        card.append(a.card_start);
+        card.append(a.find_bar.as(gtk.Widget));
         card.append(a.stack.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
 
@@ -182,7 +207,9 @@ pub const App = struct {
         } else {
             a.stack.setVisibleChildName("connect");
         }
-        win.present();
+        // When driven by tests, show the window without taking the keyboard from what the person
+        // is using; otherwise their typing lands in Compy.
+        if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
     }
 
     fn sidebarShown(split: *adw.OverlaySplitView, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
@@ -353,13 +380,6 @@ pub const App = struct {
         const v = s.sessionView(sid) orelse return;
         const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow();
         ws.show(sid, w);
-        var title_buf: [256]u8 = undefined;
-        const title = if (w) |win| windowTitle(&title_buf, win, v) else "No windows";
-        const label = sessionLabel(s, sid);
-        var sub_buf: [256]u8 = undefined;
-        const sub = std.fmt.bufPrintSentinel(&sub_buf, "{s}", .{label}, 0) catch "";
-        _ = sub;
-        a.title.setText(title.ptr);
         a.selectSidebarRow();
     }
 
@@ -470,6 +490,7 @@ pub const App = struct {
             const index = J.int(args, "index") orelse return false;
             return a.gotoWindow(index - 1);
         }
+        if (std.mem.eql(u8, action, "client.find.open")) return a.did(openFind);
         if (std.mem.eql(u8, action, "client.sidebar.toggle")) {
             a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
             return true;
@@ -524,7 +545,29 @@ pub const App = struct {
             .{ "retry", retry, "" },
             .{ "change-server", changeServer, "" },
             .{ "toggle-sidebar", toggleSidebar, "" },
+            .{ "find", openFind, "" },
+            .{ "find-next", findNext, "" },
+            .{ "find-prev", findPrev, "" },
+            .{ "find-close", closeFind, "" },
         };
+        // A pane's own buttons name the pane, which is focused first so the action acts on it.
+        inline for (.{
+            .{ "pane-split-right", splitRight },
+            .{ "pane-split-down", splitDown },
+            .{ "pane-zoom", zoomPane },
+            .{ "pane-close", closePane },
+        }) |e| {
+            const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
+            const Thunk = struct {
+                fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
+                    const block = std.mem.span(param.?.getString(null));
+                    if (app.workspace) |ws| ws.focus(block);
+                    e[1](app);
+                }
+            };
+            _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
+            a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
+        }
         inline for (.{ .{ "close-window", closeWindowAction }, .{ "rename-window", renameWindowAction } }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
@@ -649,6 +692,85 @@ pub const App = struct {
         if (ctx.app.server) |s| s.renameWindow(ctx.session_id, ctx.window_id, label);
     }
 
+    // Find.
+
+    fn findTerm(a: *App) ?*@import("term.zig").Term {
+        const ws = a.workspace orelse return null;
+        const tv = ws.focusedView() orelse return null;
+        return tv.term();
+    }
+
+    fn redrawFocused(a: *App) void {
+        const ws = a.workspace orelse return;
+        if (ws.focusedView()) |tv| tv.widget().queueDraw();
+    }
+
+    fn openFind(a: *App) void {
+        a.find_bar.setRevealChild(1);
+        _ = a.find_entry.as(gtk.Widget).grabFocus();
+    }
+
+    fn closeFind(a: *App) void {
+        a.find_bar.setRevealChild(0);
+        if (a.findTerm()) |t| t.endFind();
+        a.find_count.setText("");
+        a.redrawFocused();
+        if (a.workspace) |ws| ws.grabFocus();
+    }
+
+    pub fn findText(a: *App, text: []const u8) void {
+        const t = a.findTerm() orelse return;
+        if (text.len == 0) {
+            t.endFind();
+            a.find_total = 0;
+            a.find_count.setText("");
+        } else {
+            a.find_total = t.find(text);
+            a.showFindCount(if (a.find_total > 0) t.findStep(true) else null);
+        }
+        a.redrawFocused();
+    }
+
+    fn showFindCount(a: *App, index: ?usize) void {
+        var buf: [32]u8 = undefined;
+        const text = if (a.find_total == 0)
+            std.fmt.bufPrintSentinel(&buf, "None", .{}, 0) catch ""
+        else
+            std.fmt.bufPrintSentinel(&buf, "{d} of {d}", .{ (index orelse 0) + 1, a.find_total }, 0) catch "";
+        a.find_count.setText(text.ptr);
+    }
+
+    fn step(a: *App, older: bool) void {
+        const t = a.findTerm() orelse return;
+        if (!t.finding() or a.find_total == 0) return;
+        a.showFindCount(t.findStep(older));
+        a.redrawFocused();
+    }
+
+    fn findNext(a: *App) void {
+        a.step(true);
+    }
+
+    fn findPrev(a: *App) void {
+        a.step(false);
+    }
+
+    fn findChanged(entry: *gtk.SearchEntry, a: *App) callconv(.c) void {
+        a.findText(std.mem.span(entry.as(gtk.Editable).getText()));
+    }
+
+    fn findNextSignal(_: *gtk.SearchEntry, a: *App) callconv(.c) void {
+        a.findNext();
+    }
+
+    fn findPrevSignal(_: *gtk.SearchEntry, a: *App) callconv(.c) void {
+        a.findPrev();
+    }
+
+    fn findStopSignal(_: *gtk.SearchEntry, a: *App) callconv(.c) void {
+        a.closeFind();
+    }
+
     fn toggleSidebar(a: *App) void {
         a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
     }
@@ -667,6 +789,7 @@ fn appMenu() *gio.MenuModel {
     panes.append("Close pane", "app.close-pane");
     menu.appendSection(null, panes.as(gio.MenuModel));
     const other = gio.Menu.new();
+    other.append("Find…", "app.find");
     other.append("New window", "app.new-window");
     other.append("New session", "app.new-session");
     other.append("Change server…", "app.change-server");
@@ -730,9 +853,63 @@ fn setSlot(slot: *?[]u8, value: ?[]const u8) void {
 var shot_app: ?*App = null;
 
 fn installShotHook(a: *App) void {
-    if (std.c.getenv("COMPY_SHOT") == null) return;
     shot_app = a;
-    _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &takeShot, null);
+    if (std.c.getenv("COMPY_SHOT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &takeShot, null);
+    if (std.c.getenv("COMPY_SCRIPT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR2), &runScript, null);
+}
+
+/// Development: SIGUSR2 runs the commands in $COMPY_SCRIPT against the focused pane, so
+/// selection and find can be checked without a mouse. One command per line:
+/// `find TEXT`, `select X1 Y1 X2 Y2`, `word X Y`, `copy`, `type TEXT`, `close-find`.
+fn runScript(_: ?*anyopaque) callconv(.c) c_int {
+    const a = shot_app orelse return 1;
+    const path = std.c.getenv("COMPY_SCRIPT") orelse return 1;
+    var contents: [*]u8 = undefined;
+    var len: usize = 0;
+    if (glib.fileGetContents(path, &contents, &len, null) == 0) return 1;
+    defer glib.free(contents);
+    const ws = a.workspace orelse return 1;
+    var lines = std.mem.splitScalar(u8, contents[0..len], '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \r");
+        var it = std.mem.tokenizeScalar(u8, line, ' ');
+        const cmd = it.next() orelse continue;
+        const rest = std.mem.trim(u8, line[cmd.len..], " ");
+        const tv = ws.focusedView() orelse {
+            std.log.info("script: no pane for {s}", .{cmd});
+            continue;
+        };
+        const t = tv.term() orelse {
+            std.log.info("script: no terminal for {s}", .{cmd});
+            continue;
+        };
+        std.log.info("script: {s}", .{cmd});
+        if (std.mem.eql(u8, cmd, "find")) {
+            a.openFind();
+            const z = gpa.dupeSentinel(u8, rest, 0) catch continue;
+            defer gpa.free(z);
+            a.find_entry.as(gtk.Editable).setText(z.ptr);
+        } else if (std.mem.eql(u8, cmd, "close-find")) {
+            a.closeFind();
+        } else if (std.mem.eql(u8, cmd, "select")) {
+            var n: [4]u16 = .{ 0, 0, 0, 0 };
+            for (&n) |*v| v.* = std.fmt.parseInt(u16, it.next() orelse "0", 10) catch 0;
+            t.selectRange(n[0], n[1], n[2], n[3]);
+        } else if (std.mem.eql(u8, cmd, "word")) {
+            const x = std.fmt.parseInt(u16, it.next() orelse "0", 10) catch 0;
+            const y = std.fmt.parseInt(u16, it.next() orelse "0", 10) catch 0;
+            t.selectWord(x, y);
+        } else if (std.mem.eql(u8, cmd, "copy")) {
+            tv.copySelection(false);
+        } else if (std.mem.eql(u8, cmd, "type")) {
+            const view_ = std.unicode.Utf8View.init(rest) catch continue;
+            var cps = view_.iterator();
+            while (cps.nextCodepoint()) |cp| a.server.?.sendKey(tv.session_id, tv.block_id, @import("keys.zig").forChar(cp, 0));
+            a.server.?.sendKey(tv.session_id, tv.block_id, @import("keys.zig").fromGdk(0xff0d, 0, 0).?);
+        }
+        tv.widget().queueDraw();
+    }
+    return 1;
 }
 
 fn takeShot(_: ?*anyopaque) callconv(.c) c_int {

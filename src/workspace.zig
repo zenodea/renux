@@ -6,15 +6,19 @@ const gtk = @import("gtk");
 const view = @import("view.zig");
 const Server = @import("server.zig").Server;
 const TermView = @import("termview.zig").TermView;
+const icons = @import("icons.zig");
+const glib = @import("glib");
 
 const gpa = std.heap.c_allocator;
 
-/// Space between panes, which the workspace's background shows through as a divider line.
-pub var gap: f64 = 1;
+/// Space between pane cards.
+pub var gap: f64 = 8;
 
 const Pane = struct {
     block_id: []u8,
+    /// The pane's card: its title row above the terminal.
     frame: *gtk.Widget,
+    floating: bool = false,
     term: *TermView,
     rect: view.Rect = .{},
     seen: bool = false,
@@ -100,12 +104,12 @@ pub const Workspace = struct {
     /// Places a floating layer's panes inside its bounds.
     fn placeNodeIn(ws: *Workspace, session_id: []const u8, node: *const view.Node, bounds: view.Rect) void {
         switch (node.*) {
-            .leaf => |l| ws.place(session_id, l.block_id, .{
+            .leaf => |l| ws.placeAs(session_id, l.block_id, .{
                 .x = bounds.x + l.rect.x * bounds.w,
                 .y = bounds.y + l.rect.y * bounds.h,
                 .w = l.rect.w * bounds.w,
                 .h = l.rect.h * bounds.h,
-            }),
+            }, true),
             .split => |s| {
                 ws.placeNodeIn(session_id, s.before, bounds);
                 ws.placeNodeIn(session_id, s.after, bounds);
@@ -114,22 +118,66 @@ pub const Workspace = struct {
     }
 
     fn place(ws: *Workspace, session_id: []const u8, block_id: []const u8, rect: view.Rect) void {
+        ws.placeAs(session_id, block_id, rect, false);
+    }
+
+    fn placeAs(ws: *Workspace, session_id: []const u8, block_id: []const u8, rect: view.Rect, floating: bool) void {
         for (ws.panes.items) |*p| if (std.mem.eql(u8, p.block_id, block_id)) {
             p.rect = rect;
             p.seen = true;
+            if (p.floating != floating) {
+                p.floating = floating;
+                if (floating) p.frame.addCssClass("floating") else p.frame.removeCssClass("floating");
+            }
             return;
         };
         const tv = TermView.create(ws.server, session_id, block_id) catch return;
         tv.on_focus = .{ .ctx = ws, .f = clicked };
-        const frame = tv.widget();
-        frame.addCssClass("pane");
+
+        // The title row: the program's icon and title, then this pane's buttons.
+        const row = gtk.Box.new(.horizontal, 2);
+        row.as(gtk.Widget).addCssClass("pane-title");
+        row.append(icons.image(.terminal, 15));
+        const label = gtk.Label.new(null);
+        label.as(gtk.Widget).addCssClass("title");
+        label.setEllipsize(.end);
+        label.setXalign(0);
+        label.as(gtk.Widget).setHexpand(1);
+        label.as(gtk.Widget).setMarginStart(6);
+        row.append(label.as(gtk.Widget));
+        const tools = gtk.Box.new(.horizontal, 0);
+        tools.as(gtk.Widget).addCssClass("pane-tools");
+        inline for (.{
+            .{ icons.Kind.split_right, "Split right", "app.pane-split-right" },
+            .{ icons.Kind.split_down, "Split down", "app.pane-split-down" },
+            .{ icons.Kind.zoom, "Zoom", "app.pane-zoom" },
+            .{ icons.Kind.close, "Close pane", "app.pane-close" },
+        }) |b| {
+            const button = icons.button(b[0], b[1], b[2]);
+            const target = gpa.dupeSentinel(u8, block_id, 0) catch return;
+            defer gpa.free(target);
+            button.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(target.ptr));
+            tools.append(button.as(gtk.Widget));
+        }
+        row.append(tools.as(gtk.Widget));
+        const handle = gtk.WindowHandle.new();
+        handle.setChild(row.as(gtk.Widget));
+
+        const card = gtk.Box.new(.vertical, 0);
+        const frame = card.as(gtk.Widget);
+        frame.addCssClass("pane-card");
+        if (floating) frame.addCssClass("floating");
         frame.setOverflow(.hidden);
+        card.append(handle.as(gtk.Widget));
+        card.append(tv.widget());
+        tv.setTitleLabel(label);
         frame.setParent(ws.root);
         ws.panes.append(gpa, .{
             .block_id = gpa.dupe(u8, block_id) catch return,
             .frame = frame,
             .term = tv,
             .rect = rect,
+            .floating = floating,
             .seen = true,
         }) catch {};
     }
@@ -152,11 +200,22 @@ pub const Workspace = struct {
     pub fn grabFocus(ws: *Workspace) void {
         for (ws.panes.items) |p| {
             if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) {
-                _ = p.frame.grabFocus();
+                _ = p.term.widget().grabFocus();
                 return;
             };
         }
-        if (ws.panes.items.len > 0) _ = ws.panes.items[0].frame.grabFocus();
+        if (ws.panes.items.len > 0) _ = ws.panes.items[0].term.widget().grabFocus();
+    }
+
+    /// Marks a pane focused here and on the server, such as before acting on it.
+    pub fn focus(ws: *Workspace, block_id: []const u8) void {
+        clicked(ws, block_id);
+    }
+
+    /// The focused pane's terminal view.
+    pub fn focusedView(ws: *Workspace) ?*TermView {
+        for (ws.panes.items) |p| if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) return p.term;
+        return if (ws.panes.items.len > 0) ws.panes.items[0].term else null;
     }
 
     /// The pane with the keyboard, or the one the server says is focused.

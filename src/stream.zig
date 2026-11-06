@@ -163,8 +163,9 @@ pub const Stream = struct {
 
     fn applyColors(s: *Stream) void {
         const t = s.term orelse return;
+        const theme = @import("theme.zig");
         const c = s.theme orelse s.server.host_colors orelse Colors{};
-        t.setColors(c.fg, c.bg, c.cursor, if (c.palette) |*p| p else null);
+        t.setColors(if (c.fg != 0) c.fg else theme.default_fg, if (c.bg != 0) c.bg else theme.default_bg, c.cursor, if (c.palette) |*p| p else null);
     }
 
     fn cancelRetry(s: *Stream) void {

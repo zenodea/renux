@@ -4,6 +4,10 @@
 const std = @import("std");
 const Colors = @import("stream.zig").Colors;
 
+/// Colors for a terminal whose host reports no theme: a neutral dark one.
+pub const default_bg: u32 = 0xFF1E1E1E;
+pub const default_fg: u32 = 0xFFD4D4D4;
+
 pub const Rgb = struct {
     r: f64,
     g: f64,
@@ -53,8 +57,8 @@ pub const Palette = struct {
     shell: Rgb,
 
     pub fn from(c: Colors) Palette {
-        const bg = Rgb.of(if (c.bg != 0) c.bg else 0x1d1f21);
-        const fg = Rgb.of(if (c.fg != 0) c.fg else 0xc5c8c6);
+        const bg = Rgb.of(if (c.bg != 0) c.bg else default_bg);
+        const fg = Rgb.of(if (c.fg != 0) c.fg else default_fg);
         const dark = bg.luma() < fg.luma();
         const p = if (c.palette) |*pal| pal else &@import("stream.zig").builtin_palette;
         const accent = Rgb.of(if (c.cursor != 0 and c.cursor != c.fg) c.cursor else p[4]);
