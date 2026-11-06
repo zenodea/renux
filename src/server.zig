@@ -29,6 +29,11 @@ pub const Observer = struct {
     changed: *const fn (ctx: *anyopaque, what: Change, session_id: ?[]const u8) void,
 };
 
+pub const Performer = struct {
+    ctx: *anyopaque,
+    perform: *const fn (ctx: *anyopaque, action: []const u8, args: ?json.Value, session_id: ?[]const u8) bool,
+};
+
 pub const Server = struct {
     url: []u8,
     client_label: []u8,
@@ -52,6 +57,8 @@ pub const Server = struct {
     streams: std.StringHashMapUnmanaged(*Stream) = .empty,
     host_colors: ?stream_mod.Colors = null,
     observer: ?Observer = null,
+    /// Runs the client.* actions a key binding or script asks this client for. True if done.
+    performer: ?Performer = null,
 
     pub fn create(url: []const u8) !*Server {
         const s = try gpa.create(Server);
@@ -226,6 +233,11 @@ pub const Server = struct {
     fn onEvent(ctx: *anyopaque, c: *Control, kind: []const u8, payload: ?json.Value) void {
         const s: *Server = @ptrCast(@alignCast(ctx));
         if (c != s.control and c != s.attempt) return;
+        if (std.c.getenv("COMPY_DEBUG") != null) {
+            const text = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch "";
+            defer gpa.free(text);
+            log.info("event {s}: {s}", .{ kind, text[0..@min(text.len, 300)] });
+        }
         if (eql(kind, "session_created")) {
             const session = json.get(payload, "session");
             const id = json.str(session, "session_id") orelse return;
@@ -293,15 +305,16 @@ pub const Server = struct {
     /// so every request gets one, even if it's only that Compy can't do it.
     fn handlePerform(s: *Server, payload: json.Value) void {
         const call_id = json.str(payload, "call_id") orelse return;
-        if (eql(json.str(payload, "action") orelse "", "session.select")) {
-            const args = json.get(payload, "args");
-            if (json.str(args, "window_id")) |w| if (json.str(args, "session_id") orelse json.str(payload, "session_id")) |sid| {
-                s.focusWindow(sid, w);
-            };
-            s.reply(call_id, null, null);
-        } else {
-            s.reply(call_id, "not_supported", "Compy can't do that yet");
+        const action = json.str(payload, "action") orelse "";
+        const args = json.get(payload, "args");
+        const session_id = json.str(args, "session_id") orelse json.str(payload, "session_id");
+        if (eql(action, "session.select")) {
+            if (json.str(args, "window_id")) |w| if (session_id) |sid| s.focusWindow(sid, w);
+            if (s.performer) |p| _ = p.perform(p.ctx, action, args, session_id);
+            return s.reply(call_id, null, null);
         }
+        if (s.performer) |p| if (p.perform(p.ctx, action, args, session_id)) return s.reply(call_id, null, null);
+        s.reply(call_id, "not_supported", "Compy can't do that yet");
     }
 
     fn reply(s: *Server, call_id: []const u8, code: ?[]const u8, message: ?[]const u8) void {

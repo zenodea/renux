@@ -34,6 +34,7 @@ pub const App = struct {
     window: *adw.ApplicationWindow = undefined,
     toasts: *adw.ToastOverlay = undefined,
     sidebar: *gtk.ListBox = undefined,
+    split: *adw.OverlaySplitView = undefined,
     stack: *gtk.Stack = undefined,
     status: *adw.StatusPage = undefined,
     retry_button: *gtk.Button = undefined,
@@ -97,7 +98,7 @@ pub const App = struct {
         header.setTitleWidget(a.title.as(gtk.Widget));
         header.packEnd(paneMenu().as(gtk.Widget));
         const new_window = gtk.Button.newFromIconName("tab-new-symbolic");
-        new_window.as(gtk.Widget).setTooltipText("New window (Ctrl+Shift+T)");
+        new_window.as(gtk.Widget).setTooltipText("New window");
         new_window.as(gtk.Actionable).setActionName("app.new-window");
         header.packEnd(new_window.as(gtk.Widget));
 
@@ -117,6 +118,7 @@ pub const App = struct {
         content.setContent(a.stack.as(gtk.Widget));
 
         const split = adw.OverlaySplitView.new();
+        a.split = split;
         split.setSidebar(side.as(gtk.Widget));
         split.setContent(content.as(gtk.Widget));
         split.setMinSidebarWidth(200);
@@ -184,6 +186,7 @@ pub const App = struct {
         }
         const s = Server.create(url) catch return;
         s.observer = .{ .ctx = a, .changed = serverChanged };
+        s.performer = .{ .ctx = a, .perform = perform };
         a.server = s;
         const ws = Workspace.create(s) catch return;
         a.workspace = ws;
@@ -378,16 +381,86 @@ pub const App = struct {
         if (a.workspace) |w| w.grabFocus();
     }
 
-    // Actions and shortcuts.
+    // client.* actions. Key bindings live in the person's Lua config on the server; the server
+    // runs its own actions and asks the client for these.
+
+    fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
+        const a: *App = @ptrCast(@alignCast(ctx));
+        const J = @import("json.zig");
+        if (session_id) |sid| if (!eqlOpt(a.session_id, sid)) {
+            setSlot(&a.session_id, sid);
+            setSlot(&a.window_id, null);
+        };
+        if (std.mem.eql(u8, action, "session.select")) {
+            setSlot(&a.window_id, J.str(args, "window_id"));
+            a.showSelected();
+            a.rebuildSidebar();
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.tab.new")) return a.did(newWindow);
+        if (std.mem.eql(u8, action, "client.tab.close")) {
+            const s = a.server orelse return false;
+            const sid = a.session_id orelse return false;
+            const w = a.shownWindow() orelse return false;
+            s.closeWindow(sid, w.id);
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.tab.next")) return a.stepWindow(1);
+        if (std.mem.eql(u8, action, "client.tab.previous")) return a.stepWindow(-1);
+        if (std.mem.eql(u8, action, "client.tab.goto")) {
+            const index = J.int(args, "index") orelse return false;
+            return a.gotoWindow(index - 1);
+        }
+        if (std.mem.eql(u8, action, "client.sidebar.toggle")) {
+            a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
+            return true;
+        }
+        return false;
+    }
+
+    fn did(a: *App, comptime f: fn (*App) void) bool {
+        f(a);
+        return true;
+    }
+
+    fn shownWindow(a: *App) ?*const view.Window {
+        const s = a.server orelse return null;
+        const v = s.sessionView(a.session_id orelse return null) orelse return null;
+        return (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow();
+    }
+
+    fn stepWindow(a: *App, delta: i64) bool {
+        const s = a.server orelse return false;
+        const v = s.sessionView(a.session_id orelse return false) orelse return false;
+        const w = a.shownWindow() orelse return false;
+        const n: i64 = @intCast(v.windows.len);
+        for (v.windows, 0..) |*other, i| if (other == w) return a.gotoWindow(@mod(@as(i64, @intCast(i)) + delta, n));
+        return false;
+    }
+
+    fn gotoWindow(a: *App, index: i64) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const v = s.sessionView(sid) orelse return false;
+        if (index < 0 or index >= v.windows.len) return false;
+        const w = v.windows[@intCast(index)];
+        setSlot(&a.window_id, w.id);
+        s.focusWindow(sid, w.id);
+        a.showSelected();
+        if (a.workspace) |ws| ws.grabFocus();
+        return true;
+    }
+
+    // Actions, for the menu.
 
     fn addActions(a: *App) void {
         const entries = [_]struct { [:0]const u8, *const fn (*App) void, [:0]const u8 }{
-            .{ "split-right", splitRight, "<Ctrl><Shift>o" },
-            .{ "split-down", splitDown, "<Ctrl><Shift>e" },
-            .{ "close-pane", closePane, "<Ctrl><Shift>w" },
-            .{ "zoom-pane", zoomPane, "<Ctrl><Shift>Return" },
-            .{ "new-window", newWindow, "<Ctrl><Shift>t" },
-            .{ "new-session", newSession, "<Ctrl><Shift>n" },
+            .{ "split-right", splitRight, "" },
+            .{ "split-down", splitDown, "" },
+            .{ "close-pane", closePane, "" },
+            .{ "zoom-pane", zoomPane, "" },
+            .{ "new-window", newWindow, "" },
+            .{ "new-session", newSession, "" },
             .{ "paste", paste, "" },
             .{ "retry", retry, "" },
             .{ "change-server", changeServer, "" },
@@ -500,6 +573,10 @@ fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0
 fn sessionLabel(s: *Server, id: []const u8) []const u8 {
     for (s.sessions.items) |session| if (std.mem.eql(u8, session.id, id)) return if (session.label.len > 0) session.label else "Session";
     return "";
+}
+
+fn eqlOpt(a: ?[]const u8, b: []const u8) bool {
+    return if (a) |x| std.mem.eql(u8, x, b) else false;
 }
 
 fn setSlot(slot: *?[]u8, value: ?[]const u8) void {
