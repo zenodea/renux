@@ -305,7 +305,7 @@ pub const App = struct {
 
     fn connectPage(a: *App) *gtk.Widget {
         const page = adw.StatusPage.new();
-        page.setIconName("network-server-symbolic");
+        
         page.setTitle("Connect to Rex");
         page.setDescription("Enter the address your Rex server listens on, such as http://my-mac:8765.");
         const box = gtk.Box.new(.vertical, 12);
@@ -344,6 +344,9 @@ pub const App = struct {
 
     /// Connects to another Rex server. Its sessions join the sidebar under its name.
     pub fn addHost(a: *App, label: []const u8, url: []const u8) ?*Host {
+        if (a.hasHostUrl(url)) {
+            for (a.hosts.items) |x| if (std.mem.eql(u8, x.server.url, std.mem.trimEnd(u8, url, "/"))) return x;
+        }
         const s = Server.create(url, clientLabel()) catch return null;
         const ws = Workspace.create(s) catch return null;
         const h = gpa.create(Host) catch return null;
@@ -495,7 +498,7 @@ pub const App = struct {
                 a.was_online = true;
             },
             .connecting => if (!a.was_online) {
-                a.status.setIconName("network-transmit-receive-symbolic");
+                a.status.setIconName(null);
                 a.status.setTitle("Connecting…");
                 a.status.setDescription(null);
                 a.retry_button.as(gtk.Widget).setVisible(0);
@@ -505,7 +508,7 @@ pub const App = struct {
                 a.was_online = false;
                 const reason = gpa.dupeSentinel(u8, s.reason.items, 0) catch return;
                 defer gpa.free(reason);
-                a.status.setIconName("network-offline-symbolic");
+                a.status.setIconName(null);
                 a.status.setTitle("Can't reach Rex");
                 a.status.setDescription(reason.ptr);
                 a.retry_button.as(gtk.Widget).setVisible(1);

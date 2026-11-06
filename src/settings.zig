@@ -131,6 +131,9 @@ pub fn labelFor(url: []const u8) []const u8 {
 }
 
 fn addHostNoSave(label: []const u8, url: []const u8) void {
+    // One entry per address, which also drops repeats saved before this check.
+    const clean = std.mem.trimEnd(u8, url, "/");
+    for (current.hosts.items) |h| if (std.mem.eql(u8, h.url, clean)) return;
     current.hosts.append(gpa, .{
         .label = gpa.dupe(u8, label) catch return,
         .url = gpa.dupe(u8, std.mem.trimEnd(u8, url, "/")) catch return,

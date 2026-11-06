@@ -192,7 +192,9 @@ fn run(s: *Socket) !void {
     const uri = try std.fmt.allocPrintSentinel(gpa, "{s}{s}", .{ s.url, s.path }, 0);
     defer gpa.free(uri);
     var err: ?*glib.Error = null;
-    const conn = client.connectToUri(uri.ptr, 80, s.cancellable, &err) orelse {
+    // GIO only takes the port from the address itself, so give it the scheme's usual one.
+    const tls = std.mem.startsWith(u8, s.url, "https://");
+    const conn = client.connectToUri(uri.ptr, if (tls) 443 else 80, s.cancellable, &err) orelse {
         const msg: []const u8 = if (err) |e| std.mem.span(e.f_message orelse "") else "";
         log.info("connect {s} failed: {s}", .{ uri, msg });
         if (err) |e| e.free();
