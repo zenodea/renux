@@ -24,4 +24,5 @@ test {
     _ = @import("settings.zig");
     _ = @import("themes.zig");
     _ = @import("settings_window.zig");
+    _ = @import("tailscale.zig");
 }

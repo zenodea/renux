@@ -440,6 +440,7 @@ pub const App = struct {
             },
             .alert => a.showAlert(h),
             .keymap => {},
+            .hosts => a.importListedHosts(h),
             .message => {
                 const s = h.server;
                 const text = gpa.dupeSentinel(u8, s.message.items, 0) catch return;
@@ -603,9 +604,33 @@ pub const App = struct {
         a.rebuildSidebar();
     }
 
-    /// Asks for a Rex server's address, saves it, and connects.
+    /// Adds the hosts a server listed that Compy doesn't have yet.
+    pub fn importListedHosts(a: *App, h: *Host) void {
+        var added: usize = 0;
+        for (h.server.listed_hosts) |lh| {
+            if (a.hasHostUrl(lh.url)) continue;
+            settings.addHost(lh.label, lh.url);
+            _ = a.addHost(lh.label, lh.url);
+            added += 1;
+        }
+        var buf: [96]u8 = undefined;
+        const text = if (added == 0)
+            std.fmt.bufPrintSentinel(&buf, "No new hosts on {s}", .{h.label}, 0) catch return
+        else
+            std.fmt.bufPrintSentinel(&buf, "Added {d} host{s} from {s}", .{ added, if (added == 1) "" else "s", h.label }, 0) catch return;
+        a.toasts.addToast(adw.Toast.new(text.ptr));
+    }
+
+    pub fn hasHostUrl(a: *App, url: []const u8) bool {
+        const want = std.mem.trimEnd(u8, url, "/");
+        for (a.hosts.items) |x| if (std.mem.eql(u8, x.server.url, want)) return true;
+        return false;
+    }
+
+    /// Asks for a Rex server's address, saves it, and connects. Rex devices on this computer's
+    /// tailnet are offered with one click, and an address on the clipboard is filled in.
     fn addHostDialog(a: *App) void {
-        const dialog = adw.AlertDialog.new("Add Remote Host", "A Rex HTTP or HTTPS address, such as a Tailscale one");
+        const dialog = adw.AlertDialog.new("Add Remote Host", "A Rex HTTP or HTTPS address, such as the one Rex's Pair button shows");
         const box = gtk.Box.new(.vertical, 8);
         const url = gtk.Entry.new();
         url.setPlaceholderText("https://my-mac-rex.tailnet.ts.net");
@@ -615,6 +640,30 @@ pub const App = struct {
         name.setActivatesDefault(1);
         box.append(url.as(gtk.Widget));
         box.append(name.as(gtk.Widget));
+        var ts = @import("tailscale.zig").read();
+        defer ts.deinit();
+        var offered: usize = 0;
+        for (ts.rex_hosts.items) |peer| {
+            if (a.hasHostUrl(peer.url)) continue;
+            if (offered == 0) {
+                const heading = gtk.Label.new("On your tailnet");
+                heading.setXalign(0);
+                heading.as(gtk.Widget).addCssClass("dim-label");
+                heading.as(gtk.Widget).setMarginTop(8);
+                box.append(heading.as(gtk.Widget));
+            }
+            offered += 1;
+            var buf: [256]u8 = undefined;
+            const text = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ peer.name, if (peer.online) "" else " (offline)" }, 0) catch continue;
+            const b = gtk.Button.newWithLabel(text.ptr);
+            b.as(gtk.Widget).addCssClass("flat");
+            const pick = gpa.create(TailnetPick) catch continue;
+            pick.* = .{ .entry = url, .name = name, .url = gpa.dupeSentinel(u8, peer.url, 0) catch continue, .label = gpa.dupeSentinel(u8, peer.name, 0) catch continue };
+            _ = gtk.Button.signals.clicked.connect(b, *TailnetPick, &tailnetPicked, pick, .{});
+            box.append(b.as(gtk.Widget));
+        }
+        // An address copied from Rex's Pair screen is likely what's wanted.
+        a.window.as(gtk.Widget).getClipboard().readTextAsync(null, &clipboardForUrl, url);
         dialog.setExtraChild(box.as(gtk.Widget));
         dialog.addResponse("cancel", "Cancel");
         dialog.addResponse("add", "Add");
@@ -627,6 +676,26 @@ pub const App = struct {
     }
 
     const AddHostCtx = struct { app: *App, url: *gtk.Entry, name: *gtk.Entry };
+
+    const TailnetPick = struct { entry: *gtk.Entry, name: *gtk.Entry, url: [:0]u8, label: [:0]u8 };
+
+    fn tailnetPicked(_: *gtk.Button, p: *TailnetPick) callconv(.c) void {
+        p.entry.as(gtk.Editable).setText(p.url.ptr);
+        p.name.as(gtk.Editable).setText(p.label.ptr);
+    }
+
+    fn clipboardForUrl(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const entry: *gtk.Entry = @ptrCast(@alignCast(data.?));
+        const clipboard: *gdk.Clipboard = @ptrCast(source orelse return);
+        const text = clipboard.readTextFinish(result, null) orelse return;
+        defer glib.free(text);
+        const t = std.mem.span(text);
+        if (!@import("tailscale.zig").looksLikeAddress(t)) return;
+        if (std.mem.span(entry.as(gtk.Editable).getText()).len > 0) return;
+        const trimmed = gpa.dupeSentinel(u8, std.mem.trim(u8, t, " \n\r\t"), 0) catch return;
+        defer gpa.free(trimmed);
+        entry.as(gtk.Editable).setText(trimmed.ptr);
+    }
 
     fn hostAdded(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *AddHostCtx) callconv(.c) void {
         defer gpa.destroy(ctx);

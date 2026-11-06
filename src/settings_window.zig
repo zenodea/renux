@@ -197,6 +197,25 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
         g.add(status.as(gtk.Widget));
     }
 
+    // This computer's Tailscale, which Rex servers often use to let it in.
+    const tsg = group(p, "Tailscale", "Read from this computer. Rex's own Tailscale settings live in the Rex app on the server's machine.");
+    var ts = @import("tailscale.zig").read();
+    defer ts.deinit();
+    const ts_row = adw.ActionRow.new();
+    if (ts.running) {
+        var tb: [256]u8 = undefined;
+        const title = std.fmt.bufPrintSentinel(&tb, "Signed in{s}{s}", .{ if (ts.login != null) " as " else "", ts.login orelse "" }, 0) catch "Signed in";
+        ts_row.as(adw.PreferencesRow).setTitle(title.ptr);
+        var sb: [256]u8 = undefined;
+        const sub = std.fmt.bufPrintSentinel(&sb, "{s}{s}{d} Rex host{s} on the tailnet", .{ ts.tailnet orelse "", if (ts.tailnet != null) " · " else "", ts.rex_hosts.items.len, if (ts.rex_hosts.items.len == 1) "" else "s" }, 0) catch "";
+        ts_row.setSubtitle(sub.ptr);
+    } else {
+        ts_row.as(adw.PreferencesRow).setTitle("Not on Tailscale");
+        const why = gpa.dupeSentinel(u8, ts.problem orelse "Tailscale isn't connected", 0) catch "";
+        ts_row.setSubtitle(why.ptr);
+    }
+    tsg.add(ts_row.as(gtk.Widget));
+
     const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. It applies on the next connection.");
     const label = adw.EntryRow.new();
     label.as(adw.PreferencesRow).setTitle("Label");
@@ -446,11 +465,17 @@ fn hostsPage(ctx: *Ctx) *gtk.Widget {
         row.setSubtitle("Add a Rex HTTP or HTTPS address to use its sessions here");
         g.add(row.as(gtk.Widget));
     }
+    const buttons = gtk.Box.new(.horizontal, 8);
+    buttons.as(gtk.Widget).setHalign(.end);
+    buttons.as(gtk.Widget).setMarginTop(12);
+    const import_button = gtk.Button.newWithLabel("Import From Server");
+    import_button.as(gtk.Widget).setTooltipText("Add the hosts the server you're looking at already knows");
+    _ = gtk.Button.signals.clicked.connect(import_button, *Ctx, &importHosts, ctx, .{});
+    buttons.append(import_button.as(gtk.Widget));
     const add = gtk.Button.newWithLabel("Add Remote Host…");
-    add.as(gtk.Widget).setHalign(.end);
-    add.as(gtk.Widget).setMarginTop(12);
     add.as(gtk.Actionable).setActionName("app.add-host");
-    g.add(add.as(gtk.Widget));
+    buttons.append(add.as(gtk.Widget));
+    g.add(buttons.as(gtk.Widget));
     return p.as(gtk.Widget);
 }
 
@@ -465,4 +490,8 @@ fn removeHost(_: *gtk.Button, hr: *HostRow) callconv(.c) void {
     };
     settings.removeHost(hr.index);
     _ = hr.ctx.dialog.close();
+}
+
+fn importHosts(_: *gtk.Button, ctx: *Ctx) callconv(.c) void {
+    if (ctx.app.server) |s| s.fetchHosts();
 }

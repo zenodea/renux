@@ -22,7 +22,9 @@ pub const Session = struct {
     label: []u8,
 };
 
-pub const Change = enum { state, sessions, view, message, block, alert, keymap };
+pub const Change = enum { state, sessions, view, message, block, alert, keymap, hosts };
+
+pub const ListedHost = struct { label: []const u8, url: []const u8 };
 
 /// An action from the person's Rex config that Compy can run, with the keys bound to it.
 pub const Action = struct {
@@ -109,6 +111,9 @@ pub const Server = struct {
     observer: ?Observer = null,
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
     actions: []Action = &.{},
+    hosts_arena: std.heap.ArenaAllocator = .init(gpa),
+    /// The other hosts this server knows, from the last hosts.list.
+    listed_hosts: []ListedHost = &.{},
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
     performer: ?Performer = null,
 
@@ -150,6 +155,7 @@ pub const Server = struct {
         s.reason.deinit(gpa);
         s.message.deinit(gpa);
         s.keymap_arena.deinit();
+        s.hosts_arena.deinit();
         if (s.reconnect_token) |t| gpa.free(t);
         if (s.rex_version) |v| gpa.free(v);
         gpa.free(s.url);
@@ -196,7 +202,12 @@ pub const Server = struct {
 
     fn scheduleReconnect(s: *Server, reason: []const u8) void {
         if (!s.wanted) return;
-        s.setState(.offline, reason);
+        // Rex can limit access to one Tailscale account; say what to do about it.
+        const explained = if (std.mem.eql(u8, reason, "This server doesn't allow your account"))
+            "This server only allows its owner's Tailscale account. Sign this computer in to Tailscale with that account."
+        else
+            reason;
+        s.setState(.offline, explained);
         const wait: c_uint = @min(30_000, @as(c_uint, 1000) << @min(s.retries, 5));
         if (s.retries < 31) s.retries += 1;
         if (s.retry_timer != 0) _ = glib.Source.remove(s.retry_timer);
@@ -1013,6 +1024,38 @@ pub const Server = struct {
         }
         s.actions = list.items;
         s.notify(.keymap, null);
+    }
+
+    /// Asks the server which other hosts it knows; the answer arrives as a `hosts` change.
+    pub fn fetchHosts(s: *Server) void {
+        s.call("hosts.list", .{}, void, {}, gotHosts);
+    }
+
+    fn gotHosts(s: *Server, _: *void, r: Result) void {
+        const payload = switch (r) {
+            .ok => |p| p,
+            .err => |e| return s.showMessage(e.message),
+        };
+        _ = s.hosts_arena.reset(.free_all);
+        const a = s.hosts_arena.allocator();
+        var list: std.ArrayList(ListedHost) = .empty;
+        for (json.array(payload, "hosts")) |h| {
+            // The first web address is the one a client connects to.
+            var url: ?[]const u8 = null;
+            for (json.array(h, "endpoints")) |e| switch (e) {
+                .string => |t| if (url == null and (std.mem.startsWith(u8, t, "http://") or std.mem.startsWith(u8, t, "https://"))) {
+                    url = t;
+                },
+                else => {},
+            };
+            const u = url orelse continue;
+            list.append(a, .{
+                .label = a.dupe(u8, json.str(h, "label") orelse json.str(h, "id") orelse "Host") catch continue,
+                .url = a.dupe(u8, u) catch continue,
+            }) catch {};
+        }
+        s.listed_hosts = list.items;
+        s.notify(.hosts, null);
     }
 
     /// Runs one of the person's Rex actions, as the palette does.
