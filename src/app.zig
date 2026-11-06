@@ -458,6 +458,12 @@ pub const App = struct {
             .alert => a.showAlert(h),
             .keymap => {},
             .hosts => a.importListedHosts(h),
+            .bell => if (here) if (session_id) |b| if (h.workspace.paneOf(b)) |p| p.term.flash(),
+            .clipboard => {
+                const z = gpa.dupeSentinel(u8, h.server.clipboard_text.items, 0) catch return;
+                defer gpa.free(z);
+                a.window.as(gtk.Widget).getClipboard().setText(z.ptr);
+            },
             .message => {
                 const s = h.server;
                 const text = gpa.dupeSentinel(u8, s.message.items, 0) catch return;

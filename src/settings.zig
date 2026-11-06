@@ -24,6 +24,9 @@ pub const Settings = struct {
     alert_done: bool = true,
     sound: bool = false,
     terminal_notifications: bool = true,
+    improve_contrast: bool = true,
+    visual_bell: bool = true,
+    paste_warning: bool = true,
     /// Empty follows each host's theme; otherwise a built-in theme's name or `file:PATH`.
     theme: []u8,
     /// Empty uses this computer's name.
@@ -88,6 +91,9 @@ pub fn load() void {
     s.alert_done = boolean(kf, "alert-done", true);
     s.sound = boolean(kf, "sound", false);
     s.terminal_notifications = boolean(kf, "terminal-notifications", true);
+    s.improve_contrast = boolean(kf, "improve-contrast", true);
+    s.visual_bell = boolean(kf, "visual-bell", true);
+    s.paste_warning = boolean(kf, "paste-warning", true);
 
     // Hosts are stored as matching lists of labels and addresses.
     var n_labels: usize = 0;
@@ -175,6 +181,8 @@ pub fn save() void {
         .{ "alerts", s.alerts },               .{ "alert-blocked", s.alert_blocked },
         .{ "alert-error", s.alert_error },     .{ "alert-done", s.alert_done },
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
+        .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
+        .{ "paste-warning", s.paste_warning },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
     kf.setString("compy", "cursor-style", @tagName(s.cursor_style));

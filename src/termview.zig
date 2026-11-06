@@ -133,6 +133,8 @@ pub const TermView = struct {
     menu_cell: [2]u16 = .{ 0, 0 },
     /// Dragging the scroll position marker.
     dragging_bar: bool = false,
+    /// When a bell flash fades out, in monotonic microseconds.
+    flash_until: i64 = 0,
     /// Called when this pane is clicked, so the workspace can mark it focused.
     on_focus: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
 
@@ -180,6 +182,11 @@ pub const TermView = struct {
         _ = gtk.GestureDrag.signals.drag_update.connect(drag, *TermView, &onDragUpdate, v, .{});
         _ = gtk.GestureDrag.signals.drag_end.connect(drag, *TermView, &onDragEnd, v, .{});
         w.addController(drag.as(gtk.EventController));
+
+        // A file dropped on the pane is pasted as its path, quoted for the shell.
+        const drop = gtk.DropTarget.new(gio.File.getGObjectType(), .{ .copy = true });
+        _ = gtk.DropTarget.signals.drop.connect(drop, *TermView, &onDrop, v, .{});
+        w.addController(drop.as(gtk.EventController));
 
         const focus = gtk.EventControllerFocus.new();
         _ = gtk.EventControllerFocus.signals.enter.connect(focus, *TermView, &onFocusIn, v, .{});
@@ -455,6 +462,34 @@ pub const TermView = struct {
         while (it.nextCodepoint()) |cp| v.server.sendKey(v.session_id, v.block_id, keys.forChar(cp, 0));
     }
 
+    fn onDrop(_: *gtk.DropTarget, value: *const gobject.Value, _: f64, _: f64, v: *TermView) callconv(.c) c_int {
+        const obj = value.getObject() orelse return 0;
+        const file: *gio.File = @ptrCast(obj);
+        const path = file.getPath() orelse return 0;
+        defer glib.free(path);
+        const quoted = glib.shellQuote(path);
+        defer glib.free(quoted);
+        const text = std.fmt.allocPrint(gpa, "{s} ", .{std.mem.span(quoted)}) catch return 0;
+        defer gpa.free(text);
+        v.server.paste(v.session_id, v.block_id, text);
+        _ = v.widget().grabFocus();
+        return 1;
+    }
+
+    /// Lights the pane up briefly, for the bell.
+    pub fn flash(v: *TermView) void {
+        if (!@import("settings.zig").current.visual_bell) return;
+        v.flash_until = glib.getMonotonicTime() + 180_000;
+        v.widget().queueDraw();
+        _ = glib.timeoutAdd(190, &unflash, v);
+    }
+
+    fn unflash(data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        v.widget().queueDraw();
+        return 0;
+    }
+
     pub fn pasteClipboard(v: *TermView) void {
         const clipboard = v.widget().getClipboard();
         // The view could be gone when the text arrives, so carry the ids instead.
@@ -469,6 +504,37 @@ pub const TermView = struct {
 
     const PasteTarget = struct { server: *Server, session_id: []u8, block_id: []u8 };
 
+    const PendingPaste = struct { server: *Server, session_id: []u8, block_id: []u8, text: []u8 };
+
+    fn confirmPaste(server: *Server, session_id: []const u8, block_id: []const u8, text: []const u8, lines: usize) void {
+        const app = gio.Application.getDefault() orelse return;
+        const win = @as(*gtk.Application, @ptrCast(app)).getActiveWindow() orelse return;
+        var buf: [96]u8 = undefined;
+        const heading = std.fmt.bufPrintSentinel(&buf, "Paste {d} lines?", .{lines}, 0) catch return;
+        const dialog = @import("adw").AlertDialog.new(heading.ptr, "This program doesn't know it's a paste, so each line may run as a command.");
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("paste", "Paste");
+        dialog.setResponseAppearance("paste", .destructive);
+        dialog.setDefaultResponse("cancel");
+        const pending = gpa.create(PendingPaste) catch return;
+        pending.* = .{
+            .server = server,
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .block_id = gpa.dupe(u8, block_id) catch return,
+            .text = gpa.dupe(u8, text) catch return,
+        };
+        _ = @import("adw").AlertDialog.signals.response.connect(dialog, *PendingPaste, &pasteAnswered, pending, .{});
+        dialog.as(@import("adw").Dialog).present(win.as(gtk.Widget));
+    }
+
+    fn pasteAnswered(_: *@import("adw").AlertDialog, response: [*:0]const u8, p: *PendingPaste) callconv(.c) void {
+        if (std.mem.eql(u8, std.mem.span(response), "paste")) p.server.paste(p.session_id, p.block_id, p.text);
+        gpa.free(p.session_id);
+        gpa.free(p.block_id);
+        gpa.free(p.text);
+        gpa.destroy(p);
+    }
+
     fn pasted(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const t: *PasteTarget = @ptrCast(@alignCast(data.?));
         defer {
@@ -479,7 +545,12 @@ pub const TermView = struct {
         const clipboard: *gdk.Clipboard = @ptrCast(source orelse return);
         const text = clipboard.readTextFinish(result, null) orelse return;
         defer glib.free(text);
-        t.server.paste(t.session_id, t.block_id, std.mem.span(text));
+        const body = std.mem.span(text);
+        // Without bracketed paste, each pasted line runs as typed, so several lines ask first.
+        const lines = std.mem.count(u8, std.mem.trimEnd(u8, body, "\n"), "\n") + 1;
+        const bracketed = if (t.server.streams.get(t.block_id)) |st| if (st.term) |tm| tm.frame.bracketed_paste else false else false;
+        if (lines > 1 and !bracketed and @import("settings.zig").current.paste_warning) return confirmPaste(t.server, t.session_id, t.block_id, body, lines);
+        t.server.paste(t.session_id, t.block_id, body);
     }
 
     fn onScroll(ctl: *gtk.EventControllerScroll, _: f64, dy: f64, v: *TermView) callconv(.c) c_int {
@@ -1041,6 +1112,14 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
         }
     }
 
+    // The bell's flash, fading over its last moments.
+    const flash_left = v.flash_until - glib.getMonotonicTime();
+    if (flash_left > 0) {
+        setColor(cr, f.fg, 0.14 * @as(f64, @floatFromInt(flash_left)) / 180_000);
+        cr.rectangle(0, 0, w, h);
+        cr.fill();
+    }
+
     // A thin scroll position marker while looking back through history.
     if (f.scroll_total > f.scroll_len and f.scroll_offset + f.scroll_len < f.scroll_total) {
         const total: f64 = @floatFromInt(f.scroll_total);
@@ -1155,7 +1234,46 @@ fn cellColors(f: *const term.Frame, cl: term.Cell) Colors {
     var bg = if (cl.bg != 0) cl.bg else f.bg;
     if (cl.flags.inverse) std.mem.swap(u32, &fg, &bg);
     if (cl.flags.selected) std.mem.swap(u32, &fg, &bg);
+    if (@import("settings.zig").current.improve_contrast) fg = readable(fg, bg);
     return .{ .fg = fg, .bg = bg };
+}
+
+fn luminance(c: u32) f64 {
+    const lin = struct {
+        fn f(v: u32) f64 {
+            const x = @as(f64, @floatFromInt(v & 0xff)) / 255;
+            return if (x <= 0.03928) x / 12.92 else std.math.pow(f64, (x + 0.055) / 1.055, 2.4);
+        }
+    }.f;
+    return 0.2126 * lin(c >> 16) + 0.7152 * lin(c >> 8) + 0.0722 * lin(c);
+}
+
+/// Text colors too close to their background move toward black or white until they read.
+fn readable(fg: u32, bg: u32) u32 {
+    const lb = luminance(bg);
+    const contrast = struct {
+        fn f(a: f64, b: f64) f64 {
+            return (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
+        }
+    }.f;
+    if (contrast(luminance(fg), lb) >= 3) return fg;
+    const target: u32 = if (lb > 0.4) 0x000000 else 0xffffff;
+    var t: f64 = 0.2;
+    while (t <= 1.0) : (t += 0.2) {
+        const c = mix(fg, target, t);
+        if (contrast(luminance(c), lb) >= 3) return c;
+    }
+    return target;
+}
+
+fn mix(a: u32, b: u32, t: f64) u32 {
+    var out: u32 = 0xFF000000;
+    inline for (.{ 16, 8, 0 }) |sh| {
+        const x: f64 = @floatFromInt((a >> sh) & 0xff);
+        const y: f64 = @floatFromInt((b >> sh) & 0xff);
+        out |= @as(u32, @intFromFloat(@round(x + (y - x) * t))) << sh;
+    }
+    return out;
 }
 
 fn sameStyle(a: term.Cell, b: term.Cell) bool {

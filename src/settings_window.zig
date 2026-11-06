@@ -381,6 +381,12 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     const c = group(p, "Cursor", null);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
     switchRow(ctx, c, "Blink", "In the pane with the keyboard", &settings.current.cursor_blink, App.redrawAll);
+
+    const colors = group(p, "Colors and Bell", null);
+    switchRow(ctx, colors, "Improve text contrast", "Adjust text that would be hard to read against its background", &settings.current.improve_contrast, App.redrawAll);
+    switchRow(ctx, colors, "Flash on bell", "Briefly light up a pane when its program rings the bell", &settings.current.visual_bell, null);
+    const paste = group(p, "Pasting", null);
+    switchRow(ctx, paste, "Ask before pasting several lines", "Unless the program knows it's a paste, each line could run as a command", &settings.current.paste_warning, null);
     return p.as(gtk.Widget);
 }
 

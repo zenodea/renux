@@ -25,7 +25,7 @@ pub const Session = struct {
     label: []u8,
 };
 
-pub const Change = enum { state, sessions, view, message, block, alert, keymap, hosts };
+pub const Change = enum { state, sessions, view, message, block, alert, keymap, hosts, bell, clipboard };
 
 /// A key bound inside a Rex key mode, such as "resize".
 pub const ModeBinding = struct { mode: []const u8, keys: []const u8, action: []const u8, args: ?[]const u8 };
@@ -113,6 +113,8 @@ pub const Server = struct {
     alert_session: std.ArrayList(u8) = .empty,
     alert_block: std.ArrayList(u8) = .empty,
     alert_kind: AlertKind = .done,
+    /// Text a program put on the clipboard with OSC 52, for the window to place there.
+    clipboard_text: std.ArrayList(u8) = .empty,
     host_colors: ?stream_mod.Colors = null,
     observer: ?Observer = null,
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
@@ -432,6 +434,19 @@ pub const Server = struct {
             setStr(&b.title, json.str(fields, "title"));
         } else if (eql(name, "bell")) {
             b.attention = true;
+            s.notify(.bell, block);
+        } else if (eql(name, "clipboard_written")) {
+            if (json.str(fields, "text")) |text| {
+                s.gotClipboard(text);
+            } else if ((json.int(fields, "bytes") orelse 0) > 0) {
+                // Too large for the event; the server keeps it a while to be read.
+                const bytes = json.int(fields, "bytes").?;
+                if (bytes > 8 * 1024 * 1024) return s.showMessage("That copy is too large for the clipboard");
+                const id = json.int(fields, "id") orelse 0;
+                const d: Owned = .{ .text = gpa.dupe(u8, block) catch return };
+                s.call("com.superlogical.terminal.clipboard_read", .{ .session_id = session_id, .block_id = block, .args = .{ .id = id, .offset = 0, .max_bytes = bytes } }, Owned, d, gotLargeCopy);
+            }
+            return;
         } else if (eql(name, "progress_report")) {
             const state = json.str(fields, "state") orelse "";
             const percent = json.int(fields, "progress");
@@ -451,6 +466,19 @@ pub const Server = struct {
             if (text.len > 0) s.raiseAlert(session_id, block, text);
         } else return;
         s.notify(.block, block);
+    }
+
+    fn gotClipboard(s: *Server, text: []const u8) void {
+        s.clipboard_text.clearRetainingCapacity();
+        s.clipboard_text.appendSlice(gpa, text) catch return;
+        s.notify(.clipboard, null);
+    }
+
+    fn gotLargeCopy(s: *Server, _: *Owned, r: Result) void {
+        switch (r) {
+            .ok => |p| if (json.str(p, "data")) |d| s.gotClipboard(d),
+            .err => s.showMessage("Couldn't copy that text from the server"),
+        }
     }
 
     fn raiseAlert(s: *Server, session_id: []const u8, block_id: []const u8, text: []const u8) void {
