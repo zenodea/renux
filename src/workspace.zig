@@ -267,8 +267,9 @@ pub const Workspace = struct {
             fn begin(g: *gtk.GestureDrag, x: f64, y: f64, w: *Workspace) callconv(.c) void {
                 w.moveBegin(g.as(gtk.EventController).getWidget() orelse return, x, y);
             }
-            fn update(_: *gtk.GestureDrag, dx: f64, dy: f64, w: *Workspace) callconv(.c) void {
-                w.moveUpdate(dx, dy);
+            fn update(g: *gtk.GestureDrag, dx: f64, dy: f64, w: *Workspace) callconv(.c) void {
+                const d = w.steadyOffset(g, dx, dy) orelse return;
+                w.moveUpdate(d[0], d[1]);
             }
             fn end(_: *gtk.GestureDrag, _: f64, _: f64, w: *Workspace) callconv(.c) void {
                 w.moveEnd();
@@ -299,11 +300,17 @@ pub const Workspace = struct {
         gw.setCursorFromName("se-resize");
         gw.setVisible(@intFromBool(floating));
         const GripDrag = struct {
-            fn begin(g: *gtk.GestureDrag, _: f64, _: f64, w: *Workspace) callconv(.c) void {
-                w.gripBegin(g.as(gtk.EventController).getWidget() orelse return);
+            fn begin(g: *gtk.GestureDrag, x: f64, y: f64, w: *Workspace) callconv(.c) void {
+                const handle = g.as(gtk.EventController).getWidget() orelse return;
+                var px: f64 = 0;
+                var py: f64 = 0;
+                _ = handle.translateCoordinates(w.root, x, y, &px, &py);
+                w.move_origin = .{ px, py };
+                w.gripBegin(handle);
             }
-            fn update(_: *gtk.GestureDrag, dx: f64, dy: f64, w: *Workspace) callconv(.c) void {
-                w.gripUpdate(dx, dy);
+            fn update(g: *gtk.GestureDrag, dx: f64, dy: f64, w: *Workspace) callconv(.c) void {
+                const d = w.steadyOffset(g, dx, dy) orelse return;
+                w.gripUpdate(d[0], d[1]);
             }
             fn end(_: *gtk.GestureDrag, _: f64, _: f64, w: *Workspace) callconv(.c) void {
                 w.gripEnd();
@@ -518,6 +525,20 @@ pub const Workspace = struct {
         const data = gobject.Object.getData(w.as(gobject.Object), "compy-block") orelse return null;
         for (ws.panes.items, 0..) |p, i| if (@intFromPtr(p.block_id.ptr) == @intFromPtr(data)) return i;
         return null;
+    }
+
+    /// A drag's offset measured in the workspace, which stays put. GTK measures it in the dragged
+    /// widget's own space, and that widget moves with the card, so the raw offset would fight the
+    /// pointer and stutter.
+    fn steadyOffset(ws: *Workspace, g: *gtk.GestureDrag, dx: f64, dy: f64) ?[2]f64 {
+        const w = g.as(gtk.EventController).getWidget() orelse return null;
+        var sx: f64 = 0;
+        var sy: f64 = 0;
+        if (g.getStartPoint(&sx, &sy) == 0) return null;
+        var px: f64 = 0;
+        var py: f64 = 0;
+        if (w.translateCoordinates(ws.root, sx + dx, sy + dy, &px, &py) == 0) return null;
+        return .{ px - ws.move_origin[0], py - ws.move_origin[1] };
     }
 
     fn moveBegin(ws: *Workspace, title: *gtk.Widget, x: f64, y: f64) void {
