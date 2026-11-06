@@ -31,7 +31,18 @@ pub const Font = struct {
     bold_italic: *pango.FontDescription,
 
     pub fn init(name: [:0]const u8) Font {
-        const regular = pango.FontDescription.fromString(name.ptr);
+        return fromDesc(pango.FontDescription.fromString(name.ptr));
+    }
+
+    /// The same font at `scale` times its size, for a zoomed pane.
+    pub fn scaled(f: Font, scale: f64) Font {
+        const d = f.regular.copy().?;
+        const size: f64 = @floatFromInt(d.getSize());
+        d.setSize(@intFromFloat(@max(4 * pango.SCALE, size * scale)));
+        return fromDesc(d);
+    }
+
+    fn fromDesc(regular: *pango.FontDescription) Font {
         const bold = regular.copy().?;
         bold.setWeight(.bold);
         const italic = regular.copy().?;
@@ -50,6 +61,8 @@ pub const Font = struct {
 };
 
 pub var font: ?Font = null;
+/// Each pane's zoom, by block, so a pane keeps it when shown again.
+var zooms: std.StringHashMapUnmanaged(f64) = .empty;
 /// Whether a blinking cursor is in its visible half.
 pub var blink_on = true;
 
@@ -78,6 +91,10 @@ pub const TermView = struct {
     last_total: u64 = 0,
     draw_frac: f64 = 0,
     listening: bool = false,
+    /// This pane's text size relative to the setting, and its font at that size.
+    zoom: f64 = 1,
+    own_font: ?Font = null,
+    im: *gtk.IMMulticontext = undefined,
     title_label: ?*gtk.Label = null,
     title_buf: [256]u8 = undefined,
     title_len: usize = 0,
@@ -110,6 +127,12 @@ pub const TermView = struct {
 
         const key = gtk.EventControllerKey.new();
         _ = gtk.EventControllerKey.signals.key_pressed.connect(key, *TermView, &onKey, v, .{});
+        // Typed text goes through the input method, so dead keys, compose sequences and input
+        // methods for other scripts commit real text; other keys reach `onKey`.
+        v.im = gtk.IMMulticontext.new();
+        v.im.as(gtk.IMContext).setClientWidget(w);
+        _ = gtk.IMContext.signals.commit.connect(v.im.as(gtk.IMContext), *TermView, &onCommit, v, .{});
+        key.setImContext(v.im.as(gtk.IMContext));
         w.addController(key.as(gtk.EventController));
 
         const scroll = gtk.EventControllerScroll.new(.{ .vertical = true, .kinetic = true });
@@ -134,6 +157,7 @@ pub const TermView = struct {
         _ = gtk.EventControllerFocus.signals.leave.connect(focus, *TermView, &onFocusOut, v, .{});
         w.addController(focus.as(gtk.EventController));
 
+        if (zooms.get(block_id)) |z| v.setZoom(z);
         v.measure();
         if (server.terminal(session_id, block_id)) |st| {
             st.addListener(.{ .ctx = v, .changed = changed });
@@ -212,6 +236,8 @@ pub const TermView = struct {
     }
 
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
+        v.im.as(gtk.IMContext).setClientWidget(null);
+        v.im.as(gobject.Object).unref();
         if (v.size_timer != 0) _ = glib.Source.remove(v.size_timer);
         if (v.scroll_tick != 0) v.widget().removeTickCallback(v.scroll_tick);
         if (v.stream()) |st| st.removeListener(v);
@@ -223,7 +249,7 @@ pub const TermView = struct {
     /// Works out the cell size from the font. Monospace fonts have fractional advances, so it
     /// measures a long run and divides, which keeps long lines on the grid.
     fn measure(v: *TermView) void {
-        const f = font orelse return;
+        const f = v.fontOf() orelse return;
         const layout = v.widget().createPangoLayout("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM");
         defer layout.as(gobject.Object).unref();
         layout.setFontDescription(f.regular);
@@ -235,7 +261,28 @@ pub const TermView = struct {
         v.baseline = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
     }
 
+    pub fn fontOf(v: *TermView) ?Font {
+        return v.own_font orelse font;
+    }
+
+    fn setZoom(v: *TermView, z: f64) void {
+        v.zoom = std.math.clamp(z, 0.4, 4);
+        v.own_font = if (@abs(v.zoom - 1) < 0.01) null else if (font) |f| f.scaled(v.zoom) else null;
+    }
+
+    /// Makes this pane's text bigger or smaller by `steps`, or back to normal with 0.
+    pub fn zoomBy(v: *TermView, steps: f64) void {
+        v.setZoom(if (steps == 0) 1 else v.zoom * std.math.pow(f64, 1.1, steps));
+        if (zooms.getPtr(v.block_id)) |z| {
+            z.* = v.zoom;
+        } else if (gpa.dupe(u8, v.block_id)) |key| {
+            zooms.put(gpa, key, v.zoom) catch gpa.free(key);
+        } else |_| {}
+        v.fontChanged();
+    }
+
     pub fn fontChanged(v: *TermView) void {
+        if (v.own_font != null) v.setZoom(v.zoom);
         v.measure();
         v.want_cols = 0;
         v.want_rows = 0;
@@ -298,12 +345,38 @@ pub const TermView = struct {
                 return 1;
             }
         }
+        // Ctrl with plus, minus or 0 sizes this pane's text, as in other terminals.
+        if (mods & ~@as(u4, keys.shift) == keys.ctrl) switch (keyval) {
+            '+', '=', 0xffab => {
+                v.zoomBy(1);
+                return 1;
+            },
+            '-', 0xffad => {
+                v.zoomBy(-1);
+                return 1;
+            },
+            '0', 0xffb0 => {
+                v.zoomBy(0);
+                return 1;
+            },
+            else => {},
+        };
         if (mods & keys.super != 0) return 0; // leave shortcuts to the desktop
         const key = keys.fromGdk(keyval, gdk.keyvalToUnicode(keyval), mods) orelse return 0;
         v.scrollToBottom();
         if (v.term()) |t| t.clearSelection();
         v.server.sendKey(v.session_id, v.block_id, key);
         return 1;
+    }
+
+    /// Text from the input method: plain typing, a composed é, or a word from an input method.
+    fn onCommit(_: *gtk.IMContext, text: [*:0]const u8, v: *TermView) callconv(.c) void {
+        const t = std.mem.span(text);
+        v.scrollToBottom();
+        if (v.term()) |tm| tm.clearSelection();
+        const view = std.unicode.Utf8View.init(t) catch return v.server.paste(v.session_id, v.block_id, t);
+        var it = view.iterator();
+        while (it.nextCodepoint()) |cp| v.server.sendKey(v.session_id, v.block_id, keys.forChar(cp, 0));
     }
 
     pub fn pasteClipboard(v: *TermView) void {
@@ -336,6 +409,12 @@ pub const TermView = struct {
     fn onScroll(ctl: *gtk.EventControllerScroll, _: f64, dy: f64, v: *TermView) callconv(.c) c_int {
         const st = v.stream() orelse return 0;
         const t = st.term orelse return 0;
+        // Ctrl and the wheel size the text.
+        const bits: u32 = @bitCast(ctl.as(gtk.EventController).getCurrentEventState());
+        if (keys.modsFromGdk(bits) & keys.ctrl != 0) {
+            if (dy != 0) v.zoomBy(if (dy < 0) 1 else -1);
+            return 1;
+        }
         // Programs that take the mouse, or use the whole screen, scroll themselves.
         if (t.frame.mouse or t.frame.alt_screen) {
             v.scroll_rest += dy;
@@ -587,11 +666,13 @@ pub const TermView = struct {
     }
 
     fn onFocusIn(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
+        v.im.as(gtk.IMContext).focusIn();
         v.server.sendFocus(v.session_id, v.block_id, true);
         v.widget().queueDraw();
     }
 
     fn onFocusOut(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
+        v.im.as(gtk.IMContext).focusOut();
         v.server.sendFocus(v.session_id, v.block_id, false);
         v.widget().queueDraw();
     }
@@ -617,7 +698,7 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
     });
     _ = t.render(true);
     const f = &t.frame;
-    const f_font = font orelse return;
+    const f_font = v.fontOf() orelse return;
 
     setColor(cr, f.bg, 1);
     cr.rectangle(0, 0, w, h);
@@ -656,6 +737,17 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
         const top = pad + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
         if (top > h) break;
         drawRow(v, cr, t, f, layout, &text, f_font, y, top);
+    }
+
+    // Input methods place their candidate popup by the cursor.
+    {
+        var r: gdk.Rectangle = .{
+            .f_x = @intFromFloat(pad + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w),
+            .f_y = @intFromFloat(pad + v.draw_frac + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h),
+            .f_width = @intFromFloat(v.cell_w),
+            .f_height = @intFromFloat(v.cell_h),
+        };
+        v.im.as(gtk.IMContext).setCursorLocation(&r);
     }
 
     // The cursor, hollow when the pane doesn't have the keyboard.

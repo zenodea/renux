@@ -1507,6 +1507,22 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         var it = std.mem.tokenizeScalar(u8, line, ' ');
         const cmd = it.next() orelse continue;
         const rest = std.mem.trim(u8, line[cmd.len..], " ");
+        // App actions don't need a pane.
+        if (std.mem.eql(u8, cmd, "action")) {
+            const name = it.next() orelse continue;
+            const z = gpa.dupeSentinel(u8, name, 0) catch continue;
+            defer gpa.free(z);
+            const param: ?*glib.Variant = if (it.next()) |arg| blk: {
+                const za = gpa.dupeSentinel(u8, arg, 0) catch continue;
+                defer gpa.free(za);
+                break :blk glib.Variant.newString(za.ptr);
+            } else if (std.mem.startsWith(u8, name, "pane-")) blk: {
+                const tvp = ws.focusedView() orelse continue;
+                break :blk glib.Variant.newString(@ptrCast((gpa.dupeSentinel(u8, tvp.block_id, 0) catch continue).ptr));
+            } else null;
+            a.app.as(gio.ActionGroup).activateAction(z.ptr, param);
+            continue;
+        }
         const tv = ws.focusedView() orelse {
             std.log.info("script: no pane for {s}", .{cmd});
             continue;
@@ -1516,17 +1532,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             continue;
         };
         std.log.info("script: {s}", .{cmd});
-        if (std.mem.eql(u8, cmd, "action")) {
-            const name = it.next() orelse continue;
-            const z = gpa.dupeSentinel(u8, name, 0) catch continue;
-            defer gpa.free(z);
-            const param: ?*glib.Variant = if (it.next()) |arg| blk: {
-                const za = gpa.dupeSentinel(u8, arg, 0) catch continue;
-                defer gpa.free(za);
-                break :blk glib.Variant.newString(za.ptr);
-            } else if (std.mem.startsWith(u8, name, "pane-")) glib.Variant.newString(@ptrCast((gpa.dupeSentinel(u8, tv.block_id, 0) catch continue).ptr)) else null;
-            a.app.as(gio.ActionGroup).activateAction(z.ptr, param);
-        } else if (std.mem.eql(u8, cmd, "carry")) {
+        if (false) {        } else if (std.mem.eql(u8, cmd, "carry")) {
             const x = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             const y = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateCarry(tv.block_id, x, y);
@@ -1535,6 +1541,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "divider")) {
             const dx = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateDivider(dx);
+        } else if (std.mem.eql(u8, cmd, "zoom")) {
+            tv.zoomBy(std.fmt.parseFloat(f64, it.next() orelse "0") catch 0);
         } else if (std.mem.eql(u8, cmd, "scroll")) {
             const dy = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             tv.scrollBy(dy);
