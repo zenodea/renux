@@ -5,7 +5,7 @@ const gtk = @import("gtk");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
 
-pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, search, bell, up, down, right };
+pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, search, bell, up, down, right, new_session, add_host, filter };
 
 pub fn image(kind: Kind, size: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();
@@ -130,6 +130,43 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int,
         .right => {
             line(cr, 6, 4, 10, 8);
             line(cr, 10, 8, 6, 12);
+        },
+        .new_session => {
+            // Two stacked windows with a plus, like Rex's.
+            roundRect(cr, 5, 4.5, 9, 7.5, 1.5);
+            cr.stroke();
+            line(cr, 6.5, 2.5, 12.5, 2.5);
+            cr.arc(4, 12, 3, 0, 2 * std.math.pi);
+            cr.fill();
+            cr.setOperator(.clear);
+            line(cr, 2.6, 12, 5.4, 12);
+            line(cr, 4, 10.6, 4, 13.4);
+            cr.setOperator(.over);
+        },
+        .add_host => {
+            // A globe with a plus.
+            cr.arc(9, 7, 5.2, 0, 2 * std.math.pi);
+            cr.stroke();
+            line(cr, 3.8, 7, 14.2, 7);
+            cr.save();
+            cr.translate(9, 7);
+            cr.scale(0.45, 1);
+            cr.arc(0, 0, 5.2, 0, 2 * std.math.pi);
+            cr.restore();
+            cr.stroke();
+            cr.arc(4, 12, 3, 0, 2 * std.math.pi);
+            cr.fill();
+            cr.setOperator(.clear);
+            line(cr, 2.6, 12, 5.4, 12);
+            line(cr, 4, 10.6, 4, 13.4);
+            cr.setOperator(.over);
+        },
+        .filter => {
+            cr.arc(8, 8, 6, 0, 2 * std.math.pi);
+            cr.stroke();
+            line(cr, 5, 6, 11, 6);
+            line(cr, 6, 8.2, 10, 8.2);
+            line(cr, 7, 10.4, 9, 10.4);
         },
         .bell => {
             cr.moveTo(4, 11);

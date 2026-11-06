@@ -21,4 +21,7 @@ test {
     _ = @import("programs.zig");
     _ = @import("blockicon.zig");
     _ = @import("palette.zig");
+    _ = @import("settings.zig");
+    _ = @import("themes.zig");
+    _ = @import("settings_window.zig");
 }

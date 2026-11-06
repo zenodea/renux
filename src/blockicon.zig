@@ -63,7 +63,8 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, _: c_int, _: c_int, data: ?*
     const dark = ink.f_red + ink.f_green + ink.f_blue > 1.5; // light text means a dark canvas
     const neutral: u32 = if (dark) 0x3a3a3c else 0xdedee2;
     const info = ctx.server.blockInfo(ctx.block_id);
-    const icon = if (info) |b| programs.iconFor(if (b.has_status) b.status_app else null, b.program) else null;
+    const brand = @import("settings.zig").current.brand_icons;
+    const icon = if (!brand) null else if (info) |b| programs.iconFor(if (b.has_status) b.status_app else null, b.program) else null;
     const size: f64 = @floatFromInt(ctx.size);
     programs.drawTile(cr, icon, 2, 2, size, dark, neutral, ink_rgb);
 

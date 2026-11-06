@@ -1,0 +1,468 @@
+//! The settings window, laid out like Rex's: sections in a sidebar, their settings on the right.
+//! Everything here changes only Compy; key bindings stay in the person's Rex config.
+const std = @import("std");
+const glib = @import("glib");
+const gobject = @import("gobject");
+const gio = @import("gio");
+const gtk = @import("gtk");
+const gdk = @import("gdk");
+const cairo = @import("cairo");
+const adw = @import("adw");
+const pango = @import("pango");
+const settings = @import("settings.zig");
+const themes = @import("themes.zig");
+const icons = @import("icons.zig");
+const App = @import("app.zig").App;
+
+const gpa = std.heap.c_allocator;
+
+const Section = struct { title: [:0]const u8, icon: icons.Kind, build: *const fn (*Ctx) *gtk.Widget };
+
+const sections = [_]Section{
+    .{ .title = "Server", .icon = .server, .build = serverPage },
+    .{ .title = "Interface", .icon = .split_right, .build = interfacePage },
+    .{ .title = "Themes", .icon = .gear, .build = themesPage },
+    .{ .title = "Terminal", .icon = .terminal, .build = terminalPage },
+    .{ .title = "Shortcuts", .icon = .search, .build = shortcutsPage },
+    .{ .title = "Notifications", .icon = .bell, .build = notificationsPage },
+    .{ .title = "Remote Hosts", .icon = .plus, .build = hostsPage },
+};
+
+const Ctx = struct {
+    app: *App,
+    dialog: *adw.Dialog,
+    stack: *gtk.Stack,
+    list: *gtk.ListBox,
+};
+
+pub fn open(app: *App) void {
+    const ctx = gpa.create(Ctx) catch return;
+    ctx.* = .{ .app = app, .dialog = adw.Dialog.new(), .stack = gtk.Stack.new(), .list = gtk.ListBox.new() };
+    const d = ctx.dialog;
+    d.setTitle("Settings");
+    d.setContentWidth(900);
+    d.setContentHeight(640);
+    _ = adw.Dialog.signals.closed.connect(d, *Ctx, &closed, ctx, .{});
+
+    ctx.list.as(gtk.Widget).addCssClass("navigation-sidebar");
+    _ = gtk.ListBox.signals.row_selected.connect(ctx.list, *Ctx, &picked, ctx, .{});
+    for (sections) |sec| {
+        const line = gtk.Box.new(.horizontal, 10);
+        line.append(icons.image(sec.icon, 16));
+        const label = gtk.Label.new(sec.title.ptr);
+        label.setXalign(0);
+        line.append(label.as(gtk.Widget));
+        const row = gtk.ListBoxRow.new();
+        row.setChild(line.as(gtk.Widget));
+        ctx.list.append(row.as(gtk.Widget));
+        _ = ctx.stack.addNamed(sec.build(ctx), sec.title.ptr);
+    }
+    ctx.stack.setTransitionType(.crossfade);
+
+    const side = adw.ToolbarView.new();
+    const side_header = adw.HeaderBar.new();
+    side_header.setShowEndTitleButtons(0);
+    side.addTopBar(side_header.as(gtk.Widget));
+    side.setContent(ctx.list.as(gtk.Widget));
+    const content = adw.ToolbarView.new();
+    content.addTopBar(adw.HeaderBar.new().as(gtk.Widget));
+    content.setContent(ctx.stack.as(gtk.Widget));
+    const split = adw.NavigationSplitView.new();
+    split.setSidebar(adw.NavigationPage.new(side.as(gtk.Widget), "Settings"));
+    split.setContent(adw.NavigationPage.new(content.as(gtk.Widget), "Settings"));
+    split.setMinSidebarWidth(200);
+    d.setChild(split.as(gtk.Widget));
+    ctx.list.selectRow(ctx.list.getRowAtIndex(0));
+    d.present(app.window.as(gtk.Widget));
+}
+
+fn closed(_: *adw.Dialog, ctx: *Ctx) callconv(.c) void {
+    gpa.destroy(ctx);
+}
+
+fn picked(_: *gtk.ListBox, row: ?*gtk.ListBoxRow, ctx: *Ctx) callconv(.c) void {
+    const r = row orelse return;
+    const i: usize = @intCast(r.getIndex());
+    if (i < sections.len) ctx.stack.setVisibleChildName(sections[i].title.ptr);
+}
+
+// Building blocks.
+
+fn page() *adw.PreferencesPage {
+    return adw.PreferencesPage.new();
+}
+
+fn group(p: *adw.PreferencesPage, title: [:0]const u8, description: ?[:0]const u8) *adw.PreferencesGroup {
+    const g = adw.PreferencesGroup.new();
+    g.setTitle(title.ptr);
+    if (description) |d| g.setDescription(d.ptr);
+    p.add(g);
+    return g;
+}
+
+const Toggle = struct { ctx: *Ctx, field: *bool, after: ?*const fn (*App) void };
+
+/// A switch bound to one of the settings, with an optional follow-up when it changes.
+fn switchRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, subtitle: ?[:0]const u8, field: *bool, after: ?*const fn (*App) void) void {
+    const row = adw.SwitchRow.new();
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    if (subtitle) |s| row.as(adw.ActionRow).setSubtitle(s.ptr);
+    row.setActive(@intFromBool(field.*));
+    const t = gpa.create(Toggle) catch return;
+    t.* = .{ .ctx = ctx, .field = field, .after = after };
+    _ = gobject.Object.signals.notify.connect(row, *Toggle, &toggled, t, .{ .detail = "active" });
+    g.add(row.as(gtk.Widget));
+}
+
+fn toggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, t: *Toggle) callconv(.c) void {
+    t.field.* = row.getActive() != 0;
+    settings.save();
+    if (t.after) |f| f(t.ctx.app);
+}
+
+/// Segmented buttons for an enum setting, like Rex's Comfortable / Compact.
+fn segments(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, comptime E: type, field: *E, labels: []const [:0]const u8, after: *const fn (*App) void) void {
+    const row = adw.ActionRow.new();
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    const box = gtk.Box.new(.horizontal, 0);
+    box.as(gtk.Widget).addCssClass("linked");
+    box.as(gtk.Widget).setValign(.center);
+    var first: ?*gtk.ToggleButton = null;
+    inline for (comptime std.enums.values(E), 0..) |value, i| {
+        const b = gtk.ToggleButton.newWithLabel(labels[i].ptr);
+        if (first) |fb| b.setGroup(fb) else first = b;
+        b.setActive(@intFromBool(field.* == value));
+        const Seg = struct {
+            fn changed(btn: *gtk.ToggleButton, s: *SegCtx(E)) callconv(.c) void {
+                if (btn.getActive() == 0) return;
+                s.field.* = value;
+                settings.save();
+                s.after(s.ctx.app);
+            }
+        };
+        const sc = gpa.create(SegCtx(E)) catch return;
+        sc.* = .{ .ctx = ctx, .field = field, .after = after };
+        _ = gtk.ToggleButton.signals.toggled.connect(b, *SegCtx(E), &Seg.changed, sc, .{});
+        box.append(b.as(gtk.Widget));
+    }
+    row.addSuffix(box.as(gtk.Widget));
+    g.add(row.as(gtk.Widget));
+}
+
+fn SegCtx(comptime E: type) type {
+    return struct { ctx: *Ctx, field: *E, after: *const fn (*App) void };
+}
+
+fn suffixLabel(row: *adw.ActionRow, text: []const u8) void {
+    const z = gpa.dupeSentinel(u8, text, 0) catch return;
+    defer gpa.free(z);
+    const l = gtk.Label.new(z.ptr);
+    l.as(gtk.Widget).addCssClass("dim-label");
+    row.addSuffix(l.as(gtk.Widget));
+}
+
+fn nothing(_: *App) void {}
+
+// Server.
+
+fn serverPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const a = ctx.app;
+    const g = group(p, "Rex Server", "The server Compy is showing now. Add more under Remote Hosts.");
+    const status = adw.ActionRow.new();
+    if (a.server) |s| {
+        var buf: [256]u8 = undefined;
+        const title = std.fmt.bufPrintSentinel(&buf, "{s}", .{if (a.current) |h| h.label else "Rex"}, 0) catch "Rex";
+        status.as(adw.PreferencesRow).setTitle(title.ptr);
+        var sbuf: [320]u8 = undefined;
+        const sub = switch (s.state) {
+            .online => std.fmt.bufPrintSentinel(&sbuf, "Connected{s}{s}", .{ if (s.rex_version != null) " · Rex " else "", s.rex_version orelse "" }, 0),
+            .connecting => std.fmt.bufPrintSentinel(&sbuf, "Connecting…", .{}, 0),
+            .offline => std.fmt.bufPrintSentinel(&sbuf, "Offline: {s}", .{s.reason.items}, 0),
+        } catch "";
+        status.setSubtitle(sub.ptr);
+        const retry = gtk.Button.newWithLabel("Reconnect");
+        retry.as(gtk.Widget).setValign(.center);
+        retry.as(gtk.Actionable).setActionName("app.retry");
+        status.addSuffix(retry.as(gtk.Widget));
+        g.add(status.as(gtk.Widget));
+        const addr = adw.ActionRow.new();
+        addr.as(adw.PreferencesRow).setTitle("Address");
+        const z = gpa.dupeSentinel(u8, s.url, 0) catch "";
+        addr.setSubtitle(z.ptr);
+        addr.setSubtitleSelectable(1);
+        g.add(addr.as(gtk.Widget));
+    } else {
+        status.as(adw.PreferencesRow).setTitle("Not connected");
+        g.add(status.as(gtk.Widget));
+    }
+
+    const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. It applies on the next connection.");
+    const label = adw.EntryRow.new();
+    label.as(adw.PreferencesRow).setTitle("Label");
+    const current = gpa.dupeSentinel(u8, if (settings.current.client_label.len > 0) settings.current.client_label else std.mem.span(glib.getHostName()), 0) catch "";
+    label.as(gtk.Editable).setText(current.ptr);
+    label.setShowApplyButton(1);
+    _ = adw.EntryRow.signals.apply.connect(label, *Ctx, &labelApplied, ctx, .{});
+    info.add(label.as(gtk.Widget));
+    return p.as(gtk.Widget);
+}
+
+fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
+    settings.setString(&settings.current.client_label, std.mem.trim(u8, std.mem.span(row.as(gtk.Editable).getText()), " "));
+}
+
+// Interface.
+
+fn interfacePage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const look = group(p, "Appearance", null);
+    segments(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, App.themeChanged);
+    const panes = group(p, "Panes", null);
+    const TightBool = struct {
+        fn apply(app: *App) void {
+            app.setTight(settings.current.tight);
+        }
+    };
+    const PaneStyle = enum(u1) { comfortable, compact };
+    const style = gpa.create(PaneStyle) catch unreachable;
+    style.* = if (settings.current.tight) .compact else .comfortable;
+    const Apply = struct {
+        var target: *PaneStyle = undefined;
+        fn run(app: *App) void {
+            settings.current.tight = target.* == .compact;
+            settings.save();
+            TightBool.apply(app);
+        }
+    };
+    Apply.target = style;
+    segments(ctx, panes, "Pane style", PaneStyle, style, &.{ "Comfortable", "Compact" }, Apply.run);
+    switchRow(ctx, panes, "Show pane headers", "The title row with the program, folder and pane buttons", &settings.current.show_headers, App.headersChanged);
+    switchRow(ctx, panes, "Use color for program icons", "Brand colors for known programs, like Rex's tab icons", &settings.current.brand_icons, App.redrawAll);
+    return p.as(gtk.Widget);
+}
+
+// Themes.
+
+const ThemePick = struct { ctx: *Ctx, value: [:0]const u8, check: *gtk.Widget };
+
+var theme_checks: std.ArrayList(*ThemePick) = .empty;
+
+fn themesPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    theme_checks.clearRetainingCapacity();
+    const g = group(p, "Terminal Theme", "Compy follows each host's theme unless you pick one here. A theme picked here only colors Compy; your Rex server keeps its own.");
+    themeRow(ctx, g, "Follow host", "", null);
+    for (&themes.builtins) |*t| themeRow(ctx, g, t.name, t.name, t);
+    if (std.mem.startsWith(u8, settings.current.theme, "file:")) {
+        const path = settings.current.theme["file:".len..];
+        themeRow(ctx, g, std.fs.path.basename(path), settings.current.theme, null);
+    }
+    const imp = group(p, "Import Theme", null);
+    const row = adw.ActionRow.new();
+    row.as(adw.PreferencesRow).setTitle("Import a Ghostty theme file");
+    row.setSubtitle("It replaces the colors here and in every pane");
+    const b = gtk.Button.newWithLabel("Import");
+    b.as(gtk.Widget).setValign(.center);
+    _ = gtk.Button.signals.clicked.connect(b, *Ctx, &importClicked, ctx, .{});
+    row.addSuffix(b.as(gtk.Widget));
+    imp.add(row.as(gtk.Widget));
+    return p.as(gtk.Widget);
+}
+
+fn themeRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: []const u8, value: []const u8, t: ?*const themes.Theme) void {
+    const row = adw.ActionRow.new();
+    const tz = gpa.dupeSentinel(u8, title, 0) catch return;
+    row.as(adw.PreferencesRow).setTitle(tz.ptr);
+    if (t) |theme| {
+        const swatch = gtk.DrawingArea.new();
+        swatch.setContentWidth(120);
+        swatch.setContentHeight(22);
+        swatch.setDrawFunc(&drawSwatch, @constCast(theme), null);
+        swatch.as(gtk.Widget).setValign(.center);
+        row.addPrefix(swatch.as(gtk.Widget));
+    }
+    const check = gtk.Image.newFromIconName("object-select-symbolic");
+    check.as(gtk.Widget).setVisible(@intFromBool(std.mem.eql(u8, settings.current.theme, value)));
+    row.addSuffix(check.as(gtk.Widget));
+    row.as(gtk.ListBoxRow).setActivatable(1);
+    const pick = gpa.create(ThemePick) catch return;
+    pick.* = .{ .ctx = ctx, .value = gpa.dupeSentinel(u8, value, 0) catch return, .check = check.as(gtk.Widget) };
+    theme_checks.append(gpa, pick) catch {};
+    _ = adw.ActionRow.signals.activated.connect(row, *ThemePick, &themePicked, pick, .{});
+    g.add(row.as(gtk.Widget));
+}
+
+fn themePicked(_: *adw.ActionRow, pick: *ThemePick) callconv(.c) void {
+    settings.setString(&settings.current.theme, pick.value);
+    for (theme_checks.items) |c| c.check.setVisible(@intFromBool(c == pick));
+    pick.ctx.app.themeChanged();
+}
+
+fn drawSwatch(_: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, data: ?*anyopaque) callconv(.c) void {
+    const t: *const themes.Theme = @ptrCast(@alignCast(data.?));
+    const fw: f64 = @floatFromInt(w);
+    const fh: f64 = @floatFromInt(h);
+    setRgb(cr, t.bg);
+    cr.rectangle(0, 0, fw, fh);
+    cr.fill();
+    for (0..8) |i| {
+        setRgb(cr, t.ansi[i + 1 - @intFromBool(i == 7) * 1]);
+        cr.arc(10 + @as(f64, @floatFromInt(i)) * 13, fh / 2, 4.5, 0, 2 * std.math.pi);
+        cr.fill();
+    }
+}
+
+fn setRgb(cr: *cairo.Context, c: u32) void {
+    cr.setSourceRgb(@as(f64, @floatFromInt((c >> 16) & 0xff)) / 255, @as(f64, @floatFromInt((c >> 8) & 0xff)) / 255, @as(f64, @floatFromInt(c & 0xff)) / 255);
+}
+
+fn importClicked(_: *gtk.Button, ctx: *Ctx) callconv(.c) void {
+    const fd = gtk.FileDialog.new();
+    fd.setTitle("Import a Ghostty theme");
+    fd.open(ctx.app.window.as(gtk.Window), null, &imported, ctx);
+}
+
+fn imported(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const ctx: *Ctx = @ptrCast(@alignCast(data.?));
+    const fd: *gtk.FileDialog = @ptrCast(source orelse return);
+    const f = fd.openFinish(result, null) orelse return;
+    defer f.as(gobject.Object).unref();
+    const path = f.getPath() orelse return;
+    defer glib.free(path);
+    const p = std.mem.span(path);
+    if (themes.loadGhostty(p) == null) {
+        ctx.app.toasts.addToast(adw.Toast.new("That file doesn't look like a Ghostty theme"));
+        return;
+    }
+    const value = std.fmt.allocPrint(gpa, "file:{s}", .{p}) catch return;
+    defer gpa.free(value);
+    settings.setString(&settings.current.theme, value);
+    ctx.app.themeChanged();
+    for (theme_checks.items) |c| c.check.setVisible(0);
+}
+
+// Terminal.
+
+fn terminalPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const g = group(p, "Typography", null);
+    const row = adw.ActionRow.new();
+    row.as(adw.PreferencesRow).setTitle("Terminal font");
+    const fb = gtk.FontDialogButton.new(gtk.FontDialog.new());
+    fb.setLevel(.font);
+    fb.setUseFont(1);
+    const desc = pango.FontDescription.fromString((gpa.dupeSentinel(u8, settings.current.font, 0) catch return p.as(gtk.Widget)).ptr);
+    fb.setFontDesc(desc);
+    fb.as(gtk.Widget).setValign(.center);
+    _ = gobject.Object.signals.notify.connect(fb, *Ctx, &fontPicked, ctx, .{ .detail = "font-desc" });
+    row.addSuffix(fb.as(gtk.Widget));
+    g.add(row.as(gtk.Widget));
+
+    const c = group(p, "Cursor", null);
+    segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
+    switchRow(ctx, c, "Blink", "In the pane with the keyboard", &settings.current.cursor_blink, App.redrawAll);
+    return p.as(gtk.Widget);
+}
+
+fn fontPicked(button: *gtk.FontDialogButton, _: *gobject.ParamSpec, ctx: *Ctx) callconv(.c) void {
+    const desc = button.getFontDesc() orelse return;
+    const name = desc.toString();
+    defer glib.free(name);
+    settings.setString(&settings.current.font, std.mem.span(name));
+    ctx.app.fontChanged();
+}
+
+// Shortcuts.
+
+fn shortcutsPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const g = group(p, "Key Bindings", "Keys come from your Rex config, written in Lua. Change them there; Compy picks them up when it reconnects.");
+    var any = false;
+    if (ctx.app.server) |s| for (s.actions) |act| {
+        if (act.keys.len == 0) continue;
+        any = true;
+        const row = adw.ActionRow.new();
+        const t = gpa.dupeSentinel(u8, act.title, 0) catch continue;
+        row.as(adw.PreferencesRow).setTitle(t.ptr);
+        if (act.description.len > 0) {
+            const d = gpa.dupeSentinel(u8, act.description, 0) catch continue;
+            row.setSubtitle(d.ptr);
+        }
+        const keys = gtk.Label.new((gpa.dupeSentinel(u8, act.keys, 0) catch continue).ptr);
+        keys.as(gtk.Widget).addCssClass("palette-keys");
+        keys.as(gtk.Widget).setValign(.center);
+        row.addSuffix(keys.as(gtk.Widget));
+        g.add(row.as(gtk.Widget));
+    };
+    if (!any) {
+        const row = adw.ActionRow.new();
+        row.as(adw.PreferencesRow).setTitle("No bound actions on this server");
+        g.add(row.as(gtk.Widget));
+    }
+    return p.as(gtk.Widget);
+}
+
+// Notifications.
+
+fn notificationsPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const st = &settings.current;
+    const g = group(p, "Program Activity", "How status from programs and agents is handled");
+    switchRow(ctx, g, "Show system notifications", "Only while you're looking elsewhere", &st.alerts, null);
+    switchRow(ctx, g, "Play sounds", null, &st.sound, null);
+    const which = group(p, "Notify When", null);
+    switchRow(ctx, which, "Blocked", "A program needs your permission, an answer or a password", &st.alert_blocked, null);
+    switchRow(ctx, which, "Error", "A program failed", &st.alert_error, null);
+    switchRow(ctx, which, "Done", "A program finished", &st.alert_done, null);
+    const sys = group(p, "Terminal Notifications", null);
+    switchRow(ctx, sys, "Notifications from programs", "Programs can send notifications with OSC 9 or OSC 777", &st.terminal_notifications, null);
+    return p.as(gtk.Widget);
+}
+
+// Remote hosts.
+
+const HostRow = struct { ctx: *Ctx, index: usize };
+
+fn hostsPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const g = group(p, "Remote Hosts", "Every host's sessions show in the sidebar, grouped by host.");
+    for (settings.current.hosts.items, 0..) |h, i| {
+        const row = adw.ActionRow.new();
+        row.as(adw.PreferencesRow).setTitle((gpa.dupeSentinel(u8, h.label, 0) catch continue).ptr);
+        row.setSubtitle((gpa.dupeSentinel(u8, h.url, 0) catch continue).ptr);
+        const remove = gtk.Button.newWithLabel("Remove");
+        remove.as(gtk.Widget).setValign(.center);
+        remove.as(gtk.Widget).addCssClass("destructive-action");
+        const hr = gpa.create(HostRow) catch continue;
+        hr.* = .{ .ctx = ctx, .index = i };
+        _ = gtk.Button.signals.clicked.connect(remove, *HostRow, &removeHost, hr, .{});
+        row.addSuffix(remove.as(gtk.Widget));
+        g.add(row.as(gtk.Widget));
+    }
+    if (settings.current.hosts.items.len == 0) {
+        const row = adw.ActionRow.new();
+        row.as(adw.PreferencesRow).setTitle("No saved hosts");
+        row.setSubtitle("Add a Rex HTTP or HTTPS address to use its sessions here");
+        g.add(row.as(gtk.Widget));
+    }
+    const add = gtk.Button.newWithLabel("Add Remote Host…");
+    add.as(gtk.Widget).setHalign(.end);
+    add.as(gtk.Widget).setMarginTop(12);
+    add.as(gtk.Actionable).setActionName("app.add-host");
+    g.add(add.as(gtk.Widget));
+    return p.as(gtk.Widget);
+}
+
+fn removeHost(_: *gtk.Button, hr: *HostRow) callconv(.c) void {
+    const a = hr.ctx.app;
+    const saved = settings.current.hosts.items;
+    if (hr.index >= saved.len) return;
+    const url = saved[hr.index].url;
+    for (a.hosts.items) |h| if (std.mem.eql(u8, h.server.url, url)) {
+        a.removeHost(h);
+        break;
+    };
+    settings.removeHost(hr.index);
+    _ = hr.ctx.dialog.close();
+}

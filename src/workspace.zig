@@ -21,6 +21,7 @@ const gpa = std.heap.c_allocator;
 /// Space between pane cards; Tight packs them edge to edge with one line between.
 pub var gap: f64 = 8;
 pub var tight = false;
+pub var show_headers = true;
 
 pub fn isTightNow() bool {
     return tight;
@@ -41,6 +42,7 @@ const Pane = struct {
     tile: *gtk.Widget,
     term: *TermView,
     grip: *gtk.Widget,
+    title_row: *gtk.Widget,
     rect: view.Rect = .{},
     floating: bool = false,
     seen: bool = false,
@@ -238,6 +240,7 @@ pub const Workspace = struct {
         // The title row: the program's tile and title, then this pane's buttons.
         const row = gtk.Box.new(.horizontal, 2);
         row.as(gtk.Widget).addCssClass("pane-title");
+        row.as(gtk.Widget).setVisible(@intFromBool(show_headers));
         const tile = blockicon.create(ws.server, block_id, 16);
         row.append(tile);
         const label = gtk.Label.new(null);
@@ -338,6 +341,7 @@ pub const Workspace = struct {
             .tile = tile,
             .term = tv,
             .grip = gw,
+            .title_row = row.as(gtk.Widget),
             .rect = rect,
             .floating = floating,
             .seen = true,
@@ -422,6 +426,17 @@ pub const Workspace = struct {
 
     pub fn isShown(ws: *Workspace, block_id: []const u8) bool {
         return ws.paneOf(block_id) != null;
+    }
+
+    pub fn headersChanged(ws: *Workspace) void {
+        for (ws.panes.items) |p| p.title_row.setVisible(@intFromBool(show_headers));
+    }
+
+    pub fn redraw(ws: *Workspace) void {
+        for (ws.panes.items) |p| {
+            p.term.widget().queueDraw();
+            p.tile.queueDraw();
+        }
     }
 
     /// The terminal font changed: every pane measures its cells again and refits.

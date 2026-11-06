@@ -50,6 +50,8 @@ pub const Font = struct {
 };
 
 pub var font: ?Font = null;
+/// Whether a blinking cursor is in its visible half.
+pub var blink_on = true;
 
 pub const TermView = struct {
     area: *gtk.DrawingArea,
@@ -615,13 +617,23 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
         const color = if (f.cursor_color != 0) f.cursor_color else f.fg;
         setColor(cr, color, 1);
         const focused = v.widget().hasFocus() != 0;
+        const prefs = &@import("settings.zig").current;
+        const style: c_int = switch (prefs.cursor_style) {
+            .program => f.cursor_style,
+            .bar => 0,
+            .block => 1,
+            .underline => 2,
+        };
+        const blinks = prefs.cursor_blink and focused;
         const under = f.cell(f.cursor_x, f.cursor_y);
         const cw = v.cell_w * @as(f64, if (under.flags.wide) 2 else 1);
-        if (!focused or f.cursor_style == 3) {
+        if (blinks and !blink_on) {
+            // The hidden half of a blink.
+        } else if (!focused or style == 3) {
             cr.setLineWidth(1);
             cr.rectangle(cx + 0.5, cy + 0.5, cw - 1, v.cell_h - 1);
             cr.stroke();
-        } else switch (f.cursor_style) {
+        } else switch (style) {
             0 => {
                 cr.rectangle(cx, cy, 2, v.cell_h);
                 cr.fill();

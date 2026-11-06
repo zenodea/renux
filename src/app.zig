@@ -14,7 +14,8 @@ const view = @import("view.zig");
 const termview = @import("termview.zig");
 const Server = server_mod.Server;
 const Workspace = @import("workspace.zig").Workspace;
-const config = @import("config.zig");
+const settings = @import("settings.zig");
+const themes = @import("themes.zig");
 const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const Palette = @import("palette.zig").Palette;
@@ -37,6 +38,9 @@ const css =
     \\row.session-row:hover .session-tool, .session-tool.folded { opacity: 0.6; }
     \\row.session-row .session-tool:hover { opacity: 1; }
     \\.sidebar-footer { padding: 6px 10px 10px 10px; }
+    \\.filter-pill { border-radius: 99px; padding: 0 12px 0 8px; background-color: alpha(@window_fg_color, 0.07); }
+    \\.host-heading { font-weight: 600; font-size: 0.9em; margin: 12px 4px 0 4px; }
+    \\.compy-sidebar list > row.host-row { background: none; min-height: 24px; }
     \\.content .workspace { margin: 8px 8px 8px 0; }
     \\.content.alone .workspace { margin: 0 8px 8px 8px; }
     \\.top-strip { min-height: 38px; padding: 0 8px; }
@@ -66,7 +70,18 @@ const css =
     \\.connect-box { margin: 0 24px; }
 ;
 
-const Row = struct { session_id: []u8, window_id: []u8, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
+const Row = struct { host: *Host, session_id: []u8, window_id: []u8, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
+
+/// One Rex server Compy is connected to, with its own workspace page.
+pub const Host = struct {
+    app: *App,
+    label: []u8,
+    server: *Server,
+    workspace: *Workspace,
+    page: [:0]u8,
+    /// Set for a host from $COMPY_SERVER, which isn't saved.
+    temporary: bool = false,
+};
 
 pub const App = struct {
     app: *adw.Application,
@@ -84,8 +99,17 @@ pub const App = struct {
     find_count: *gtk.Label = undefined,
     find_total: usize = 0,
     entry: *gtk.Entry = undefined,
+    /// The host whose session is shown; `server` and `workspace` are its.
     server: ?*Server = null,
     workspace: ?*Workspace = null,
+    current: ?*Host = null,
+    hosts: std.ArrayList(*Host) = .empty,
+    /// The host the sidebar is narrowed to, or null for all of them.
+    filter: ?*Host = null,
+    next_page: usize = 0,
+    filter_button: *gtk.MenuButton = undefined,
+    filter_label: *gtk.Label = undefined,
+    filter_menu: *gio.Menu = undefined,
     rows: std.ArrayList(?Row) = .empty,
     /// Sessions whose windows are folded away in the sidebar.
     collapsed: std.StringHashMapUnmanaged(void) = .empty,
@@ -109,7 +133,8 @@ pub const App = struct {
     }
 
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
-        termview.font = termview.Font.init(config.fontName());
+        settings.load();
+        termview.font = termview.Font.init(gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch "Monospace 11");
         const provider = gtk.CssProvider.new();
         provider.loadFromString(css);
         gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -134,13 +159,25 @@ pub const App = struct {
         side_header.packStart(icons.button(.sidebar, "Hide sidebar", "app.toggle-sidebar").as(gtk.Widget));
         side_header.packEnd(menuButton(appMenu(), "More").as(gtk.Widget));
         side_header.packEnd(icons.button(.search, "Commands", "app.palette").as(gtk.Widget));
+        // The footer, like Rex's: narrow the sidebar to one host, a new session, and another host.
         const footer = gtk.Box.new(.horizontal, 2);
         footer.as(gtk.Widget).addCssClass("sidebar-footer");
-        footer.append(icons.button(.plus, "New session", "app.new-session").as(gtk.Widget));
+        a.filter_button = gtk.MenuButton.new();
+        const pill = gtk.Box.new(.horizontal, 6);
+        pill.append(icons.image(.filter, 16));
+        a.filter_label = gtk.Label.new("Filter");
+        pill.append(a.filter_label.as(gtk.Widget));
+        a.filter_button.setChild(pill.as(gtk.Widget));
+        a.filter_button.as(gtk.Widget).addCssClass("filter-pill");
+        a.filter_button.as(gtk.Widget).setTooltipText("Show one host or all of them");
+        a.filter_menu = gio.Menu.new();
+        a.filter_button.setMenuModel(a.filter_menu.as(gio.MenuModel));
+        footer.append(a.filter_button.as(gtk.Widget));
         const spacer = gtk.Box.new(.horizontal, 0);
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
-        footer.append(icons.button(.gear, "Settings", "app.settings").as(gtk.Widget));
+        footer.append(icons.button(.new_session, "New session", "app.new-session").as(gtk.Widget));
+        footer.append(icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget));
         const side = adw.ToolbarView.new();
         side.as(gtk.Widget).addCssClass("compy-sidebar");
         side.addTopBar(side_header.as(gtk.Widget));
@@ -216,15 +253,20 @@ pub const App = struct {
         a.window.setContent(a.toasts.as(gtk.Widget));
 
         a.addActions();
-        a.setTight(config.tight());
+        a.setTight(settings.current.tight);
+        themes.active = themes.resolve(settings.current.theme);
+        @import("workspace.zig").show_headers = settings.current.show_headers;
+        _ = glib.timeoutAdd(530, &blinkTick, a);
         installShotHook(a);
 
-        if (config.serverUrl()) |url| {
-            defer gpa.free(url);
-            a.connect(url);
-        } else {
-            a.stack.setVisibleChildName("connect");
-        }
+        // $COMPY_SERVER, for testing, names hosts to use without saving them, separated by commas.
+        if (std.c.getenv("COMPY_SERVER")) |env| {
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(env), ',');
+            while (it.next()) |url| if (a.addHost(settings.labelFor(url), url)) |h| {
+                h.temporary = true;
+            };
+        } else for (settings.current.hosts.items) |h| _ = a.addHost(h.label, h.url);
+        if (a.hosts.items.len == 0) a.stack.setVisibleChildName("connect");
         // When driven by tests, show the window without taking the keyboard from what the person
         // is using; otherwise their typing lands in Compy.
         if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
@@ -271,53 +313,107 @@ pub const App = struct {
         else
             gpa.dupe(u8, raw) catch return;
         defer gpa.free(url);
-        config.saveServerUrl(url);
-        a.connect(url);
+        settings.addHost(settings.labelFor(url), url);
+        if (a.addHost(settings.labelFor(url), url)) |h| a.selectHost(h);
     }
 
-    fn connect(a: *App, url: []const u8) void {
-        if (a.server) |s| {
-            if (a.workspace) |w| w.clear();
-            s.destroy();
+    /// Connects to another Rex server. Its sessions join the sidebar under its name.
+    pub fn addHost(a: *App, label: []const u8, url: []const u8) ?*Host {
+        const s = Server.create(url, clientLabel()) catch return null;
+        const ws = Workspace.create(s) catch return null;
+        const h = gpa.create(Host) catch return null;
+        h.* = .{
+            .app = a,
+            .label = gpa.dupe(u8, label) catch return null,
+            .server = s,
+            .workspace = ws,
+            .page = std.fmt.allocPrintSentinel(gpa, "host-{d}", .{a.next_page}, 0) catch return null,
+        };
+        a.next_page += 1;
+        s.observer = .{ .ctx = h, .changed = serverChanged };
+        s.performer = .{ .ctx = h, .perform = perform };
+        _ = a.stack.addNamed(ws.root, h.page.ptr);
+        a.hosts.append(gpa, h) catch return null;
+        if (a.current == null) a.selectHost(h);
+        a.rebuildSidebar();
+        return h;
+    }
+
+    pub fn removeHost(a: *App, h: *Host) void {
+        for (a.hosts.items, 0..) |x, i| if (x == h) {
+            _ = a.hosts.orderedRemove(i);
+            break;
+        };
+        if (a.filter == h) a.filter = null;
+        h.workspace.clear();
+        a.stack.remove(h.workspace.root);
+        h.server.destroy();
+        if (a.current == h) {
+            a.current = null;
+            a.server = null;
+            a.workspace = null;
+            setSlot(&a.session_id, null);
+            setSlot(&a.window_id, null);
+            if (a.hosts.items.len > 0) a.selectHost(a.hosts.items[0]) else a.stack.setVisibleChildName("connect");
         }
-        const s = Server.create(url) catch return;
-        s.observer = .{ .ctx = a, .changed = serverChanged };
-        s.performer = .{ .ctx = a, .perform = perform };
-        a.server = s;
-        const ws = Workspace.create(s) catch return;
-        a.workspace = ws;
-        if (a.stack.getChildByName("workspace")) |old| a.stack.remove(old);
-        _ = a.stack.addNamed(ws.root, "workspace");
+        gpa.free(h.label);
+        gpa.free(h.page);
+        gpa.destroy(h);
+        a.rebuildSidebar();
+    }
+
+    /// Shows a host's sessions in the content area.
+    fn selectHost(a: *App, h: *Host) void {
+        if (a.current == h) return;
+        a.current = h;
+        a.server = h.server;
+        a.workspace = h.workspace;
+        a.was_online = false;
+        a.theme_for = null;
+        setSlot(&a.session_id, null);
+        setSlot(&a.window_id, null);
+        a.applyTheme();
         a.showState();
+        a.ensureSelection();
+    }
+
+    fn hostOf(a: *App, s: *Server) ?*Host {
+        for (a.hosts.items) |h| if (h.server == s) return h;
+        return null;
     }
 
     // Following the server.
 
     fn serverChanged(ctx: *anyopaque, what: server_mod.Change, session_id: ?[]const u8) void {
-        const a: *App = @ptrCast(@alignCast(ctx));
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        const a = h.app;
+        const here = a.current == h;
         switch (what) {
             .state => {
-                a.applyTheme();
-                a.showState();
+                if (here) {
+                    a.applyTheme();
+                    a.showState();
+                }
+                a.rebuildSidebar();
             },
             .sessions => {
-                a.ensureSelection();
+                if (here) a.ensureSelection();
                 a.rebuildSidebar();
             },
             .view => {
-                a.ensureSelection();
+                if (here) a.ensureSelection();
                 a.rebuildSidebar();
-                if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) a.showSelected();
+                if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) a.showSelected();
             },
             .block => {
                 const block = session_id orelse return;
-                if (a.workspace) |w| w.blockChanged(block);
+                h.workspace.blockChanged(block);
                 a.refreshRows();
             },
-            .alert => a.showAlert(),
+            .alert => a.showAlert(h),
             .keymap => {},
             .message => {
-                const s = a.server orelse return;
+                const s = h.server;
                 const text = gpa.dupeSentinel(u8, s.message.items, 0) catch return;
                 defer gpa.free(text);
                 a.toasts.addToast(adw.Toast.new(text.ptr));
@@ -326,14 +422,27 @@ pub const App = struct {
     }
 
     /// Colors the whole window from the host's terminal theme, once it is known.
-    fn applyTheme(a: *App) void {
-        const colors = if (a.server) |s| s.host_colors else null;
+    pub fn applyTheme(a: *App) void {
+        const host = if (a.server) |s| s.host_colors else null;
+        const colors = themes.active orelse host;
         if (a.theme_css != null) {
             if (colors == null) return;
             if (a.theme_for) |old| if (std.meta.eql(old, colors.?)) return;
         }
         a.theme_for = colors;
-        const palette = theme.Palette.from(colors orelse .{});
+        // A forced scheme that the theme doesn't match uses a plain palette of that brightness.
+        var source = colors orelse @import("stream.zig").Colors{};
+        const theme_dark = theme.Palette.from(source).dark;
+        switch (settings.current.color_scheme) {
+            .auto => {},
+            .dark => if (!theme_dark) {
+                source = .{};
+            },
+            .light => if (theme_dark) {
+                source = .{ .bg = 0xFFF7F7F5, .fg = 0xFF2C2C2E, .cursor = 0xFF3366CC };
+            },
+        }
+        const palette = theme.Palette.from(source);
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         palette.css(&out.writer) catch return;
@@ -352,7 +461,7 @@ pub const App = struct {
         const s = a.server orelse return;
         switch (s.state) {
             .online => {
-                a.stack.setVisibleChildName("workspace");
+                if (a.current) |h| a.stack.setVisibleChildName(h.page.ptr);
                 if (!a.was_online) if (a.workspace) |w| w.resendSizes();
                 a.was_online = true;
             },
@@ -398,6 +507,11 @@ pub const App = struct {
         a.showSelected();
     }
 
+    fn clientLabel() []const u8 {
+        if (settings.current.client_label.len > 0) return settings.current.client_label;
+        return std.mem.span(glib.getHostName());
+    }
+
     fn showSelected(a: *App) void {
         const s = a.server orelse return;
         const ws = a.workspace orelse return;
@@ -409,7 +523,6 @@ pub const App = struct {
     }
 
     fn rebuildSidebar(a: *App) void {
-        const s = a.server orelse return;
         a.rebuilding = true;
         defer a.rebuilding = false;
         a.sidebar.removeAll();
@@ -418,6 +531,108 @@ pub const App = struct {
             gpa.free(row.window_id);
         };
         a.rows.clearRetainingCapacity();
+        a.rebuildFilterMenu();
+        const several = a.hosts.items.len > 1 and a.filter == null;
+        for (a.hosts.items) |h| {
+            if (a.filter) |f| if (f != h) continue;
+            if (several) a.addHostHeading(h);
+            a.addSessions(h);
+        }
+        a.selectSidebarRow();
+    }
+
+    fn rebuildFilterMenu(a: *App) void {
+        a.filter_menu.removeAll();
+        const all = gio.MenuItem.new(if (a.filter == null) "All hosts  ✓" else "All hosts", null);
+        all.setActionAndTargetValue("app.filter", glib.Variant.newString(""));
+        a.filter_menu.appendItem(all);
+        for (a.hosts.items) |h| {
+            var buf: [160]u8 = undefined;
+            const text = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ h.label, if (a.filter == h) "  ✓" else "" }, 0) catch continue;
+            const item = gio.MenuItem.new(text.ptr, null);
+            item.setActionAndTargetValue("app.filter", glib.Variant.newString(h.page.ptr));
+            a.filter_menu.appendItem(item);
+        }
+        if (a.filter) |f| {
+            const z = gpa.dupeSentinel(u8, f.label, 0) catch return;
+            defer gpa.free(z);
+            a.filter_label.setText(z.ptr);
+        } else a.filter_label.setText("Filter");
+    }
+
+    fn filterAction(a: *App, page_name: []const u8) void {
+        a.filter = null;
+        for (a.hosts.items) |h| if (std.mem.eql(u8, h.page, page_name)) {
+            a.filter = h;
+            a.selectHost(h);
+        };
+        a.rebuildSidebar();
+    }
+
+    /// Asks for a Rex server's address, saves it, and connects.
+    fn addHostDialog(a: *App) void {
+        const dialog = adw.AlertDialog.new("Add Remote Host", "A Rex HTTP or HTTPS address, such as a Tailscale one");
+        const box = gtk.Box.new(.vertical, 8);
+        const url = gtk.Entry.new();
+        url.setPlaceholderText("https://my-mac-rex.tailnet.ts.net");
+        url.setActivatesDefault(1);
+        const name = gtk.Entry.new();
+        name.setPlaceholderText("Name (optional)");
+        name.setActivatesDefault(1);
+        box.append(url.as(gtk.Widget));
+        box.append(name.as(gtk.Widget));
+        dialog.setExtraChild(box.as(gtk.Widget));
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("add", "Add");
+        dialog.setResponseAppearance("add", .suggested);
+        dialog.setDefaultResponse("add");
+        const ctx = gpa.create(AddHostCtx) catch return;
+        ctx.* = .{ .app = a, .url = url, .name = name };
+        _ = adw.AlertDialog.signals.response.connect(dialog, *AddHostCtx, &hostAdded, ctx, .{});
+        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+    }
+
+    const AddHostCtx = struct { app: *App, url: *gtk.Entry, name: *gtk.Entry };
+
+    fn hostAdded(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *AddHostCtx) callconv(.c) void {
+        defer gpa.destroy(ctx);
+        if (!std.mem.eql(u8, std.mem.span(response), "add")) return;
+        const raw = std.mem.trim(u8, std.mem.span(ctx.url.as(gtk.Editable).getText()), " ");
+        if (raw.len == 0) return;
+        const url = if (std.mem.indexOf(u8, raw, "://") == null)
+            std.fmt.allocPrint(gpa, "http://{s}", .{raw}) catch return
+        else
+            gpa.dupe(u8, raw) catch return;
+        defer gpa.free(url);
+        const typed = std.mem.trim(u8, std.mem.span(ctx.name.as(gtk.Editable).getText()), " ");
+        const label = if (typed.len > 0) typed else settings.labelFor(url);
+        settings.addHost(label, url);
+        if (ctx.app.addHost(label, url)) |h| ctx.app.selectHost(h);
+    }
+
+    /// A host's name, with how its connection is doing when it isn't connected.
+    fn addHostHeading(a: *App, h: *Host) void {
+        var buf: [160]u8 = undefined;
+        const text = switch (h.server.state) {
+            .online => std.fmt.bufPrintSentinel(&buf, "{s}", .{h.label}, 0),
+            .connecting => std.fmt.bufPrintSentinel(&buf, "{s} · connecting", .{h.label}, 0),
+            .offline => std.fmt.bufPrintSentinel(&buf, "{s} · offline", .{h.label}, 0),
+        } catch return;
+        const label = gtk.Label.new(text.ptr);
+        label.setXalign(0);
+        label.setEllipsize(.end);
+        label.as(gtk.Widget).addCssClass("host-heading");
+        const row = gtk.ListBoxRow.new();
+        row.setChild(label.as(gtk.Widget));
+        row.setActivatable(0);
+        row.setSelectable(0);
+        row.as(gtk.Widget).addCssClass("host-row");
+        a.sidebar.append(row.as(gtk.Widget));
+        a.rows.append(gpa, null) catch {};
+    }
+
+    fn addSessions(a: *App, h: *Host) void {
+        const s = h.server;
         for (s.sessions.items) |session| {
             var buf: [256]u8 = undefined;
             const heading = std.fmt.bufPrintSentinel(&buf, "{s}", .{if (session.label.len > 0) session.label else "Session"}, 0) catch continue;
@@ -452,7 +667,7 @@ pub const App = struct {
             const v = s.sessionView(session.id) orelse continue;
             for (v.windows) |*w| {
                 var tbuf: [256]u8 = undefined;
-                const title = a.rowTitle(&tbuf, w, v);
+                const title = rowTitle(h, &tbuf, w, v);
                 const item = gtk.Label.new(title.ptr);
                 item.setXalign(0);
                 item.setEllipsize(.end);
@@ -469,6 +684,7 @@ pub const App = struct {
                 row.setChild(line.as(gtk.Widget));
                 a.sidebar.append(row.as(gtk.Widget));
                 a.rows.append(gpa, .{
+                    .host = h,
                     .session_id = gpa.dupe(u8, session.id) catch continue,
                     .window_id = gpa.dupe(u8, w.id) catch continue,
                     .label = item,
@@ -477,18 +693,17 @@ pub const App = struct {
                 }) catch {};
             }
         }
-        a.selectSidebarRow();
     }
 
     /// A window's row shows its focused pane: that pane's program and title, like Rex.
-    fn rowTitle(a: *App, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
-        if (a.workspace) |ws| if (w.focused_block_id) |fb| for (ws.panes.items) |p| if (std.mem.eql(u8, p.block_id, fb)) {
+    fn rowTitle(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
+        if (w.focused_block_id) |fb| for (h.workspace.panes.items) |p| if (std.mem.eql(u8, p.block_id, fb)) {
             var tb: [256]u8 = undefined;
             const t = p.term.title(&tb);
             return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
         };
         if (w.title()) |t| return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
-        const s = a.server orelse return windowTitle(buf, w, v);
+        const s = h.server;
         if (w.focused_block_id) |fb| if (s.blockInfo(fb)) |info| if (info.program) |prog| {
             var fbuf: [256]u8 = undefined;
             const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
@@ -500,21 +715,27 @@ pub const App = struct {
 
     /// Updates row titles and tiles in place, since block details change often.
     fn refreshRows(a: *App) void {
-        const s = a.server orelse return;
         for (a.rows.items) |r| if (r) |row| {
-            const v = s.sessionView(row.session_id) orelse continue;
+            const v = row.host.server.sessionView(row.session_id) orelse continue;
             const w = v.window(row.window_id) orelse continue;
             var buf: [256]u8 = undefined;
-            if (row.label) |l| l.setText(a.rowTitle(&buf, w, v).ptr);
+            if (row.label) |l| l.setText(rowTitle(row.host, &buf, w, v).ptr);
             if (row.tile) |t| t.queueDraw();
         };
     }
 
-    fn showAlert(a: *App) void {
-        if (!config.alerts()) return;
-        const s = a.server orelse return;
+    fn showAlert(a: *App, h: *Host) void {
+        const st = &settings.current;
+        if (!st.alerts) return;
+        const s = h.server;
+        switch (s.alert_kind) {
+            .blocked => if (!st.alert_blocked) return,
+            .failed => if (!st.alert_error) return,
+            .done => if (!st.alert_done) return,
+            .notification => if (!st.terminal_notifications) return,
+        }
         const active = a.window.as(gtk.Window).isActive() != 0;
-        const shown = if (a.workspace) |ws| ws.isShown(s.alert_block.items) else false;
+        const shown = a.current == h and h.workspace.isShown(s.alert_block.items);
         // Someone looking at the pane already sees it.
         if (active and shown) return;
         const text = gpa.dupeSentinel(u8, s.alert_text.items, 0) catch return;
@@ -522,15 +743,20 @@ pub const App = struct {
         const n = gio.Notification.new("Compy");
         n.setBody(text.ptr);
         var tbuf: [512]u8 = undefined;
-        const where = std.fmt.bufPrintSentinel(&tbuf, "{s} {s}", .{ s.alert_session.items, s.alert_block.items }, 0) catch return;
+        const where = std.fmt.bufPrintSentinel(&tbuf, "{s} {s} {s}", .{ h.page, s.alert_session.items, s.alert_block.items }, 0) catch return;
         n.setDefaultActionAndTargetValue("app.show-block", glib.Variant.newString(where.ptr));
         var ibuf: [128]u8 = undefined;
         const id = std.fmt.bufPrintSentinel(&ibuf, "block-{s}", .{s.alert_block.items}, 0) catch return;
         a.app.as(gio.Application).sendNotification(id.ptr, n);
         n.as(gobject.Object).unref();
+        if (st.sound) gdk.Display.getDefault().?.beep();
     }
 
-    fn showBlockAction(a: *App, session_id: []const u8, block_id: []const u8) void {
+    fn showBlockAction(a: *App, where: []const u8, block_id: []const u8) void {
+        // `where` is "page session"; the action splits off the last part as the block.
+        const space = std.mem.indexOfScalar(u8, where, ' ') orelse return;
+        for (a.hosts.items) |h| if (std.mem.eql(u8, h.page, where[0..space])) a.selectHost(h);
+        const session_id = where[space + 1 ..];
         const s = a.server orelse return;
         setSlot(&a.session_id, session_id);
         if (s.sessionView(session_id)) |v| if (v.windowOf(block_id)) |w| {
@@ -545,11 +771,12 @@ pub const App = struct {
 
     fn selectSidebarRow(a: *App) void {
         const s = a.server orelse return;
+        const here = a.current orelse return;
         const sid = a.session_id orelse return;
         const v = s.sessionView(sid) orelse return;
         const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return;
         for (a.rows.items, 0..) |r, i| if (r) |row| {
-            if (std.mem.eql(u8, row.session_id, sid) and std.mem.eql(u8, row.window_id, shown.id)) {
+            if (row.host == here and std.mem.eql(u8, row.session_id, sid) and std.mem.eql(u8, row.window_id, shown.id)) {
                 const was = a.rebuilding;
                 a.rebuilding = true;
                 a.sidebar.selectRow(a.sidebar.getRowAtIndex(@intCast(i)));
@@ -564,6 +791,7 @@ pub const App = struct {
         const index: usize = @intCast(row.getIndex());
         if (index >= a.rows.items.len) return;
         const r = a.rows.items[index] orelse return;
+        a.selectHost(r.host);
         setSlot(&a.session_id, r.session_id);
         setSlot(&a.window_id, r.window_id);
         if (a.server) |s| s.focusWindow(r.session_id, r.window_id);
@@ -575,7 +803,10 @@ pub const App = struct {
     // runs its own actions and asks the client for these.
 
     fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
-        const a: *App = @ptrCast(@alignCast(ctx));
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        const a = h.app;
+        // A key bound on one host acts on that host's sessions.
+        a.selectHost(h);
         const J = @import("json.zig");
         if (session_id) |sid| if (!eqlOpt(a.session_id, sid)) {
             setSlot(&a.session_id, sid);
@@ -659,6 +890,7 @@ pub const App = struct {
             .{ "toggle-sidebar", toggleSidebar, "" },
             .{ "palette", openPalette, "" },
             .{ "settings", openSettings, "" },
+            .{ "add-host", addHostDialog, "" },
             .{ "pane-float-focused", floatPane, "" },
             .{ "find", openFind, "" },
             .{ "find-next", findNext, "" },
@@ -698,7 +930,7 @@ pub const App = struct {
             a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
         }
         {
-            const action = gio.SimpleAction.newStateful("tight", null, glib.Variant.newBoolean(@intFromBool(config.tight())));
+            const action = gio.SimpleAction.newStateful("tight", null, glib.Variant.newBoolean(@intFromBool(settings.current.tight)));
             const Thunk = struct {
                 fn run(act: *gio.SimpleAction, _: ?*glib.Variant, app: *App) callconv(.c) void {
                     const on = !Workspace.isTight();
@@ -709,7 +941,7 @@ pub const App = struct {
             _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
             a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
         }
-        inline for (.{ .{ "new-window-in", newWindowIn }, .{ "toggle-session", toggleSession } }) |e| {
+        inline for (.{ .{ "new-window-in", newWindowIn }, .{ "toggle-session", toggleSession }, .{ "filter", filterAction } }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
                 fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
@@ -724,7 +956,7 @@ pub const App = struct {
             const Thunk = struct {
                 fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
                     const text = std.mem.span(param.?.getString(null));
-                    const space = std.mem.indexOfScalar(u8, text, ' ') orelse return;
+                    const space = std.mem.lastIndexOfScalar(u8, text, ' ') orelse return;
                     e[1](app, text[0..space], text[space + 1 ..]);
                 }
             };
@@ -793,7 +1025,10 @@ pub const App = struct {
 
     pub fn setTight(a: *App, on: bool) void {
         @import("workspace.zig").setTight(on);
-        config.saveTight(on);
+        if (settings.current.tight != on) {
+            settings.current.tight = on;
+            settings.save();
+        }
         if (on) a.window.as(gtk.Widget).addCssClass("tight") else a.window.as(gtk.Widget).removeCssClass("tight");
         if (a.workspace) |ws| ws.root.queueAllocate();
     }
@@ -951,90 +1186,34 @@ pub const App = struct {
     // Settings.
 
     fn openSettings(a: *App) void {
-        const dialog = adw.PreferencesDialog.new();
-        const page = adw.PreferencesPage.new();
-        page.setTitle("General");
+        @import("settings_window.zig").open(a);
+    }
 
-        const look = adw.PreferencesGroup.new();
-        look.setTitle("Appearance");
-        const font_row = adw.ActionRow.new();
-        font_row.as(adw.PreferencesRow).setTitle("Terminal font");
-        const font_button = gtk.FontDialogButton.new(gtk.FontDialog.new());
-        font_button.setLevel(.font);
-        font_button.setUseFont(1);
-        font_button.setFontDesc(termview.font.?.regular);
-        font_button.as(gtk.Widget).setValign(.center);
-        _ = gobject.Object.signals.notify.connect(font_button, *App, &fontPicked, a, .{ .detail = "font-desc" });
-        font_row.addSuffix(font_button.as(gtk.Widget));
-        look.add(font_row.as(gtk.Widget));
-        const tight_row = adw.SwitchRow.new();
-        tight_row.as(adw.PreferencesRow).setTitle("Tight layout");
-        tight_row.as(adw.ActionRow).setSubtitle("Panes edge to edge with thin lines, like tmux. Only changes how Compy shows them.");
-        tight_row.setActive(@intFromBool(@import("workspace.zig").tight));
-        _ = gobject.Object.signals.notify.connect(tight_row, *App, &tightToggled, a, .{ .detail = "active" });
-        look.add(tight_row.as(gtk.Widget));
-        page.add(look);
+    /// Applies the terminal font from the settings to every pane.
+    pub fn fontChanged(a: *App) void {
+        termview.font = termview.Font.init(gpa.dupeSentinel(u8, settings.current.font, 0) catch return);
+        for (a.hosts.items) |h| h.workspace.fontChanged();
+    }
 
-        const alerts_group = adw.PreferencesGroup.new();
-        alerts_group.setTitle("Alerts");
-        const alerts_row = adw.SwitchRow.new();
-        alerts_row.as(adw.PreferencesRow).setTitle("Desktop notifications");
-        alerts_row.as(adw.ActionRow).setSubtitle("When a program finishes, fails or needs you while you're looking elsewhere");
-        alerts_row.setActive(@intFromBool(config.alerts()));
-        _ = gobject.Object.signals.notify.connect(alerts_row, *App, &alertsToggled, a, .{ .detail = "active" });
-        alerts_group.add(alerts_row.as(gtk.Widget));
-        page.add(alerts_group);
-
-        const server_group = adw.PreferencesGroup.new();
-        server_group.setTitle("Server");
-        if (a.server) |s| if (s.rex_version) |v| {
-            var buf: [96]u8 = undefined;
-            const text = std.fmt.bufPrintSentinel(&buf, "Rex {s}", .{v}, 0) catch "";
-            server_group.setDescription(text.ptr);
-        };
-        const url_row = adw.EntryRow.new();
-        url_row.as(adw.PreferencesRow).setTitle("Address");
-        if (a.server) |s| {
-            const z = gpa.dupeSentinel(u8, s.url, 0) catch return;
-            defer gpa.free(z);
-            url_row.as(gtk.Editable).setText(z.ptr);
+    /// Applies the theme setting: every terminal recolors, and so does the window.
+    pub fn themeChanged(a: *App) void {
+        themes.active = themes.resolve(settings.current.theme);
+        for (a.hosts.items) |h| {
+            var it = h.server.streams.valueIterator();
+            while (it.next()) |st| st.*.hostColorsChanged();
         }
-        url_row.setShowApplyButton(1);
-        _ = adw.EntryRow.signals.apply.connect(url_row, *App, &urlApplied, a, .{});
-        server_group.add(url_row.as(gtk.Widget));
-        page.add(server_group);
-
-        dialog.add(page);
-        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+        a.theme_for = null;
+        a.applyTheme();
     }
 
-    fn fontPicked(button: *gtk.FontDialogButton, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
-        const desc = button.getFontDesc() orelse return;
-        const name = desc.toString();
-        defer glib.free(name);
-        config.saveFont(std.mem.span(name));
-        termview.font = termview.Font.init(std.mem.span(name));
-        if (a.workspace) |ws| ws.fontChanged();
+    pub fn headersChanged(a: *App) void {
+        @import("workspace.zig").show_headers = settings.current.show_headers;
+        for (a.hosts.items) |h| h.workspace.headersChanged();
     }
 
-    fn tightToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
-        a.setTight(row.getActive() != 0);
-    }
-
-    fn alertsToggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, _: *App) callconv(.c) void {
-        config.saveAlerts(row.getActive() != 0);
-    }
-
-    fn urlApplied(row: *adw.EntryRow, a: *App) callconv(.c) void {
-        const raw = std.mem.trim(u8, std.mem.span(row.as(gtk.Editable).getText()), " ");
-        if (raw.len == 0) return;
-        const url = if (std.mem.indexOf(u8, raw, "://") == null)
-            std.fmt.allocPrint(gpa, "http://{s}", .{raw}) catch return
-        else
-            gpa.dupe(u8, raw) catch return;
-        defer gpa.free(url);
-        config.saveServerUrl(url);
-        a.connect(url);
+    pub fn redrawAll(a: *App) void {
+        for (a.hosts.items) |h| h.workspace.redraw();
+        a.refreshRows();
     }
 
     fn newWindowIn(a: *App, session_id: []const u8) void {
@@ -1062,6 +1241,14 @@ pub const App = struct {
         a.stack.setVisibleChildName("connect");
     }
 };
+
+/// Blinks the cursor of the pane with the keyboard, when the setting and the program allow it.
+fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
+    const a: *App = @ptrCast(@alignCast(data.?));
+    termview.blink_on = !termview.blink_on;
+    if (a.workspace) |ws| if (ws.focusedView()) |tv| if (tv.widget().hasFocus() != 0) tv.widget().queueDraw();
+    return 1;
+}
 
 fn appMenu() *gio.MenuModel {
     const menu = gio.Menu.new();

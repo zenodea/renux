@@ -36,6 +36,8 @@ pub const Action = struct {
     needs_args: bool,
 };
 
+pub const AlertKind = enum { blocked, failed, done, notification };
+
 pub const StatusKind = enum { working, blocked, done, failed, other };
 
 /// What a program in a terminal last reported with OSC 7501, and what it runs and where.
@@ -102,6 +104,7 @@ pub const Server = struct {
     alert_text: std.ArrayList(u8) = .empty,
     alert_session: std.ArrayList(u8) = .empty,
     alert_block: std.ArrayList(u8) = .empty,
+    alert_kind: AlertKind = .done,
     host_colors: ?stream_mod.Colors = null,
     observer: ?Observer = null,
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
@@ -109,12 +112,11 @@ pub const Server = struct {
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
     performer: ?Performer = null,
 
-    pub fn create(url: []const u8) !*Server {
+    pub fn create(url: []const u8, client_label: []const u8) !*Server {
         const s = try gpa.create(Server);
-        const host = std.mem.span(glib.getHostName());
         s.* = .{
             .url = try gpa.dupe(u8, std.mem.trimEnd(u8, url, "/")),
-            .client_label = try gpa.dupe(u8, host),
+            .client_label = try gpa.dupe(u8, client_label),
         };
         s.startConnecting();
         return s;
@@ -392,10 +394,12 @@ pub const Server = struct {
                 const who = b.status_app orelse "A program";
                 const k = b.status_kind orelse "";
                 const what = if (eql(k, "permission")) "needs your permission" else if (eql(k, "question")) "has a question" else if (eql(k, "auth")) "needs a password" else "needs you";
+                s.alert_kind = .blocked;
                 s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, what }) catch "A program needs you");
             } else if (b.status == .done or b.status == .failed) {
                 var buf: [256]u8 = undefined;
                 const who = b.status_app orelse "A program";
+                s.alert_kind = if (b.status == .done) .done else .failed;
                 s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, if (b.status == .done) "finished" else "failed" }) catch "A program finished");
             }
         } else if (eql(name, "program_status_removed")) {
@@ -425,6 +429,7 @@ pub const Server = struct {
             const body = json.str(fields, "body") orelse "";
             var buf: [512]u8 = undefined;
             const text = if (title.len > 0 and body.len > 0) std.fmt.bufPrint(&buf, "{s}: {s}", .{ title, body }) catch title else if (title.len > 0) title else body;
+            s.alert_kind = .notification;
             if (text.len > 0) s.raiseAlert(session_id, block, text);
         } else return;
         s.notify(.block, block);
