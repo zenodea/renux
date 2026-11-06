@@ -52,7 +52,7 @@ const css =
     \\.connect-box { margin: 0 24px; }
 ;
 
-const Row = struct { session_id: []u8, window_id: []u8 };
+const Row = struct { session_id: []u8, window_id: []u8, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
 
 pub const App = struct {
     app: *adw.Application,
@@ -291,6 +291,12 @@ pub const App = struct {
                 a.rebuildSidebar();
                 if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) a.showSelected();
             },
+            .block => {
+                const block = session_id orelse return;
+                if (a.workspace) |w| w.blockChanged(block);
+                a.refreshRows();
+            },
+            .alert => a.showAlert(),
             .message => {
                 const s = a.server orelse return;
                 const text = gpa.dupeSentinel(u8, s.message.items, 0) catch return;
@@ -408,14 +414,15 @@ pub const App = struct {
             const v = s.sessionView(session.id) orelse continue;
             for (v.windows) |*w| {
                 var tbuf: [256]u8 = undefined;
-                const title = windowTitle(&tbuf, w, v);
+                const title = a.rowTitle(&tbuf, w, v);
                 const item = gtk.Label.new(title.ptr);
                 item.setXalign(0);
                 item.setEllipsize(.end);
                 item.as(gtk.Widget).addCssClass("row-title");
                 item.as(gtk.Widget).setHexpand(1);
                 const line = gtk.Box.new(.horizontal, 8);
-                line.append(icons.image(.terminal, 16));
+                const tile = rowTile(s, w);
+                line.append(tile);
                 line.append(item.as(gtk.Widget));
                 const more = menuButton(windowMenu(session.id, w.id), "Window");
                 more.as(gtk.Widget).addCssClass("row-more");
@@ -426,10 +433,75 @@ pub const App = struct {
                 a.rows.append(gpa, .{
                     .session_id = gpa.dupe(u8, session.id) catch continue,
                     .window_id = gpa.dupe(u8, w.id) catch continue,
+                    .label = item,
+                    .line = line,
+                    .tile = tile,
                 }) catch {};
             }
         }
         a.selectSidebarRow();
+    }
+
+    /// A window's row shows its focused pane: that pane's program and title, like Rex.
+    fn rowTitle(a: *App, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
+        if (a.workspace) |ws| if (w.focused_block_id) |fb| for (ws.panes.items) |p| if (std.mem.eql(u8, p.block_id, fb)) {
+            var tb: [256]u8 = undefined;
+            const t = p.term.title(&tb);
+            return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
+        };
+        if (w.title()) |t| return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
+        const s = a.server orelse return windowTitle(buf, w, v);
+        if (w.focused_block_id) |fb| if (s.blockInfo(fb)) |info| if (info.program) |prog| {
+            var fbuf: [256]u8 = undefined;
+            const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
+            if (info.folder) |f| return std.fmt.bufPrintSentinel(buf, "{s} {s}", .{ name, @import("programs.zig").shortFolder(&fbuf, f) }, 0) catch "Window";
+            return std.fmt.bufPrintSentinel(buf, "{s}", .{name}, 0) catch "Window";
+        };
+        return windowTitle(buf, w, v);
+    }
+
+    /// Updates row titles and tiles in place, since block details change often.
+    fn refreshRows(a: *App) void {
+        const s = a.server orelse return;
+        for (a.rows.items) |r| if (r) |row| {
+            const v = s.sessionView(row.session_id) orelse continue;
+            const w = v.window(row.window_id) orelse continue;
+            var buf: [256]u8 = undefined;
+            if (row.label) |l| l.setText(a.rowTitle(&buf, w, v).ptr);
+            if (row.tile) |t| t.queueDraw();
+        };
+    }
+
+    fn showAlert(a: *App) void {
+        const s = a.server orelse return;
+        const active = a.window.as(gtk.Window).isActive() != 0;
+        const shown = if (a.workspace) |ws| ws.isShown(s.alert_block.items) else false;
+        // Someone looking at the pane already sees it.
+        if (active and shown) return;
+        const text = gpa.dupeSentinel(u8, s.alert_text.items, 0) catch return;
+        defer gpa.free(text);
+        const n = gio.Notification.new("Compy");
+        n.setBody(text.ptr);
+        var tbuf: [512]u8 = undefined;
+        const where = std.fmt.bufPrintSentinel(&tbuf, "{s} {s}", .{ s.alert_session.items, s.alert_block.items }, 0) catch return;
+        n.setDefaultActionAndTargetValue("app.show-block", glib.Variant.newString(where.ptr));
+        var ibuf: [128]u8 = undefined;
+        const id = std.fmt.bufPrintSentinel(&ibuf, "block-{s}", .{s.alert_block.items}, 0) catch return;
+        a.app.as(gio.Application).sendNotification(id.ptr, n);
+        n.as(gobject.Object).unref();
+    }
+
+    fn showBlockAction(a: *App, session_id: []const u8, block_id: []const u8) void {
+        const s = a.server orelse return;
+        setSlot(&a.session_id, session_id);
+        if (s.sessionView(session_id)) |v| if (v.windowOf(block_id)) |w| {
+            setSlot(&a.window_id, w.id);
+            s.focusWindow(session_id, w.id);
+        };
+        s.focusBlock(session_id, block_id);
+        a.showSelected();
+        a.rebuildSidebar();
+        a.window.as(gtk.Window).present();
     }
 
     fn selectSidebarRow(a: *App) void {
@@ -568,7 +640,7 @@ pub const App = struct {
             _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
             a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
         }
-        inline for (.{ .{ "close-window", closeWindowAction }, .{ "rename-window", renameWindowAction } }) |e| {
+        inline for (.{ .{ "close-window", closeWindowAction }, .{ "rename-window", renameWindowAction }, .{ "show-block", showBlockAction } }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
                 fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
@@ -819,6 +891,18 @@ fn menuButton(model: *gio.MenuModel, tooltip: [:0]const u8) *gtk.MenuButton {
     button.as(gtk.Widget).addCssClass("flat");
     button.as(gtk.Widget).setValign(.center);
     return button;
+}
+
+/// The tile for a window's row: its focused pane's program.
+fn rowTile(s: *Server, w: *const view.Window) *gtk.Widget {
+    const block = w.focused_block_id orelse (if (w.layers.len > 0 and w.layers[0].blocks.len > 0) w.layers[0].blocks[0].id else "");
+    var ids: [64][]const u8 = undefined;
+    var n: usize = 0;
+    for (w.layers) |l| for (l.blocks) |b| if (n < ids.len) {
+        ids[n] = b.id;
+        n += 1;
+    };
+    return @import("blockicon.zig").createFor(s, block, ids[0..n], 16);
 }
 
 fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {

@@ -18,4 +18,6 @@ test {
     _ = @import("theme.zig");
     _ = @import("boxdraw.zig");
     _ = @import("links.zig");
+    _ = @import("programs.zig");
+    _ = @import("blockicon.zig");
 }

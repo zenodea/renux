@@ -22,7 +22,37 @@ pub const Session = struct {
     label: []u8,
 };
 
-pub const Change = enum { state, sessions, view, message };
+pub const Change = enum { state, sessions, view, message, block, alert };
+
+pub const StatusKind = enum { working, blocked, done, failed, other };
+
+/// What a program in a terminal last reported with OSC 7501, and what it runs and where.
+pub const BlockInfo = struct {
+    status: StatusKind = .other,
+    has_status: bool = false,
+    status_app: ?[]u8 = null,
+    status_kind: ?[]u8 = null,
+    message: ?[]u8 = null,
+    program: ?[]u8 = null,
+    folder: ?[]u8 = null,
+    title: ?[]u8 = null,
+    /// Percent done, -1 for work without a known end, or null.
+    progress: ?i32 = null,
+    /// Finished, failed, needs you, or rang the bell, and not looked at since.
+    attention: bool = false,
+
+    fn deinit(b: *BlockInfo) void {
+        inline for (.{ "status_app", "status_kind", "message", "program", "folder", "title" }) |f| {
+            if (@field(b, f)) |v| gpa.free(v);
+            @field(b, f) = null;
+        }
+    }
+};
+
+fn setStr(slot: *?[]u8, value: ?[]const u8) void {
+    if (slot.*) |old| gpa.free(old);
+    slot.* = if (value) |v| gpa.dupe(u8, v) catch null else null;
+}
 
 pub const Observer = struct {
     ctx: *anyopaque,
@@ -55,6 +85,11 @@ pub const Server = struct {
     fetching: std.StringHashMapUnmanaged(bool) = .empty,
     attached: std.StringHashMapUnmanaged(void) = .empty,
     streams: std.StringHashMapUnmanaged(*Stream) = .empty,
+    blocks: std.StringHashMapUnmanaged(BlockInfo) = .empty,
+    /// The last alert, for the window to show as a notification.
+    alert_text: std.ArrayList(u8) = .empty,
+    alert_session: std.ArrayList(u8) = .empty,
+    alert_block: std.ArrayList(u8) = .empty,
     host_colors: ?stream_mod.Colors = null,
     observer: ?Observer = null,
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
@@ -83,6 +118,15 @@ pub const Server = struct {
         var vit = s.views.valueIterator();
         while (vit.next()) |v| v.*.destroy();
         s.views.deinit(gpa);
+        var bit = s.blocks.iterator();
+        while (bit.next()) |e| {
+            e.value_ptr.deinit();
+            gpa.free(e.key_ptr.*);
+        }
+        s.blocks.deinit(gpa);
+        s.alert_text.deinit(gpa);
+        s.alert_session.deinit(gpa);
+        s.alert_block.deinit(gpa);
         freeKeys(&s.fetching);
         freeKeys(&s.attached);
         s.clearSessions();
@@ -279,8 +323,178 @@ pub const Server = struct {
             s.notify(.sessions, null);
         } else if (eql(kind, "block_closed")) {
             const id = json.str(payload, "block_id") orelse return;
+            if (s.blocks.fetchRemove(id)) |e| {
+                var info = e.value;
+                info.deinit();
+                gpa.free(e.key);
+            }
             s.releaseTerminal(id);
+        } else if (eql(kind, "block_event")) {
+            s.handleBlockEvent(session_id, payload orelse return);
         }
+    }
+
+    // Block details: status, program, folder and title.
+
+    pub fn blockInfo(s: *Server, block_id: []const u8) ?*BlockInfo {
+        return s.blocks.getPtr(block_id);
+    }
+
+    fn infoFor(s: *Server, block_id: []const u8) ?*BlockInfo {
+        if (s.blocks.getPtr(block_id)) |b| return b;
+        const key = gpa.dupe(u8, block_id) catch return null;
+        s.blocks.put(gpa, key, .{}) catch {
+            gpa.free(key);
+            return null;
+        };
+        return s.blocks.getPtr(block_id);
+    }
+
+    /// Marks a block looked at, such as when its pane is shown and focused.
+    pub fn clearAttention(s: *Server, block_id: []const u8) void {
+        const b = s.blocks.getPtr(block_id) orelse return;
+        if (!b.attention) return;
+        b.attention = false;
+        s.notify(.block, block_id);
+    }
+
+    fn handleBlockEvent(s: *Server, session_id: []const u8, payload: json.Value) void {
+        const block = json.str(payload, "block_id") orelse return;
+        const name = json.str(payload, "name") orelse return;
+        const fields = json.get(payload, "payload");
+        const b = s.infoFor(block) orelse return;
+        if (eql(name, "program_status_changed")) {
+            const was_blocked = b.has_status and b.status == .blocked;
+            s.setStatus(b, json.get(fields, "record"));
+            if (b.status == .done or b.status == .blocked or b.status == .failed) b.attention = true;
+            if (b.status == .blocked and !was_blocked) {
+                var buf: [256]u8 = undefined;
+                const who = b.status_app orelse "A program";
+                const k = b.status_kind orelse "";
+                const what = if (eql(k, "permission")) "needs your permission" else if (eql(k, "question")) "has a question" else if (eql(k, "auth")) "needs a password" else "needs you";
+                s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, what }) catch "A program needs you");
+            } else if (b.status == .done or b.status == .failed) {
+                var buf: [256]u8 = undefined;
+                const who = b.status_app orelse "A program";
+                s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, if (b.status == .done) "finished" else "failed" }) catch "A program finished");
+            }
+        } else if (eql(name, "program_status_removed")) {
+            b.has_status = false;
+            b.status = .other;
+            setStr(&b.message, null);
+        } else if (eql(name, "process_changed")) {
+            s.setProgram(b, json.get(fields, "foreground"));
+        } else if (eql(name, "pwd_changed")) {
+            setStr(&b.folder, json.str(fields, "pwd"));
+        } else if (eql(name, "title_changed")) {
+            setStr(&b.title, json.str(fields, "title"));
+        } else if (eql(name, "bell")) {
+            b.attention = true;
+        } else if (eql(name, "progress_report")) {
+            const state = json.str(fields, "state") orelse "";
+            const percent = json.int(fields, "progress");
+            if (eql(state, "set")) {
+                if (percent) |p| b.progress = @intCast(std.math.clamp(p, 0, 100));
+            } else if (eql(state, "indeterminate")) {
+                b.progress = -1;
+            } else if (eql(state, "pause") or eql(state, "error")) {
+                if (percent) |p| b.progress = @intCast(std.math.clamp(p, 0, 100));
+            } else b.progress = null;
+        } else if (eql(name, "desktop_notification")) {
+            const title = json.str(fields, "title") orelse "";
+            const body = json.str(fields, "body") orelse "";
+            var buf: [512]u8 = undefined;
+            const text = if (title.len > 0 and body.len > 0) std.fmt.bufPrint(&buf, "{s}: {s}", .{ title, body }) catch title else if (title.len > 0) title else body;
+            if (text.len > 0) s.raiseAlert(session_id, block, text);
+        } else return;
+        s.notify(.block, block);
+    }
+
+    fn raiseAlert(s: *Server, session_id: []const u8, block_id: []const u8, text: []const u8) void {
+        inline for (.{ .{ &s.alert_text, text }, .{ &s.alert_session, session_id }, .{ &s.alert_block, block_id } }) |e| {
+            e[0].clearRetainingCapacity();
+            e[0].appendSlice(gpa, e[1]) catch {};
+        }
+        s.notify(.alert, block_id);
+    }
+
+    fn setStatus(_: *Server, b: *BlockInfo, record: ?json.Value) void {
+        const r = record orelse return;
+        const state = json.str(r, "state") orelse return;
+        b.has_status = true;
+        b.status = if (eql(state, "working")) .working else if (eql(state, "blocked")) .blocked else if (eql(state, "done")) .done else if (eql(state, "error")) .failed else .other;
+        setStr(&b.status_app, json.str(r, "effective_app") orelse json.str(r, "app"));
+        setStr(&b.status_kind, json.str(r, "kind"));
+        setStr(&b.message, json.str(r, "msg"));
+        if (json.int(r, "progress")) |p| b.progress = @intCast(std.math.clamp(p, 0, 100));
+    }
+
+    /// An interpreter's script says more than its name, so node running claude counts as claude.
+    fn setProgram(_: *Server, b: *BlockInfo, foreground: ?json.Value) void {
+        const name = json.str(foreground, "name") orelse return;
+        var buf: [256]u8 = undefined;
+        const text = if (json.str(foreground, "script")) |script| blk: {
+            const base = if (std.mem.lastIndexOfScalar(u8, script, '/')) |i| script[i + 1 ..] else script;
+            break :blk std.fmt.bufPrint(&buf, "{s}/{s}", .{ name, base }) catch name;
+        } else name;
+        setStr(&b.program, text);
+    }
+
+    const DetailFor = struct {
+        session_id: []u8,
+        block_id: []u8,
+        which: enum { status, title, process, pwd },
+        fn deinit(d: *DetailFor) void {
+            gpa.free(d.session_id);
+            gpa.free(d.block_id);
+        }
+    };
+
+    /// Reads what a block runs, where, and its status, once; events keep them current after.
+    fn readDetails(s: *Server, session_id: []const u8, block_id: []const u8) void {
+        if (s.blocks.contains(block_id)) return;
+        _ = s.infoFor(block_id);
+        inline for (.{
+            .{ "com.superlogical.terminal.program_status", .status },
+            .{ "com.superlogical.terminal.title", .title },
+            .{ "com.superlogical.terminal.process", .process },
+            .{ "com.superlogical.terminal.pwd", .pwd },
+        }) |e| {
+            const d: DetailFor = .{
+                .session_id = gpa.dupe(u8, session_id) catch return,
+                .block_id = gpa.dupe(u8, block_id) catch return,
+                .which = e[1],
+            };
+            s.call(e[0], .{ .session_id = session_id, .block_id = block_id }, DetailFor, d, gotDetail);
+        }
+    }
+
+    fn gotDetail(s: *Server, d: *DetailFor, r: Result) void {
+        const payload = switch (r) {
+            .ok => |p| p,
+            .err => return,
+        };
+        const b = s.blocks.getPtr(d.block_id) orelse return;
+        switch (d.which) {
+            .status => {
+                // The most urgent record counts.
+                var best: ?json.Value = null;
+                var best_rank: u8 = 0;
+                for (json.array(payload, "records")) |rec| {
+                    const st = json.str(rec, "state") orelse continue;
+                    const rank: u8 = if (eql(st, "blocked")) 4 else if (eql(st, "error")) 3 else if (eql(st, "working")) 2 else if (eql(st, "done")) 1 else 0;
+                    if (best == null or rank > best_rank) {
+                        best = rec;
+                        best_rank = rank;
+                    }
+                }
+                if (best) |rec| s.setStatus(b, rec);
+            },
+            .title => setStr(&b.title, json.str(payload, "title")),
+            .process => s.setProgram(b, json.get(payload, "foreground")),
+            .pwd => setStr(&b.folder, json.str(payload, "pwd")),
+        }
+        s.notify(.block, d.block_id);
     }
 
     fn listed(s: *Server, _: *void, r: Result) void {
@@ -423,6 +637,7 @@ pub const Server = struct {
             session.label = copy;
             s.notify(.sessions, null);
         };
+        for (v.windows) |w| for (w.layers) |l| for (l.blocks) |blk| if (blk.isTerminal()) s.readDetails(v.session_id, blk.id);
         s.notify(.view, v.session_id);
     }
 

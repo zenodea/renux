@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .{ "cairo", "cairo1" },
         .{ "gsk", "gsk4" },
         .{ "glibunix", "glibunix2" },
+        .{ "rsvg", "rsvg2" },
     }) |import| {
         mod.addImport(import[0], gobject.module(import[1]));
     }
@@ -52,7 +53,7 @@ pub fn build(b: *std.Build) void {
         var seen: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
         unlinkBindings(b.allocator, &seen, mod, gobject.builder);
         // One pkg-config call, so a library shared by several packages appears once.
-        const flags = b.run(&.{ "pkg-config", "--libs", "libadwaita-1", "gtk4", "pangocairo" });
+        const flags = b.run(&.{ "pkg-config", "--libs", "libadwaita-1", "gtk4", "pangocairo", "librsvg-2.0" });
         var it = std.mem.tokenizeAny(u8, flags, " \n");
         while (it.next()) |flag| {
             if (std.mem.startsWith(u8, flag, "-L")) {

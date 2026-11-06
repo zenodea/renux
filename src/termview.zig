@@ -17,6 +17,7 @@ const Server = @import("server.zig").Server;
 const Stream = @import("stream.zig").Stream;
 const boxdraw = @import("boxdraw.zig");
 const links = @import("links.zig");
+const programs = @import("programs.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -154,18 +155,45 @@ pub const TermView = struct {
         v.updateTitle();
     }
 
-    /// Shows the title the program set, or the block's label until it sets one.
-    fn updateTitle(v: *TermView) void {
+    /// The pane's title, as Rex shows it: a shell as "zsh ~/compy", anything else by the title it
+    /// set, then by what runs and where.
+    pub fn title(v: *TermView, out: []u8) []const u8 {
+        const info = v.server.blockInfo(v.block_id);
+        var folder_buf: [256]u8 = undefined;
+        const folder: ?[]const u8 = if (info) |b| if (b.folder) |f| programs.shortFolder(&folder_buf, f) else null else null;
+        const program: ?[]const u8 = if (info) |b| if (b.program) |p| std.mem.trimStart(u8, p[0 .. std.mem.indexOfScalar(u8, p, '/') orelse p.len], "-") else null else null;
+        const shell = if (program) |p| isShell(p) else false;
+        if (!shell) {
+            var own_buf: [256]u8 = undefined;
+            if (v.term()) |t| if (t.title(&own_buf)) |own| if (own.len > 0) return copy(out, own);
+            if (info) |b| if (b.title) |t| if (t.len > 0) return copy(out, t);
+        }
+        if (program) |p| {
+            if (folder) |f| return std.fmt.bufPrint(out, "{s} {s}", .{ p, f }) catch copy(out, p);
+            return copy(out, p);
+        }
+        if (v.server.sessionView(v.session_id)) |sv| if (sv.windowOf(v.block_id)) |w| if (w.findBlock(v.block_id)) |blk| if (blk.label.len > 0) return copy(out, blk.label);
+        return copy(out, "Terminal");
+    }
+
+    fn isShell(p: []const u8) bool {
+        for ([_][]const u8{ "zsh", "bash", "fish", "sh", "dash", "nu", "elvish", "xonsh", "pwsh" }) |sh| if (std.mem.eql(u8, p, sh)) return true;
+        return false;
+    }
+
+    fn copy(out: []u8, s: []const u8) []const u8 {
+        const n = @min(s.len, out.len);
+        @memcpy(out[0..n], s[0..n]);
+        return out[0..n];
+    }
+
+    pub fn updateTitle(v: *TermView) void {
         const label = v.title_label orelse return;
         var buf: [256]u8 = undefined;
-        const title: []const u8 = blk: {
-            if (v.term()) |t| if (t.title(&buf)) |own| if (own.len > 0) break :blk own;
-            if (v.server.sessionView(v.session_id)) |sv| if (sv.windowOf(v.block_id)) |w| if (w.findBlock(v.block_id)) |b| if (b.label.len > 0) break :blk b.label;
-            break :blk "Terminal";
-        };
-        const n = @min(title.len, v.title_buf.len - 1);
-        if (n == v.title_len and std.mem.eql(u8, v.title_buf[0..n], title[0..n])) return;
-        @memcpy(v.title_buf[0..n], title[0..n]);
+        const t = v.title(&buf);
+        const n = @min(t.len, v.title_buf.len - 1);
+        if (n == v.title_len and std.mem.eql(u8, v.title_buf[0..n], t[0..n])) return;
+        @memcpy(v.title_buf[0..n], t[0..n]);
         v.title_buf[n] = 0;
         v.title_len = n;
         label.setText(@ptrCast(&v.title_buf));

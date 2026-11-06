@@ -7,6 +7,7 @@ const view = @import("view.zig");
 const Server = @import("server.zig").Server;
 const TermView = @import("termview.zig").TermView;
 const icons = @import("icons.zig");
+const blockicon = @import("blockicon.zig");
 const glib = @import("glib");
 
 const gpa = std.heap.c_allocator;
@@ -18,6 +19,7 @@ const Pane = struct {
     block_id: []u8,
     /// The pane's card: its title row above the terminal.
     frame: *gtk.Widget,
+    tile: *gtk.Widget,
     floating: bool = false,
     term: *TermView,
     rect: view.Rect = .{},
@@ -137,7 +139,8 @@ pub const Workspace = struct {
         // The title row: the program's icon and title, then this pane's buttons.
         const row = gtk.Box.new(.horizontal, 2);
         row.as(gtk.Widget).addCssClass("pane-title");
-        row.append(icons.image(.terminal, 15));
+        const tile = blockicon.create(ws.server, block_id, 16);
+        row.append(tile);
         const label = gtk.Label.new(null);
         label.as(gtk.Widget).addCssClass("title");
         label.setEllipsize(.end);
@@ -175,6 +178,7 @@ pub const Workspace = struct {
         ws.panes.append(gpa, .{
             .block_id = gpa.dupe(u8, block_id) catch return,
             .frame = frame,
+            .tile = tile,
             .term = tv,
             .rect = rect,
             .floating = floating,
@@ -184,6 +188,7 @@ pub const Workspace = struct {
 
     fn clicked(ctx: *anyopaque, block_id: []const u8) void {
         const ws: *Workspace = @ptrCast(@alignCast(ctx));
+        ws.server.clearAttention(block_id);
         replace(&ws.focused, block_id);
         ws.markFocus();
         if (ws.session_id) |s| ws.server.focusBlock(s, block_id);
@@ -221,6 +226,19 @@ pub const Workspace = struct {
     /// The pane with the keyboard, or the one the server says is focused.
     pub fn focusedBlock(ws: *Workspace) ?[]const u8 {
         return ws.focused;
+    }
+
+    /// A block's details changed: redraw its tile and title.
+    pub fn blockChanged(ws: *Workspace, block_id: []const u8) void {
+        for (ws.panes.items) |p| if (std.mem.eql(u8, p.block_id, block_id)) {
+            p.tile.queueDraw();
+            p.term.updateTitle();
+        };
+    }
+
+    pub fn isShown(ws: *Workspace, block_id: []const u8) bool {
+        for (ws.panes.items) |p| if (std.mem.eql(u8, p.block_id, block_id)) return true;
+        return false;
     }
 
     /// After reconnecting, sizes must be sent again.
