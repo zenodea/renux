@@ -46,12 +46,21 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "compy", .root_module = mod });
     b.installArtifact(exe);
 
+    // The app icon and desktop entry, where Linux desktops look for them.
+    b.installFile("data/dev.compy.linux.svg", "share/icons/hicolor/scalable/apps/dev.compy.linux.svg");
+    b.installFile("data/dev.compy.linux.png", "share/icons/hicolor/512x512/apps/dev.compy.linux.png");
+    b.installFile("data/dev.compy.linux.desktop", "share/applications/dev.compy.linux.desktop");
+
+
     // On a Mac (only used for development) Zig's linker names a library once for every binding
     // module that links it, and dyld refuses such a binary. So there the binding modules link
     // nothing and the app links each library once.
     if (target.result.os.tag == .macos) {
         var seen: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
         unlinkBindings(b.allocator, &seen, mod, gobject.builder);
+        // For setting the Dock icon through the Objective-C runtime.
+        mod.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+        mod.linkFramework("AppKit", .{});
         // One pkg-config call, so a library shared by several packages appears once.
         const flags = b.run(&.{ "pkg-config", "--libs", "libadwaita-1", "gtk4", "pangocairo", "librsvg-2.0" });
         var it = std.mem.tokenizeAny(u8, flags, " \n");

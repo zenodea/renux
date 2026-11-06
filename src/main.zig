@@ -1,7 +1,11 @@
 const std = @import("std");
 const App = @import("app.zig").App;
 
-pub fn main() !void {
+/// For the few standard library calls that need it.
+pub var io: std.Io = undefined;
+
+pub fn main(init: std.process.Init) !void {
+    io = init.io;
     const app = try App.create();
     std.process.exit(@intCast(app.run()));
 }

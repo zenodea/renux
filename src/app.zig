@@ -148,6 +148,7 @@ pub const App = struct {
         gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
 
         a.applyTheme();
+        useAppIcon();
         a.window = adw.ApplicationWindow.new(a.app.as(gtk.Application));
         const win = a.window.as(gtk.Window);
         win.setDefaultSize(1180, 760);
@@ -1369,6 +1370,25 @@ pub const App = struct {
         a.stack.setVisibleChildName("connect");
     }
 };
+
+/// Shows Compy's icon for its windows: from the installed icons, or from the build's when run
+/// from zig-out. On a Mac, where it's only built for development, it sets the Dock icon too.
+fn useAppIcon() void {
+    // Installed apps live in PREFIX/bin with their icons in PREFIX/share, zig-out included.
+    var exe_buf: [4096]u8 = undefined;
+    const n = std.process.executableDirPath(@import("main.zig").io, &exe_buf) catch return;
+    var dir_buf: [4200]u8 = undefined;
+    const data_dir = std.fmt.bufPrint(&dir_buf, "{s}/../share", .{exe_buf[0..n]}) catch return;
+    const icons_dir = std.fmt.allocPrintSentinel(gpa, "{s}/icons", .{data_dir}, 0) catch return;
+    defer gpa.free(icons_dir);
+    gtk.IconTheme.getForDisplay(gdk.Display.getDefault().?).addSearchPath(icons_dir.ptr);
+    gtk.Window.setDefaultIconName("dev.compy.linux");
+    if (builtin.os.tag == .macos) {
+        const png = std.fmt.allocPrintSentinel(gpa, "{s}/icons/hicolor/512x512/apps/dev.compy.linux.png", .{data_dir}, 0) catch return;
+        defer gpa.free(png);
+        @import("macos.zig").setDockIcon(png);
+    }
+}
 
 /// Blinks the cursor of the pane with the keyboard, when the setting and the program allow it.
 fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
