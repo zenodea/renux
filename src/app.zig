@@ -73,6 +73,7 @@ const css =
     \\.palette { padding: 12px; }
     \\.palette-category { color: @compy_secondary; font-size: 0.85em; }
     \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
+    \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
     \\.connect-box { margin: 0 24px; }
 ;
 
@@ -116,6 +117,7 @@ pub const App = struct {
     filter_button: *gtk.MenuButton = undefined,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
+    mode_chip: *gtk.Label = undefined,
     /// A pane being floated so it can be minimized.
     minimize_next: ?[]u8 = null,
     rows: std.ArrayList(?Row) = .empty,
@@ -275,6 +277,17 @@ pub const App = struct {
         const layered = gtk.Overlay.new();
         layered.setChild(split.as(gtk.Widget));
         layered.addOverlay(corner.as(gtk.Widget));
+        // Which Rex key mode is on, such as resize, while one is.
+        a.mode_chip = gtk.Label.new("");
+        a.mode_chip.as(gtk.Widget).addCssClass("mode-chip");
+        a.mode_chip.as(gtk.Widget).setHalign(.center);
+        a.mode_chip.as(gtk.Widget).setValign(.end);
+        a.mode_chip.as(gtk.Widget).setMarginBottom(18);
+        a.mode_chip.as(gtk.Widget).setVisible(0);
+        a.mode_chip.as(gtk.Widget).setCanTarget(0);
+        layered.addOverlay(a.mode_chip.as(gtk.Widget));
+        mode_app = a;
+        termview.on_mode_changed = modeChanged;
         a.toasts.setChild(layered.as(gtk.Widget));
         a.window.setContent(a.toasts.as(gtk.Widget));
 
@@ -939,13 +952,102 @@ pub const App = struct {
             const index = J.int(args, "index") orelse return false;
             return a.gotoWindow(index - 1);
         }
+        if (std.mem.startsWith(u8, action, "pane.")) return a.paneAction(action[5..], args);
         if (std.mem.eql(u8, action, "client.find.open")) return a.did(openFind);
+        if (std.mem.eql(u8, action, "client.mode.enter")) {
+            termview.setKeyMode(J.str(args, "name") orelse return false);
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.mode.exit")) {
+            termview.setKeyMode("");
+            return true;
+        }
         if (std.mem.indexOf(u8, action, "palette") != null) return a.did(openPalette);
         if (std.mem.eql(u8, action, "client.sidebar.toggle")) {
             a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
             return true;
         }
         return false;
+    }
+
+    /// Rex's pane actions, which each app performs itself.
+    fn paneAction(a: *App, name: []const u8, args: ?@import("json.zig").Value) bool {
+        const J = @import("json.zig");
+        const eql = std.mem.eql;
+        if (eql(u8, name, "zoom")) return a.did(zoomPane);
+        if (eql(u8, name, "close")) return a.did(closePane);
+        if (eql(u8, name, "float")) return a.did(floatPane);
+        if (eql(u8, name, "focus_next")) return a.focusStep(1);
+        if (eql(u8, name, "focus_previous")) return a.focusStep(-1);
+        if (eql(u8, name, "split")) {
+            const dir = J.str(args, "direction") orelse "right";
+            if (eql(u8, dir, "down") or eql(u8, dir, "vertical")) a.splitDown() else a.splitRight();
+            return true;
+        }
+        if (eql(u8, name, "resize")) {
+            const dir = J.str(args, "direction") orelse return false;
+            const amount: f64 = @floatFromInt(J.int(args, "amount") orelse 3);
+            return a.resizeFocused(dir, amount);
+        }
+        if (eql(u8, name, "balance")) return a.balance();
+        return false;
+    }
+
+    fn focusStep(a: *App, delta: i64) bool {
+        const ws = a.workspace orelse return false;
+        const n: i64 = @intCast(ws.panes.items.len);
+        if (n == 0) return false;
+        const cur = ws.focusedBlock() orelse ws.panes.items[0].block_id;
+        var i: i64 = 0;
+        for (ws.panes.items, 0..) |p, k| if (std.mem.eql(u8, p.block_id, cur)) {
+            i = @intCast(k);
+        };
+        const next = ws.panes.items[@intCast(@mod(i + delta, n))];
+        ws.focus(next.block_id);
+        _ = next.term.widget().grabFocus();
+        return true;
+    }
+
+    /// Moves the border of the focused pane's nearest split in that direction, by `amount` cells.
+    fn resizeFocused(a: *App, dir: []const u8, amount: f64) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const ws = a.workspace orelse return false;
+        const block = ws.focusedBlock() orelse return false;
+        const v = s.sessionView(sid) orelse return false;
+        const w = v.windowOf(block) orelse return false;
+        const root = (w.tiled() orelse return false).layout orelse return false;
+        const horizontal = std.mem.eql(u8, dir, "left") or std.mem.eql(u8, dir, "right");
+        const grow = std.mem.eql(u8, dir, "right") or std.mem.eql(u8, dir, "down");
+        const split = nearestSplit(root, block, horizontal) orelse return false;
+        const tv = ws.focusedView() orelse return false;
+        // One cell, as a share of the split's size on screen.
+        const across: f64 = @floatFromInt(if (horizontal) ws.root.getWidth() else ws.root.getHeight());
+        const cell = if (horizontal) tv.cell_w else tv.cell_h;
+        const size = (if (horizontal) split.rect.w else split.rect.h) * across;
+        const delta = amount * cell / @max(1, size);
+        const now = glib.getMonotonicTime();
+        const recent = now - last_ratio_at < 1_500_000 and std.mem.eql(u8, last_split[0..last_split_len], split.id);
+        const from = if (recent) last_ratio else split.ratio;
+        const ratio = std.math.clamp(from + (if (grow) delta else -delta), 0.05, 0.95);
+        const n = @min(split.id.len, last_split.len);
+        @memcpy(last_split[0..n], split.id[0..n]);
+        last_split_len = n;
+        last_ratio = ratio;
+        last_ratio_at = now;
+        s.resizePane(sid, horizontal, firstLeafOf(split.before), firstLeafOf(split.after), ratio);
+        return true;
+    }
+
+    /// Gives every split the share its panes would have if all were the same size.
+    fn balance(a: *App) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const v = s.sessionView(sid) orelse return false;
+        const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return false;
+        const root = (w.tiled() orelse return false).layout orelse return false;
+        balanceNode(s, sid, root);
+        return true;
     }
 
     fn did(a: *App, comptime f: fn (*App) void) bool {
@@ -1000,6 +1102,8 @@ pub const App = struct {
             .{ "add-host", addHostDialog, "" },
             .{ "pane-float-focused", floatPane, "" },
             .{ "find", openFind, "" },
+            .{ "prompt-prev", promptPrev, "" },
+            .{ "prompt-next", promptNext, "" },
             .{ "find-next", findNext, "" },
             .{ "find-prev", findPrev, "" },
             .{ "find-close", closeFind, "" },
@@ -1362,6 +1466,14 @@ pub const App = struct {
         a.rebuildSidebar();
     }
 
+    fn promptPrev(a: *App) void {
+        if (a.workspace) |ws| if (ws.focusedView()) |tv| tv.jumpPrompt(-1);
+    }
+
+    fn promptNext(a: *App) void {
+        if (a.workspace) |ws| if (ws.focusedView()) |tv| tv.jumpPrompt(1);
+    }
+
     fn toggleSidebar(a: *App) void {
         a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
     }
@@ -1396,6 +1508,78 @@ fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
     termview.blink_on = !termview.blink_on;
     if (a.workspace) |ws| if (ws.focusedView()) |tv| if (tv.widget().hasFocus() != 0) tv.widget().queueDraw();
     return 1;
+}
+
+var mode_app: ?*App = null;
+
+fn modeChanged() void {
+    const a = mode_app orelse return;
+    const mode = termview.keyMode();
+    if (mode.len == 0) {
+        a.mode_chip.as(gtk.Widget).setVisible(0);
+        return;
+    }
+    var buf: [96]u8 = undefined;
+    var upper: [32]u8 = undefined;
+    const n = @min(mode.len, upper.len);
+    for (mode[0..n], 0..) |ch, i| upper[i] = std.ascii.toUpper(ch);
+    const text = std.fmt.bufPrintSentinel(&buf, "{s} · Esc to leave", .{upper[0..n]}, 0) catch return;
+    a.mode_chip.setText(text.ptr);
+    a.mode_chip.as(gtk.Widget).setVisible(1);
+}
+
+const SplitOf = struct { id: []const u8, rect: view.Rect, ratio: f64, before: *const view.Node, after: *const view.Node };
+
+/// The ratio last asked of a split, for key repeats that come faster than the server's update.
+var last_split: [64]u8 = undefined;
+var last_split_len: usize = 0;
+var last_ratio: f64 = 0;
+var last_ratio_at: i64 = 0;
+
+fn contains(n: *const view.Node, block: []const u8) bool {
+    return switch (n.*) {
+        .leaf => |l| std.mem.eql(u8, l.block_id, block),
+        .split => |sp| contains(sp.before, block) or contains(sp.after, block),
+    };
+}
+
+/// The innermost split around `block` that divides the way asked.
+fn nearestSplit(n: *const view.Node, block: []const u8, horizontal: bool) ?SplitOf {
+    switch (n.*) {
+        .leaf => return null,
+        .split => |sp| {
+            const inner = if (contains(sp.before, block)) nearestSplit(sp.before, block, horizontal) else if (contains(sp.after, block)) nearestSplit(sp.after, block, horizontal) else return null;
+            if (inner) |x| return x;
+            if (sp.horizontal == horizontal) return .{ .id = sp.id, .rect = sp.rect, .ratio = sp.ratio, .before = sp.before, .after = sp.after };
+            return null;
+        },
+    }
+}
+
+fn firstLeafOf(n: *const view.Node) []const u8 {
+    return switch (n.*) {
+        .leaf => |l| l.block_id,
+        .split => |sp| firstLeafOf(sp.before),
+    };
+}
+
+fn leaves(n: *const view.Node) f64 {
+    return switch (n.*) {
+        .leaf => 1,
+        .split => |sp| leaves(sp.before) + leaves(sp.after),
+    };
+}
+
+fn balanceNode(s: *Server, sid: []const u8, n: *const view.Node) void {
+    switch (n.*) {
+        .leaf => {},
+        .split => |sp| {
+            const b = leaves(sp.before);
+            s.resizePane(sid, sp.horizontal, firstLeafOf(sp.before), firstLeafOf(sp.after), b / (b + leaves(sp.after)));
+            balanceNode(s, sid, sp.before);
+            balanceNode(s, sid, sp.after);
+        },
+    }
 }
 
 fn appMenu() *gio.MenuModel {
@@ -1541,6 +1725,10 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "divider")) {
             const dx = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateDivider(dx);
+        } else if (std.mem.eql(u8, cmd, "commit")) {
+            const z = gpa.dupeSentinel(u8, rest, 0) catch continue;
+            defer gpa.free(z);
+            tv.commitText(z);
         } else if (std.mem.eql(u8, cmd, "menu")) {
             tv.showMenuAt(120, 120);
         } else if (std.mem.eql(u8, cmd, "zoom")) {

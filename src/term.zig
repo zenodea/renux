@@ -196,6 +196,23 @@ pub const Term = struct {
         return c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
     }
 
+    /// Jumps the view by `delta` shell prompts. It needs the shell to mark them (OSC 133).
+    pub fn scrollPrompt(self: *Term, delta: isize) void {
+        var b: c.GhosttyTerminalScrollViewport = std.mem.zeroes(c.GhosttyTerminalScrollViewport);
+        b.tag = c.GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT;
+        b.value.delta_prompt = delta;
+        c.ghostty_terminal_scroll_viewport(self.term, b);
+    }
+
+    /// Selects the command output at a cell. False if the shell hasn't marked output there.
+    pub fn selectOutputAt(self: *Term, x: u16, y: u32) bool {
+        var ref: c.GhosttyGridRef = undefined;
+        if (!self.viewportRef(x, y, &ref)) return false;
+        var sel: c.GhosttySelection = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_terminal_select_output(self.term, ref, &sel) != c.GHOSTTY_SUCCESS) return false;
+        return c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
+    }
+
     pub fn clearSelection(self: *Term) void {
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, null);
     }

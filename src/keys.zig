@@ -221,3 +221,47 @@ test "keys serialize the way Rex expects" {
     try std.testing.expectEqualStrings("shift+ctrl+alt", modsString(shift | ctrl | alt));
     try std.testing.expectEqualStrings("digit_1", forChar('!', 0).name);
 }
+
+/// A key press written the way Rex's config writes keys: "shift+right", "l", "=", "enter".
+pub fn rexName(buf: []u8, keyval: u32, unicode: u32, mods_in: u4) ?[]const u8 {
+    var mods = mods_in;
+    const base: []const u8 = switch (keyval) {
+        0xff0d, 0xff8d => "enter",
+        0xff1b => "escape",
+        0xff09, 0xfe20 => "tab",
+        0xff08 => "backspace",
+        0xff51 => "left",
+        0xff52 => "up",
+        0xff53 => "right",
+        0xff54 => "down",
+        0xff50 => "home",
+        0xff57 => "end",
+        0xff55 => "page_up",
+        0xff56 => "page_down",
+        ' ' => "space",
+        else => blk: {
+            if (unicode == 0 or unicode > 0x7e) return null;
+            var ch: u8 = @intCast(unicode);
+            if (ch >= 'A' and ch <= 'Z') {
+                ch += 32;
+                mods |= shift;
+            }
+            buf[buf.len - 1] = ch;
+            break :blk buf[buf.len - 1 ..];
+        },
+    };
+    const prefix = modsString(mods);
+    if (prefix.len == 0) return base;
+    var tmp: [32]u8 = undefined;
+    const out = std.fmt.bufPrint(&tmp, "{s}+{s}", .{ prefix, base }) catch return null;
+    @memcpy(buf[0..out.len], out);
+    return buf[0..out.len];
+}
+
+test "keys as Rex config names them" {
+    var buf: [40]u8 = undefined;
+    try std.testing.expectEqualStrings("shift+right", rexName(&buf, 0xff53, 0, shift).?);
+    try std.testing.expectEqualStrings("shift+l", rexName(&buf, 'L', 'L', shift).?);
+    try std.testing.expectEqualStrings("=", rexName(&buf, '=', '=', 0).?);
+    try std.testing.expectEqualStrings("enter", rexName(&buf, 0xff0d, 0, 0).?);
+}

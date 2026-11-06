@@ -18,6 +18,8 @@ const local = [_]struct { title: [:0]const u8, action: [:0]const u8, words: []co
     .{ .title = "Zoom pane", .action = "app.zoom-pane", .words = "maximize fullscreen" },
     .{ .title = "Close pane", .action = "app.close-pane", .words = "kill" },
     .{ .title = "Find in pane", .action = "app.find", .words = "search" },
+    .{ .title = "Previous prompt", .action = "app.prompt-prev", .words = "jump shell command up" },
+    .{ .title = "Next prompt", .action = "app.prompt-next", .words = "jump shell command down" },
     .{ .title = "New window", .action = "app.new-window", .words = "tab" },
     .{ .title = "New session", .action = "app.new-session", .words = "" },
     .{ .title = "Toggle sidebar", .action = "app.toggle-sidebar", .words = "hide show" },
@@ -152,6 +154,8 @@ pub const Palette = struct {
                 const a = p.server.actions[i];
                 if (a.needs_args and a.args == null) {
                     p.server.notifyMessage("That command needs arguments; bind it to a key in your Rex config");
+                } else if (std.mem.startsWith(u8, a.name, "pane.") or std.mem.startsWith(u8, a.name, "client.")) {
+                    if (!p.server.performLocal(p.session_id, a.name, a.args)) p.server.notifyMessage("Compy can't do that action yet");
                 } else {
                     p.server.runAction(p.session_id, p.block_id, a.name, a.args);
                 }

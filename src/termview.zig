@@ -61,6 +61,22 @@ pub const Font = struct {
 };
 
 pub var font: ?Font = null;
+/// The Rex key mode the client is in, such as "resize", or empty. Keys go to its bindings.
+pub var key_mode: [32]u8 = undefined;
+pub var key_mode_len: usize = 0;
+/// Told when the key mode changes, so the window can show it.
+pub var on_mode_changed: ?*const fn () void = null;
+
+pub fn setKeyMode(name: []const u8) void {
+    const n = @min(name.len, key_mode.len);
+    @memcpy(key_mode[0..n], name[0..n]);
+    key_mode_len = n;
+    if (on_mode_changed) |f| f();
+}
+
+pub fn keyMode() []const u8 {
+    return key_mode[0..key_mode_len];
+}
 /// Each pane's zoom, by block, so a pane keeps it when shown again.
 var zooms: std.StringHashMapUnmanaged(f64) = .empty;
 /// Whether a blinking cursor is in its visible half.
@@ -114,6 +130,9 @@ pub const TermView = struct {
     edge_point: [2]f64 = .{ 0, 0 },
     menu: ?*gtk.PopoverMenu = null,
     menu_link: ?[:0]u8 = null,
+    menu_cell: [2]u16 = .{ 0, 0 },
+    /// Dragging the scroll position marker.
+    dragging_bar: bool = false,
     /// Called when this pane is clicked, so the workspace can mark it focused.
     on_focus: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
 
@@ -347,6 +366,11 @@ pub const TermView = struct {
         if (keys.isModifier(keyval)) return 0;
         const bits: u32 = @bitCast(state);
         const mods = keys.modsFromGdk(bits);
+        // In a Rex key mode, keys run that mode's bindings instead of typing.
+        if (key_mode_len > 0) {
+            v.modeKey(keyval, mods);
+            return 1;
+        }
         // Ctrl+Shift+C and V copy and paste, like other Linux terminals.
         if (mods == keys.ctrl | keys.shift) {
             if (keyval == 'V' or keyval == 'v') {
@@ -382,9 +406,48 @@ pub const TermView = struct {
         return 1;
     }
 
+    fn modeKey(v: *TermView, keyval: c_uint, mods: u4) void {
+        var buf: [40]u8 = undefined;
+        const name = keys.rexName(&buf, keyval, gdk.keyvalToUnicode(keyval), mods) orelse return;
+        for (v.server.mode_bindings) |b| {
+            if (!std.mem.eql(u8, b.mode, keyMode()) or !std.mem.eql(u8, b.keys, name)) continue;
+            if (std.mem.eql(u8, b.action, "client.mode.exit")) return setKeyMode("");
+            // Pane and client actions belong to this app; the rest run on the server.
+            if (std.mem.startsWith(u8, b.action, "pane.") or std.mem.startsWith(u8, b.action, "client.")) {
+                if (!v.server.performLocal(v.session_id, b.action, b.args)) v.server.notifyMessage("Compy can't do that action yet");
+            } else v.server.runAction(v.session_id, v.block_id, b.action, b.args);
+            return;
+        }
+        // Escape always leaves a mode, even one without a binding for it.
+        if (keyval == 0xff1b) setKeyMode("");
+    }
+
+    /// Jumps between shell prompts, which the shell has to mark.
+    pub fn jumpPrompt(v: *TermView, delta: isize) void {
+        const t = v.term() orelse return;
+        t.scrollPrompt(delta);
+        _ = t.render(true);
+        // Match the smooth-scroll position to where the jump landed.
+        v.scroll_px = @as(f64, @floatFromInt(t.frame.scroll_total -| t.frame.scroll_len -| t.frame.scroll_offset)) * v.cell_h;
+        v.scroll_target = v.scroll_px;
+        v.widget().queueDraw();
+    }
+
+    /// For the development script: text as if the input method committed it.
+    pub fn commitText(v: *TermView, text: [:0]const u8) void {
+        onCommit(v.im.as(gtk.IMContext), text.ptr, v);
+    }
+
     /// Text from the input method: plain typing, a composed é, or a word from an input method.
     fn onCommit(_: *gtk.IMContext, text: [*:0]const u8, v: *TermView) callconv(.c) void {
         const t = std.mem.span(text);
+        if (key_mode_len > 0) {
+            // Letters in a key mode run its bindings, like `l` in resize mode.
+            const view = std.unicode.Utf8View.init(t) catch return;
+            var cps = view.iterator();
+            while (cps.nextCodepoint()) |cp| v.modeKey(cp, 0);
+            return;
+        }
         v.scrollToBottom();
         if (v.term()) |tm| tm.clearSelection();
         const view = std.unicode.Utf8View.init(t) catch return v.server.paste(v.session_id, v.block_id, t);
@@ -637,6 +700,13 @@ pub const TermView = struct {
 
     fn onDragBegin(gesture: *gtk.GestureDrag, x: f64, y: f64, v: *TermView) callconv(.c) void {
         v.selecting = false;
+        // The right edge is the scrollbar while there's history to scroll.
+        v.dragging_bar = x > @as(f64, @floatFromInt(v.widget().getWidth())) - 12 and v.maxScroll() > 0;
+        if (v.dragging_bar) {
+            v.drag_origin = .{ x, y };
+            v.barTo(y);
+            return;
+        }
         v.drag_to_program = v.programHasMouse(modsNow(gesture));
         v.drag_origin = .{ x, y };
         const cell = v.cellAt(x, y);
@@ -646,6 +716,7 @@ pub const TermView = struct {
     fn onDragUpdate(gesture: *gtk.GestureDrag, dx: f64, dy: f64, v: *TermView) callconv(.c) void {
         const x = v.drag_origin[0] + dx;
         const y = v.drag_origin[1] + dy;
+        if (v.dragging_bar) return v.barTo(y);
         if (v.drag_to_program) {
             // Programs that take the mouse see the drag, one report per cell.
             const cell = v.cellAt(x, y);
@@ -665,6 +736,16 @@ pub const TermView = struct {
         const h: f64 = @floatFromInt(v.widget().getHeight());
         v.edge_scroll = if (y < 0) @max(-4, y / 24) else if (y > h) @min(4, (y - h) / 24) else 0;
         if (v.edge_scroll != 0 and v.edge_timer == 0) v.edge_timer = glib.timeoutAdd(50, &edgeTick, v);
+    }
+
+    /// Scrolls so the scrollbar sits under the pointer: the top is the oldest line.
+    fn barTo(v: *TermView, y: f64) void {
+        const h: f64 = @floatFromInt(v.widget().getHeight());
+        const frac = std.math.clamp(y / @max(1, h), 0, 1);
+        v.scroll_velocity = 0;
+        v.scroll_px = (1 - frac) * v.maxScroll();
+        v.scroll_target = v.scroll_px;
+        v.widget().queueDraw();
     }
 
     fn extendTo(v: *TermView, t: *term_mod.Term, x: f64, y: f64, first: bool) void {
@@ -705,6 +786,7 @@ pub const TermView = struct {
 
     fn onDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, v: *TermView) callconv(.c) void {
         v.edge_scroll = 0;
+        v.dragging_bar = false;
         if (v.selecting) v.copySelection(true);
         // The release that ends a drag also reaches the click gesture, which checks this.
         const Later = struct {
@@ -727,7 +809,7 @@ pub const TermView = struct {
         defer if (sel) |s_| gpa.free(s_);
         if (v.menu == null) {
             const group = gio.SimpleActionGroup.new();
-            inline for (.{ .{ "copy", menuCopy }, .{ "paste", menuPaste }, .{ "open-link", menuOpenLink }, .{ "copy-link", menuCopyLink } }) |e| {
+            inline for (.{ .{ "copy", menuCopy }, .{ "paste", menuPaste }, .{ "open-link", menuOpenLink }, .{ "copy-link", menuCopyLink }, .{ "copy-output", menuCopyOutput } }) |e| {
                 const action = gio.SimpleAction.new(e[0], null);
                 const Thunk = struct {
                     fn run(_: *gio.SimpleAction, _: ?*glib.Variant, tv: *TermView) callconv(.c) void {
@@ -743,6 +825,8 @@ pub const TermView = struct {
         const edit = gio.Menu.new();
         if (sel != null) edit.append("Copy", "pane.copy");
         edit.append("Paste", "pane.paste");
+        v.menu_cell = cell;
+        edit.append("Copy Output", "pane.copy-output");
         menu.appendSection(null, edit.as(gio.MenuModel));
         if (v.menu_link != null) {
             const link = gio.Menu.new();
@@ -772,6 +856,16 @@ pub const TermView = struct {
     /// For the development script.
     pub fn showMenuAt(v: *TermView, x: f64, y: f64) void {
         v.openMenu(x, y);
+    }
+
+    fn menuCopyOutput(v: *TermView) void {
+        const t = v.term() orelse return;
+        if (!t.selectOutputAt(v.menu_cell[0], v.menu_cell[1])) {
+            v.server.notifyMessage("Your shell doesn't mark command output, so Compy can't find it");
+            return;
+        }
+        v.copySelection(false);
+        v.widget().queueDraw();
     }
 
     fn menuCopy(v: *TermView) void {

@@ -13,6 +13,9 @@ const Stream = stream_mod.Stream;
 const gpa = std.heap.c_allocator;
 const log = std.log.scoped(.server);
 
+/// An empty argument object. Zig writes `.{}` as `[]`, which the server refuses.
+const no_args = json.Raw{ .text = "{}" };
+
 pub const version = "0.1.0";
 
 pub const State = enum { connecting, online, offline };
@@ -23,6 +26,9 @@ pub const Session = struct {
 };
 
 pub const Change = enum { state, sessions, view, message, block, alert, keymap, hosts };
+
+/// A key bound inside a Rex key mode, such as "resize".
+pub const ModeBinding = struct { mode: []const u8, keys: []const u8, action: []const u8, args: ?[]const u8 };
 
 pub const ListedHost = struct { label: []const u8, url: []const u8 };
 
@@ -111,6 +117,7 @@ pub const Server = struct {
     observer: ?Observer = null,
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
     actions: []Action = &.{},
+    mode_bindings: []ModeBinding = &.{},
     hosts_arena: std.heap.ArenaAllocator = .init(gpa),
     /// The other hosts this server knows, from the last hosts.list.
     listed_hosts: []ListedHost = &.{},
@@ -330,7 +337,7 @@ pub const Server = struct {
             const id = json.str(payload, "session_id") orelse return;
             s.removeSession(id);
         } else if (eql(kind, "session_moved")) {
-            s.call("session.list", .{}, void, {}, listed);
+            s.call("session.list", no_args, void, {}, listed);
         } else if (eql(kind, "client_perform_requested")) {
             s.handlePerform(payload orelse return);
         } else if (eql(kind, "client_call_requested")) {
@@ -978,13 +985,16 @@ pub const Server = struct {
     /// Runs a change in a session, attaching to it first if needed. Failures are shown.
     /// Reads the person's actions and bindings for the command palette.
     pub fn fetchKeymap(s: *Server) void {
-        s.call("client.keymap", .{}, void, {}, gotKeymap);
+        s.call("client.keymap", no_args, void, {}, gotKeymap);
     }
 
     fn gotKeymap(s: *Server, _: *void, r: Result) void {
         const payload = switch (r) {
             .ok => |p| p,
-            .err => return,
+            .err => |e| {
+                log.warn("keymap failed: {s}", .{e.message});
+                return;
+            },
         };
         _ = s.keymap_arena.reset(.free_all);
         const a = s.keymap_arena.allocator();
@@ -1023,12 +1033,34 @@ pub const Server = struct {
             }) catch {};
         }
         s.actions = list.items;
+        var modes: std.ArrayList(ModeBinding) = .empty;
+        for (json.array(payload, "bindings")) |b| {
+            const mode = json.str(b, "mode") orelse continue;
+            const ks = json.array(b, "keys");
+            if (ks.len != 1) continue;
+            const key = switch (ks[0]) {
+                .string => |t| t,
+                else => continue,
+            };
+            var args: ?[]const u8 = null;
+            if (json.get(b, "args")) |v| if (v != .null) {
+                args = std.json.Stringify.valueAlloc(a, v, .{}) catch null;
+            };
+            modes.append(a, .{
+                .mode = a.dupe(u8, mode) catch continue,
+                .keys = a.dupe(u8, key) catch continue,
+                .action = a.dupe(u8, json.str(b, "action") orelse continue) catch continue,
+                .args = args,
+            }) catch {};
+        }
+        s.mode_bindings = modes.items;
+        if (std.c.getenv("COMPY_DEBUG") != null) log.info("keymap: {d} actions, {d} bindings, {d} in modes", .{ s.actions.len, json.array(payload, "bindings").len, modes.items.len });
         s.notify(.keymap, null);
     }
 
     /// Asks the server which other hosts it knows; the answer arrives as a `hosts` change.
     pub fn fetchHosts(s: *Server) void {
-        s.call("hosts.list", .{}, void, {}, gotHosts);
+        s.call("hosts.list", no_args, void, {}, gotHosts);
     }
 
     fn gotHosts(s: *Server, _: *void, r: Result) void {
@@ -1056,6 +1088,15 @@ pub const Server = struct {
         }
         s.listed_hosts = list.items;
         s.notify(.hosts, null);
+    }
+
+    /// Runs a client action here, the way the server would ask this client to: actions such as
+    /// `pane.resize` or `client.mode.exit` belong to each app, so the server doesn't know them.
+    pub fn performLocal(s: *Server, session_id: []const u8, action: []const u8, args: ?[]const u8) bool {
+        const p = s.performer orelse return false;
+        var parsed: ?std.json.Parsed(json.Value) = if (args) |t| std.json.parseFromSlice(json.Value, gpa, t, .{}) catch null else null;
+        defer if (parsed) |*x| x.deinit();
+        return p.perform(p.ctx, action, if (parsed) |x| x.value else null, session_id);
     }
 
     /// Runs one of the person's Rex actions, as the palette does.
