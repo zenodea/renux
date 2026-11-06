@@ -24,31 +24,36 @@ const gpa = std.heap.c_allocator;
 
 const css =
     \\window.compy, window.compy .sidebar-pane { background-color: @compy_shell; }
-    \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 42px; }
-    \\.compy-sidebar list { background: none; }
-    \\.compy-sidebar list > row { border-radius: 8px; min-height: 34px; padding: 0 4px 0 8px; margin: 1px 8px; }
+    \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 46px; padding: 0 6px; }
+    \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
+    \\.compy-sidebar list > row { border-radius: 9px; min-height: 34px; padding: 3px 4px 3px 10px; margin: 1px 0; }
     \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
-    \\.compy-sidebar list > row:hover:not(:selected) { background-color: alpha(@window_fg_color, 0.04); }
+    \\.compy-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
     \\.compy-sidebar .row-title { font-size: 0.95em; }
     \\.row-more { opacity: 0; }
     \\row:hover .row-more, row:selected .row-more { opacity: 0.6; }
-    \\.session-heading { font-size: 0.82em; color: @compy_secondary; margin: 0 4px 0 4px; }
-    \\.compy-sidebar list > row.session-row { min-height: 26px; margin-top: 10px; background: none; }
-    \\.session-tool { opacity: 0; min-width: 22px; min-height: 22px; }
+    \\.session-heading { font-size: 0.82em; color: @compy_secondary; }
+    \\.compy-sidebar list > row.session-row { min-height: 28px; margin-top: 12px; padding: 0 2px 0 10px; background: none; }
+    \\.compy-sidebar list > row.host-row { min-height: 26px; margin-top: 18px; padding: 0 10px; background: none; }
+    \\.compy-sidebar list > row.host-row:first-child { margin-top: 4px; }
+    \\.host-heading { font-weight: 700; font-size: 0.88em; }
+    \\.session-tool { opacity: 0; min-width: 24px; min-height: 24px; }
     \\row.session-row:hover .session-tool, .session-tool.folded { opacity: 0.6; }
     \\row.session-row .session-tool:hover { opacity: 1; }
-    \\.sidebar-footer { padding: 6px 10px 10px 10px; }
-    \\.filter-pill { border-radius: 99px; padding: 0 12px 0 8px; background-color: alpha(@window_fg_color, 0.07); }
-    \\.host-heading { font-weight: 600; font-size: 0.9em; margin: 12px 4px 0 4px; }
-    \\.compy-sidebar list > row.host-row { background: none; min-height: 24px; }
+    \\.sidebar-footer { padding: 8px 12px 12px 12px; }
+    \\.sidebar-footer > * { margin-left: 2px; }
+    \\.filter-pill { border-radius: 99px; min-height: 30px; padding: 0 8px; }
+    \\.filter-pill.filtered { padding: 0 14px 0 9px; background-color: alpha(@window_fg_color, 0.08); }
+    \\.window-card.alone { margin-left: 8px; }
     \\.content .workspace { margin: 8px 8px 8px 0; }
     \\.content.alone .workspace { margin: 0 8px 8px 8px; }
-    \\.top-strip { min-height: 38px; padding: 0 8px; }
+    \\.top-strip { min-height: 42px; padding: 0 10px; }
     \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; }
     \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
     \\.pane-card.floating { box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.pane-card.floating.focused { box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 8px 28px alpha(black, 0.45); }
-    \\.pane-title { min-height: 34px; padding: 0 4px 0 12px; }
+    \\.pane-title { min-height: 38px; padding: 0 6px 0 12px; }
+    \\.pane-tools > * { margin-left: 2px; }
     \\.pane-title .title { font-weight: 500; font-size: 0.95em; }
     \\.pane-card:not(.focused) .pane-title .title { color: @compy_secondary; }
     \\.pane-tools { opacity: 0; transition: opacity 120ms; }
@@ -110,6 +115,8 @@ pub const App = struct {
     filter_button: *gtk.MenuButton = undefined,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
+    /// A pane being floated so it can be minimized.
+    minimize_next: ?[]u8 = null,
     rows: std.ArrayList(?Row) = .empty,
     /// Sessions whose windows are folded away in the sidebar.
     collapsed: std.StringHashMapUnmanaged(void) = .empty,
@@ -403,7 +410,10 @@ pub const App = struct {
             .view => {
                 if (here) a.ensureSelection();
                 a.rebuildSidebar();
-                if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) a.showSelected();
+                if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
+                    a.showSelected();
+                    a.finishMinimize();
+                };
             },
             .block => {
                 const block = session_id orelse return;
@@ -553,11 +563,17 @@ pub const App = struct {
             item.setActionAndTargetValue("app.filter", glib.Variant.newString(h.page.ptr));
             a.filter_menu.appendItem(item);
         }
+        // Just the icon until a host is picked; then its name, so the narrowing is plain to see.
         if (a.filter) |f| {
             const z = gpa.dupeSentinel(u8, f.label, 0) catch return;
             defer gpa.free(z);
             a.filter_label.setText(z.ptr);
-        } else a.filter_label.setText("Filter");
+            a.filter_label.as(gtk.Widget).setVisible(1);
+            a.filter_button.as(gtk.Widget).addCssClass("filtered");
+        } else {
+            a.filter_label.as(gtk.Widget).setVisible(0);
+            a.filter_button.as(gtk.Widget).removeCssClass("filtered");
+        }
     }
 
     fn filterAction(a: *App, page_name: []const u8) void {
@@ -904,6 +920,7 @@ pub const App = struct {
             .{ "pane-zoom", zoomPane },
             .{ "pane-close", closePane },
             .{ "pane-float", floatPane },
+            .{ "pane-minimize", minimizePane },
         }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
@@ -1011,16 +1028,37 @@ pub const App = struct {
         t[0].zoomBlock(t[1], t[2], w.zoomed_block_id == null);
     }
 
-    /// Floats a tiled pane in the middle of the window, or minimizes a floating one to the tray.
+    /// Floats a tiled pane in the middle of the window, or puts a floating one back in the tiles.
     fn floatPane(a: *App) void {
         const t = a.target() orelse return;
         const ws = a.workspace orelse return;
         const p = ws.paneOf(t[2]) orelse return;
-        if (p.floating) {
-            t[0].setLayerMinimized(t[1], p.layer_id, true);
-        } else {
-            t[0].floatBlock(t[1], t[2], .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
-        }
+        if (!p.floating) return t[0].floatBlock(t[1], t[2], .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
+        // Back beside a tiled pane, at the right of the layout.
+        for (ws.panes.items) |other| if (!other.floating) {
+            return t[0].moveBlock(t[1], t[2], other.block_id, true, false);
+        };
+        t[0].notifyMessage("There's no tiled pane to put it next to");
+    }
+
+    /// Minimizes a pane to the tray. A tiled pane floats first, then goes once the server says so.
+    fn minimizePane(a: *App) void {
+        const t = a.target() orelse return;
+        const ws = a.workspace orelse return;
+        const p = ws.paneOf(t[2]) orelse return;
+        if (p.floating) return t[0].setLayerMinimized(t[1], p.layer_id, true);
+        setSlot(&a.minimize_next, t[2]);
+        t[0].floatBlock(t[1], t[2], .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
+    }
+
+    /// Finishes a minimize that had to float the pane first.
+    fn finishMinimize(a: *App) void {
+        const block = a.minimize_next orelse return;
+        const ws = a.workspace orelse return;
+        const p = ws.paneOf(block) orelse return;
+        if (!p.floating) return;
+        if (a.server) |s| if (a.session_id) |sid| s.setLayerMinimized(sid, p.layer_id, true);
+        setSlot(&a.minimize_next, null);
     }
 
     pub fn setTight(a: *App, on: bool) void {
@@ -1387,6 +1425,9 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "divider")) {
             const dx = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateDivider(dx);
+        } else if (std.mem.eql(u8, cmd, "scroll")) {
+            const dy = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+            tv.scrollBy(dy);
         } else if (std.mem.eql(u8, cmd, "find")) {
             a.openFind();
             const z = gpa.dupeSentinel(u8, rest, 0) catch continue;

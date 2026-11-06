@@ -26,7 +26,7 @@ pub fn createFor(server: *Server, block_id: []const u8, blocks: []const []const 
     const area = gtk.DrawingArea.new();
     // Room for the status dot to sit just past the corner.
     area.setContentWidth(size + 4);
-    area.setContentHeight(size + 4);
+    area.setContentHeight(size + 7);
     const ctx = gpa.create(Ctx) catch unreachable;
     ctx.* = .{ .server = server, .block_id = gpa.dupe(u8, block_id) catch unreachable, .size = size };
     if (blocks.len > 0) {
@@ -66,7 +66,15 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, _: c_int, _: c_int, data: ?*
     const brand = @import("settings.zig").current.brand_icons;
     const icon = if (!brand) null else if (info) |b| programs.iconFor(if (b.has_status) b.status_app else null, b.program) else null;
     const size: f64 = @floatFromInt(ctx.size);
-    programs.drawTile(cr, icon, 2, 2, size, dark, neutral, ink_rgb);
+    // A window with several panes shows a second card peeking out behind its tile, like Rex.
+    const top: f64 = 5;
+    if (ctx.others.len > 1) {
+        const back = size * 0.8;
+        cr.setSourceRgba(ink.f_red, ink.f_green, ink.f_blue, 0.28);
+        roundRect(cr, 2 + (size - back) / 2, top - size * 0.16, back, back, back * 0.28);
+        cr.fill();
+    }
+    programs.drawTile(cr, icon, 2, top, size, dark, neutral, ink_rgb);
 
     var color: ?u32 = dotColor(info);
     var best = rank(color);
@@ -79,7 +87,7 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, _: c_int, _: c_int, data: ?*
     }
     const c = color orelse return;
     const cx = size + 1;
-    const cy = size + 1;
+    const cy = top + size - 1;
     // A ring in the canvas color keeps the dot readable over the tile.
     cr.setSourceRgb(if (dark) 0.1 else 0.97, if (dark) 0.1 else 0.97, if (dark) 0.11 else 0.98);
     cr.arc(cx, cy, 4.2, 0, 2 * std.math.pi);
@@ -109,4 +117,14 @@ fn rank(c: ?u32) u8 {
         0x5aa9ff => 2,
         else => 1,
     };
+}
+
+fn roundRect(cr: *cairo.Context, x: f64, y: f64, w: f64, h: f64, r: f64) void {
+    const pi: f64 = std.math.pi;
+    cr.newSubPath();
+    cr.arc(x + w - r, y + r, r, -pi / 2, 0);
+    cr.arc(x + w - r, y + h - r, r, 0, pi / 2);
+    cr.arc(x + r, y + h - r, r, pi / 2, pi);
+    cr.arc(x + r, y + r, r, pi, 3 * pi / 2);
+    cr.closePath();
 }

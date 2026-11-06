@@ -66,8 +66,17 @@ pub const TermView = struct {
     sent_cols: u16 = 0,
     sent_rows: u16 = 0,
     size_timer: c_uint = 0,
-    /// Lines of scrolling not yet applied, since touchpads report fractions.
+    /// Lines of scrolling not yet sent to a program that takes the mouse.
     scroll_rest: f64 = 0,
+    /// How far up into history the view is, in pixels, where it's heading, and how fast a
+    /// touchpad flick is still carrying it.
+    scroll_px: f64 = 0,
+    scroll_target: f64 = 0,
+    scroll_velocity: f64 = 0,
+    scroll_tick: c_uint = 0,
+    last_frame_us: i64 = 0,
+    last_total: u64 = 0,
+    draw_frac: f64 = 0,
     listening: bool = false,
     title_label: ?*gtk.Label = null,
     title_buf: [256]u8 = undefined,
@@ -103,8 +112,9 @@ pub const TermView = struct {
         _ = gtk.EventControllerKey.signals.key_pressed.connect(key, *TermView, &onKey, v, .{});
         w.addController(key.as(gtk.EventController));
 
-        const scroll = gtk.EventControllerScroll.new(.{ .vertical = true });
+        const scroll = gtk.EventControllerScroll.new(.{ .vertical = true, .kinetic = true });
         _ = gtk.EventControllerScroll.signals.scroll.connect(scroll, *TermView, &onScroll, v, .{});
+        _ = gtk.EventControllerScroll.signals.decelerate.connect(scroll, *TermView, &onDecelerate, v, .{});
         w.addController(scroll.as(gtk.EventController));
 
         const click = gtk.GestureClick.new();
@@ -203,6 +213,7 @@ pub const TermView = struct {
 
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
         if (v.size_timer != 0) _ = glib.Source.remove(v.size_timer);
+        if (v.scroll_tick != 0) v.widget().removeTickCallback(v.scroll_tick);
         if (v.stream()) |st| st.removeListener(v);
         gpa.free(v.session_id);
         gpa.free(v.block_id);
@@ -289,10 +300,8 @@ pub const TermView = struct {
         }
         if (mods & keys.super != 0) return 0; // leave shortcuts to the desktop
         const key = keys.fromGdk(keyval, gdk.keyvalToUnicode(keyval), mods) orelse return 0;
-        if (v.term()) |t| {
-            t.scrollToBottom();
-            t.clearSelection();
-        }
+        v.scrollToBottom();
+        if (v.term()) |t| t.clearSelection();
         v.server.sendKey(v.session_id, v.block_id, key);
         return 1;
     }
@@ -324,26 +333,111 @@ pub const TermView = struct {
         t.server.paste(t.session_id, t.block_id, std.mem.span(text));
     }
 
-    fn onScroll(_: *gtk.EventControllerScroll, _: f64, dy: f64, v: *TermView) callconv(.c) c_int {
+    fn onScroll(ctl: *gtk.EventControllerScroll, _: f64, dy: f64, v: *TermView) callconv(.c) c_int {
         const st = v.stream() orelse return 0;
         const t = st.term orelse return 0;
-        v.scroll_rest += dy;
-        const lines = @trunc(v.scroll_rest);
-        if (lines == 0) return 1;
-        v.scroll_rest -= lines;
         // Programs that take the mouse, or use the whole screen, scroll themselves.
         if (t.frame.mouse or t.frame.alt_screen) {
+            v.scroll_rest += dy;
+            const lines = @trunc(v.scroll_rest);
+            if (lines == 0) return 1;
+            v.scroll_rest -= lines;
             v.server.sendWheel(v.session_id, v.block_id, lines, 0, 0);
+            return 1;
+        }
+        v.scroll_velocity = 0;
+        if (ctl.getUnit() == .surface) {
+            // A touchpad reports pixels: follow the fingers exactly.
+            v.scroll_px -= dy;
+            v.scroll_target = v.scroll_px;
         } else {
-            t.scroll(@intFromFloat(lines * 3));
-            v.widget().queueDraw();
+            // A wheel notch glides three lines.
+            v.scroll_target = v.scroll_target - dy * 3 * v.cell_h;
+        }
+        v.clampScroll();
+        v.startScrollTick();
+        v.widget().queueDraw();
+        return 1;
+    }
+
+    /// A touchpad flick carries on, slowing down.
+    fn onDecelerate(_: *gtk.EventControllerScroll, _: f64, vy: f64, v: *TermView) callconv(.c) void {
+        const t = v.term() orelse return;
+        if (t.frame.mouse or t.frame.alt_screen) return;
+        v.scroll_velocity = -vy;
+        v.startScrollTick();
+    }
+
+    fn maxScroll(v: *TermView) f64 {
+        const t = v.term() orelse return 0;
+        return @as(f64, @floatFromInt(t.frame.scroll_total -| t.frame.scroll_len)) * v.cell_h;
+    }
+
+    fn clampScroll(v: *TermView) void {
+        const max = v.maxScroll();
+        v.scroll_target = std.math.clamp(v.scroll_target, 0, max);
+        v.scroll_px = std.math.clamp(v.scroll_px, 0, max);
+    }
+
+    fn startScrollTick(v: *TermView) void {
+        if (v.scroll_tick != 0) return;
+        v.last_frame_us = 0;
+        v.scroll_tick = v.widget().addTickCallback(&scrollTick, v, null);
+    }
+
+    fn scrollTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        const now = clock.getFrameTime();
+        const dt: f64 = if (v.last_frame_us == 0) 1.0 / 60.0 else @min(0.05, @as(f64, @floatFromInt(now - v.last_frame_us)) / 1e6);
+        v.last_frame_us = now;
+        if (v.scroll_velocity != 0) {
+            v.scroll_px += v.scroll_velocity * dt;
+            v.scroll_target = v.scroll_px;
+            v.scroll_velocity *= std.math.pow(f64, 0.05, dt);
+            if (@abs(v.scroll_velocity) < 15) v.scroll_velocity = 0;
+        } else {
+            // Ease toward the target, quickly at first.
+            const gap = v.scroll_target - v.scroll_px;
+            v.scroll_px += gap * (1 - std.math.pow(f64, 0.0005, dt));
+            if (@abs(gap) < 0.5) v.scroll_px = v.scroll_target;
+        }
+        v.clampScroll();
+        v.widget().queueDraw();
+        if (v.scroll_velocity == 0 and v.scroll_px == v.scroll_target) {
+            v.scroll_tick = 0;
+            return 0;
         }
         return 1;
     }
 
+    /// Output that arrives while looking back through history shouldn't move what's shown.
+    fn followOutput(v: *TermView, total: u64) void {
+        if (total > v.last_total and v.scroll_px > 0 and v.last_total > 0) {
+            const grown = @as(f64, @floatFromInt(total - v.last_total)) * v.cell_h;
+            v.scroll_px += grown;
+            v.scroll_target += grown;
+        }
+        v.last_total = total;
+    }
+
+    /// Scrolls as a wheel would, by `dy` notches; for the development script.
+    pub fn scrollBy(v: *TermView, dy: f64) void {
+        v.scroll_target -= dy * 3 * v.cell_h;
+        v.clampScroll();
+        v.startScrollTick();
+    }
+
+    /// Back to the live screen, such as when typing.
+    pub fn scrollToBottom(v: *TermView) void {
+        v.scroll_px = 0;
+        v.scroll_target = 0;
+        v.scroll_velocity = 0;
+        if (v.term()) |t| t.scrollToBottom();
+    }
+
     fn cellAt(v: *TermView, x: f64, y: f64) struct { u16, u16 } {
         const col = @max(0, @floor((x - pad) / v.cell_w));
-        const row = @max(0, @floor((y - pad) / v.cell_h));
+        const row = @max(0, @floor((y - pad - v.draw_frac) / v.cell_h));
         return .{ @intFromFloat(@min(col, 65535)), @intFromFloat(@min(row, 65535)) };
     }
 
@@ -537,77 +631,31 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
 
+    // Smooth scrolling: the view sits a fraction of a row lower than the viewport while partway
+    // into history, and the row above the viewport fills the gap at the top.
+    const max_up: f64 = @floatFromInt(f.scroll_total -| f.scroll_len);
+    v.followOutput(f.scroll_total);
+    v.scroll_px = std.math.clamp(v.scroll_px, 0, max_up * v.cell_h);
+    const rows_up = @floor(v.scroll_px / v.cell_h);
+    const frac = v.scroll_px - rows_up * v.cell_h;
+    v.draw_frac = frac;
+    const current_up: f64 = @floatFromInt(f.scroll_total -| f.scroll_len -| f.scroll_offset);
+    if (current_up != rows_up) {
+        t.scroll(@intFromFloat(current_up - rows_up));
+        _ = t.render(true);
+    }
+    if (frac > 0.01 and rows_up < max_up) {
+        t.scroll(-1);
+        _ = t.render(true);
+        drawRow(v, cr, t, &t.frame, layout, &text, f_font, 0, pad + frac - v.cell_h);
+        t.scroll(1);
+        _ = t.render(true);
+    }
     var y: usize = 0;
     while (y < f.rows) : (y += 1) {
-        const top = pad + @as(f64, @floatFromInt(y)) * v.cell_h;
+        const top = pad + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
         if (top > h) break;
-        // Backgrounds first, so wide glyphs can overhang into the next cell.
-        var x: usize = 0;
-        while (x < f.cols) : (x += 1) {
-            const cl = f.cell(x, y);
-            const colors = cellColors(f, cl);
-            if (colors.bg == f.bg) continue;
-            const span: f64 = if (cl.flags.wide) 2 else 1;
-            setColor(cr, colors.bg, 1);
-            cr.rectangle(pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w * span + 0.5, v.cell_h);
-            cr.fill();
-        }
-        // Search matches, under the text.
-        if (t.finding()) {
-            var found: [128]term.Match = undefined;
-            const n = t.matches(&found);
-            for (found[0..n]) |m| {
-                if (m.y0 > y or m.y1 < y) continue;
-                const from: usize = if (m.y0 == y) m.x0 else 0;
-                const to: usize = if (m.y1 == y) m.x1 else f.cols -| 1;
-                setColor(cr, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.75 else 0.35);
-                cr.rectangle(pad + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
-                cr.fill();
-            }
-        }
-        // Then text, in runs of one style. Anything outside ASCII is placed on its own cell,
-        // since fallback fonts don't keep to the grid.
-        x = 0;
-        while (x < f.cols) {
-            const cl = f.cell(x, y);
-            if (cl.cp == 0 or cl.cp == ' ' or cl.flags.spacer or cl.flags.invisible) {
-                x += 1;
-                continue;
-            }
-            if (boxdraw.handles(cl.cp)) {
-                setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
-                boxdraw.draw(cr, cl.cp, pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w, v.cell_h);
-                x += 1;
-                continue;
-            }
-            const start = x;
-            const colors = cellColors(f, cl);
-            text.clearRetainingCapacity();
-            while (x < f.cols) {
-                const n = f.cell(x, y);
-                if (x > start) {
-                    if (n.cp >= 0x80 or n.cp == 0 or n.flags.spacer or boxdraw.handles(n.cp) or !sameStyle(cl, n) or cellColors(f, n).fg != colors.fg) break;
-                }
-                appendCell(&text, f, n);
-                x += if (n.flags.wide) 2 else 1;
-                if (n.cp >= 0x80) break;
-            }
-            const left = pad + @as(f64, @floatFromInt(start)) * v.cell_w;
-            layout.setFontDescription(f_font.pick(cl.flags));
-            text.append(gpa, 0) catch break;
-            layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
-            setColor(cr, colors.fg, if (cl.flags.faint) 0.6 else 1);
-            showOnBaseline(cr, layout, left, top + v.baseline);
-            const run_w = @as(f64, @floatFromInt(x - start)) * v.cell_w;
-            if (cl.flags.underline or cl.flags.link) {
-                cr.rectangle(left, top + v.baseline + 1.5, run_w, 1);
-                cr.fill();
-            }
-            if (cl.flags.strike) {
-                cr.rectangle(left, top + v.cell_h / 2, run_w, 1);
-                cr.fill();
-            }
-        }
+        drawRow(v, cr, t, f, layout, &text, f_font, y, top);
     }
 
     // The cursor, hollow when the pane doesn't have the keyboard.
@@ -667,6 +715,77 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
         setColor(cr, f.fg, 0.35);
         cr.rectangle(w - 5, bar_y, 3, bar_h);
         cr.fill();
+    }
+}
+
+/// Draws one row of the frame with its top at `top`: backgrounds, search matches, then text.
+fn drawRow(v: *TermView, cr: *cairo.Context, t: *term.Term, f: *const term.Frame, layout: *pango.Layout, text: *std.ArrayList(u8), f_font: Font, y: usize, top: f64) void {
+    // Backgrounds first, so wide glyphs can overhang into the next cell.
+    var x: usize = 0;
+    while (x < f.cols) : (x += 1) {
+        const cl = f.cell(x, y);
+        const colors = cellColors(f, cl);
+        if (colors.bg == f.bg) continue;
+        const span: f64 = if (cl.flags.wide) 2 else 1;
+        setColor(cr, colors.bg, 1);
+        cr.rectangle(pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w * span + 0.5, v.cell_h);
+        cr.fill();
+    }
+    // Search matches, under the text.
+    if (t.finding()) {
+        var found: [128]term.Match = undefined;
+        const n = t.matches(&found);
+        for (found[0..n]) |m| {
+            if (m.y0 > y or m.y1 < y) continue;
+            const from: usize = if (m.y0 == y) m.x0 else 0;
+            const to: usize = if (m.y1 == y) m.x1 else f.cols -| 1;
+            setColor(cr, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.75 else 0.35);
+            cr.rectangle(pad + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
+            cr.fill();
+        }
+    }
+    // Then text, in runs of one style. Anything outside ASCII is placed on its own cell,
+    // since fallback fonts don't keep to the grid.
+    x = 0;
+    while (x < f.cols) {
+        const cl = f.cell(x, y);
+        if (cl.cp == 0 or cl.cp == ' ' or cl.flags.spacer or cl.flags.invisible) {
+            x += 1;
+            continue;
+        }
+        if (boxdraw.handles(cl.cp)) {
+            setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
+            boxdraw.draw(cr, cl.cp, pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w, v.cell_h);
+            x += 1;
+            continue;
+        }
+        const start = x;
+        const colors = cellColors(f, cl);
+        text.clearRetainingCapacity();
+        while (x < f.cols) {
+            const n = f.cell(x, y);
+            if (x > start) {
+                if (n.cp >= 0x80 or n.cp == 0 or n.flags.spacer or boxdraw.handles(n.cp) or !sameStyle(cl, n) or cellColors(f, n).fg != colors.fg) break;
+            }
+            appendCell(text, f, n);
+            x += if (n.flags.wide) 2 else 1;
+            if (n.cp >= 0x80) break;
+        }
+        const left = pad + @as(f64, @floatFromInt(start)) * v.cell_w;
+        layout.setFontDescription(f_font.pick(cl.flags));
+        text.append(gpa, 0) catch break;
+        layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
+        setColor(cr, colors.fg, if (cl.flags.faint) 0.6 else 1);
+        showOnBaseline(cr, layout, left, top + v.baseline);
+        const run_w = @as(f64, @floatFromInt(x - start)) * v.cell_w;
+        if (cl.flags.underline or cl.flags.link) {
+            cr.rectangle(left, top + v.baseline + 1.5, run_w, 1);
+            cr.fill();
+        }
+        if (cl.flags.strike) {
+            cr.rectangle(left, top + v.cell_h / 2, run_w, 1);
+            cr.fill();
+        }
     }
 }
 

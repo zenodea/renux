@@ -257,7 +257,8 @@ pub const Workspace = struct {
         inline for (.{
             .{ icons.Kind.split_right, "Split right", "app.pane-split-right" },
             .{ icons.Kind.split_down, "Split down", "app.pane-split-down" },
-            .{ icons.Kind.float, "Float or minimize", "app.pane-float" },
+            .{ icons.Kind.float, "Float or dock", "app.pane-float" },
+            .{ icons.Kind.minimize, "Minimize", "app.pane-minimize" },
             .{ icons.Kind.zoom, "Zoom", "app.pane-zoom" },
             .{ icons.Kind.close, "Close pane", "app.pane-close" },
         }) |b| {

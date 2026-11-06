@@ -117,6 +117,7 @@ pub const Palette = struct {
             \\@define-color compy_stroke_subtle {f};
             \\@define-color compy_secondary {f};
             \\@define-color compy_shell {f};
+            \\@define-color sidebar_border_color {f};
             \\
         , .{
             p.canvas,         fg,
@@ -134,6 +135,7 @@ pub const Palette = struct {
             p.warning,        p.danger,
             p.stroke,         p.stroke_subtle,
             p.content_secondary,
+            p.shell,
             p.shell,
         });
     }
