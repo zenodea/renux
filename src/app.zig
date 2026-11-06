@@ -47,7 +47,8 @@ const css =
     \\.window-card.alone { margin-left: 8px; }
     \\.content .workspace { margin: 8px 8px 8px 0; }
     \\.content.alone .workspace { margin: 0 8px 8px 8px; }
-    \\.top-strip { min-height: 42px; padding: 0 10px; }
+    \\.top-strip { min-height: 46px; padding: 0 10px 0 0; }
+    \\.window-corner { min-height: 46px; padding: 0 6px 0 12px; }
     \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; }
     \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
     \\.pane-card.floating { box-shadow: 0 8px 28px alpha(black, 0.45); }
@@ -161,9 +162,22 @@ pub const App = struct {
         scroller.setPolicy(.never, .automatic);
         scroller.setChild(a.sidebar.as(gtk.Widget));
         scroller.as(gtk.Widget).setVexpand(1);
+        // The window controls and the sidebar toggle sit in a fixed corner above everything, so the
+        // toggle never moves; the sidebar header and the top strip leave room for that corner.
+        const corner_size = gtk.SizeGroup.new(.horizontal);
+        const corner = gtk.Box.new(.horizontal, 4);
+        corner.as(gtk.Widget).addCssClass("window-corner");
+        corner.append(gtk.WindowControls.new(.start).as(gtk.Widget));
+        corner.append(icons.button(.sidebar, "Toggle sidebar", "app.toggle-sidebar").as(gtk.Widget));
+        corner.as(gtk.Widget).setHalign(.start);
+        corner.as(gtk.Widget).setValign(.start);
+        corner_size.addWidget(corner.as(gtk.Widget));
         const side_header = adw.HeaderBar.new();
         side_header.setShowTitle(0);
-        side_header.packStart(icons.button(.sidebar, "Hide sidebar", "app.toggle-sidebar").as(gtk.Widget));
+        side_header.setShowStartTitleButtons(0);
+        const header_room = gtk.Box.new(.horizontal, 0);
+        corner_size.addWidget(header_room.as(gtk.Widget));
+        side_header.packStart(header_room.as(gtk.Widget));
         side_header.packEnd(menuButton(appMenu(), "More").as(gtk.Widget));
         side_header.packEnd(icons.button(.search, "Commands", "app.palette").as(gtk.Widget));
         // The footer, like Rex's: narrow the sidebar to one host, a new session, and another host.
@@ -195,8 +209,9 @@ pub const App = struct {
         // hidden, a slim strip above them carries the window controls and the sidebar toggle.
         const strip = gtk.Box.new(.horizontal, 4);
         strip.as(gtk.Widget).addCssClass("top-strip");
-        strip.append(gtk.WindowControls.new(.start).as(gtk.Widget));
-        strip.append(icons.button(.sidebar, "Show sidebar", "app.toggle-sidebar").as(gtk.Widget));
+        const strip_room = gtk.Box.new(.horizontal, 0);
+        corner_size.addWidget(strip_room.as(gtk.Widget));
+        strip.append(strip_room.as(gtk.Widget));
         const strip_space = gtk.Box.new(.horizontal, 0);
         strip_space.as(gtk.Widget).setHexpand(1);
         strip.append(strip_space.as(gtk.Widget));
@@ -256,7 +271,10 @@ pub const App = struct {
         _ = gobject.Object.signals.notify.connect(split, *App, &sidebarShown, a, .{ .detail = "show-sidebar" });
 
         a.toasts = adw.ToastOverlay.new();
-        a.toasts.setChild(split.as(gtk.Widget));
+        const layered = gtk.Overlay.new();
+        layered.setChild(split.as(gtk.Widget));
+        layered.addOverlay(corner.as(gtk.Widget));
+        a.toasts.setChild(layered.as(gtk.Widget));
         a.window.setContent(a.toasts.as(gtk.Widget));
 
         a.addActions();
