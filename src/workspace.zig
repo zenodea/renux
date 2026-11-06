@@ -9,8 +9,8 @@ const TermView = @import("termview.zig").TermView;
 
 const gpa = std.heap.c_allocator;
 
-/// Space between panes, and around the edge.
-pub var gap: f64 = 6;
+/// Space between panes, which the workspace's background shows through as a divider line.
+pub var gap: f64 = 1;
 
 const Pane = struct {
     block_id: []u8,
@@ -185,13 +185,13 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     const ws = Workspace.fromWidget(widget);
     const w: f64 = @floatFromInt(width);
     const h: f64 = @floatFromInt(height);
-    const half = gap / 2;
     for (ws.panes.items) |p| {
-        // Each pane gives up half a gap on every side, inside an edge of half a gap.
-        const x0 = half + p.rect.x * (w - gap) + half;
-        const y0 = half + p.rect.y * (h - gap) + half;
-        const x1 = half + (p.rect.x + p.rect.w) * (w - gap) - half;
-        const y1 = half + (p.rect.y + p.rect.h) * (h - gap) - half;
+        // Scale to the size plus one gap, then give the gap back on the far side, so panes meet
+        // the card's edges and leave exactly one gap between neighbours.
+        const x0 = p.rect.x * (w + gap);
+        const y0 = p.rect.y * (h + gap);
+        const x1 = (p.rect.x + p.rect.w) * (w + gap) - gap;
+        const y1 = (p.rect.y + p.rect.h) * (h + gap) - gap;
         var a: gtk.Allocation = .{
             .f_x = @intFromFloat(@round(x0)),
             .f_y = @intFromFloat(@round(y0)),

@@ -638,6 +638,10 @@ pub const Server = struct {
         s.act(session_id, "session.new_window", .{ .session_id = session_id, .layout = shell_layout });
     }
 
+    pub fn renameWindow(s: *Server, session_id: []const u8, window_id: []const u8, label: []const u8) void {
+        s.act(session_id, "session.set_window_label", .{ .session_id = session_id, .window_id = window_id, .label = label });
+    }
+
     pub fn closeWindow(s: *Server, session_id: []const u8, window_id: []const u8) void {
         s.act(session_id, "session.close_window", .{ .session_id = session_id, .window_id = window_id });
     }

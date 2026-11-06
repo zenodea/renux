@@ -49,6 +49,8 @@ pub const Palette = struct {
     danger: Rgb,
     success: Rgb,
     warning: Rgb,
+    /// Behind the window card: a step darker than the terminal, like Rex's sidebar.
+    shell: Rgb,
 
     pub fn from(c: Colors) Palette {
         const bg = Rgb.of(if (c.bg != 0) c.bg else 0x1d1f21);
@@ -73,6 +75,7 @@ pub const Palette = struct {
             .danger = Rgb.of(p[1]),
             .success = Rgb.of(p[2]),
             .warning = Rgb.of(p[3]),
+            .shell = if (dark) bg.mix(Rgb.of(0), 0.22) else bg.mix(fg, 0.04),
         };
     }
 
@@ -109,6 +112,7 @@ pub const Palette = struct {
             \\@define-color compy_stroke {f};
             \\@define-color compy_stroke_subtle {f};
             \\@define-color compy_secondary {f};
+            \\@define-color compy_shell {f};
             \\
         , .{
             p.canvas,         fg,
@@ -126,6 +130,7 @@ pub const Palette = struct {
             p.warning,        p.danger,
             p.stroke,         p.stroke_subtle,
             p.content_secondary,
+            p.shell,
         });
     }
 };

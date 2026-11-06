@@ -16,14 +16,29 @@ const Server = server_mod.Server;
 const Workspace = @import("workspace.zig").Workspace;
 const config = @import("config.zig");
 const theme = @import("theme.zig");
+const icons = @import("icons.zig");
 
 const gpa = std.heap.c_allocator;
 
 const css =
-    \\.workspace { background-color: @window_bg_color; }
-    \\.pane { border-radius: 10px; outline: 1px solid @compy_stroke_subtle; outline-offset: -1px; }
-    \\.pane.focused { outline: 1px solid alpha(@accent_bg_color, 0.9); outline-offset: -1px; }
-    \\.session-heading { font-weight: 600; font-size: 0.8em; color: @compy_secondary; margin: 14px 8px 2px 8px; }
+    \\window.compy, window.compy .sidebar-pane { background-color: @compy_shell; }
+    \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 42px; }
+    \\.compy-sidebar list { background: none; }
+    \\.compy-sidebar list > row { border-radius: 8px; min-height: 34px; padding: 0 4px 0 8px; margin: 1px 8px; }
+    \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
+    \\.compy-sidebar list > row:hover:not(:selected) { background-color: alpha(@window_fg_color, 0.04); }
+    \\.compy-sidebar .row-title { font-size: 0.95em; }
+    \\.row-more { opacity: 0; }
+    \\row:hover .row-more, row:selected .row-more { opacity: 0.6; }
+    \\.session-heading { font-size: 0.82em; color: @compy_secondary; margin: 14px 12px 4px 12px; }
+    \\.sidebar-footer { padding: 6px 10px 10px 10px; }
+    \\.window-card { background-color: @view_bg_color; border-radius: 12px; border: 1px solid @compy_stroke_subtle; margin: 8px 8px 8px 0; }
+    \\.window-card.alone { margin-left: 8px; }
+    \\.card-title { min-height: 38px; padding: 0 6px 0 14px; }
+    \\.card-title .title { font-weight: 500; }
+    \\.icon-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; opacity: 0.5; }
+    \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
+    \\.workspace { background-color: @compy_stroke_subtle; }
     \\.connect-box { margin: 0 24px; }
 ;
 
@@ -35,10 +50,12 @@ pub const App = struct {
     toasts: *adw.ToastOverlay = undefined,
     sidebar: *gtk.ListBox = undefined,
     split: *adw.OverlaySplitView = undefined,
+    card: *gtk.Widget = undefined,
+    card_start: *gtk.Widget = undefined,
     stack: *gtk.Stack = undefined,
     status: *adw.StatusPage = undefined,
     retry_button: *gtk.Button = undefined,
-    title: *adw.WindowTitle = undefined,
+    title: *gtk.Label = undefined,
     entry: *gtk.Entry = undefined,
     server: ?*Server = null,
     workspace: ?*Workspace = null,
@@ -73,8 +90,9 @@ pub const App = struct {
         const win = a.window.as(gtk.Window);
         win.setDefaultSize(1180, 760);
         win.setTitle("Compy");
+        win.as(gtk.Widget).addCssClass("compy");
 
-        // Sidebar.
+        // Sidebar: window controls and a menu on top, sessions and their windows, then a footer.
         a.sidebar = gtk.ListBox.new();
         a.sidebar.as(gtk.Widget).addCssClass("navigation-sidebar");
         _ = gtk.ListBox.signals.row_activated.connect(a.sidebar, *App, &rowActivated, a, .{});
@@ -83,27 +101,50 @@ pub const App = struct {
         scroller.setChild(a.sidebar.as(gtk.Widget));
         scroller.as(gtk.Widget).setVexpand(1);
         const side_header = adw.HeaderBar.new();
-        side_header.setTitleWidget(adw.WindowTitle.new("Compy", "").as(gtk.Widget));
-        const new_session = gtk.Button.newFromIconName("list-add-symbolic");
-        new_session.as(gtk.Widget).setTooltipText("New session");
-        new_session.as(gtk.Actionable).setActionName("app.new-session");
-        side_header.packStart(new_session.as(gtk.Widget));
+        side_header.setShowTitle(0);
+        side_header.packStart(icons.button(.sidebar, "Hide sidebar", "app.toggle-sidebar").as(gtk.Widget));
+        side_header.packEnd(menuButton(appMenu(), "More").as(gtk.Widget));
+        const footer = gtk.Box.new(.horizontal, 2);
+        footer.as(gtk.Widget).addCssClass("sidebar-footer");
+        footer.append(icons.button(.plus, "New session", "app.new-session").as(gtk.Widget));
+        const spacer = gtk.Box.new(.horizontal, 0);
+        spacer.as(gtk.Widget).setHexpand(1);
+        footer.append(spacer.as(gtk.Widget));
+        footer.append(icons.button(.server, "Change server", "app.change-server").as(gtk.Widget));
         const side = adw.ToolbarView.new();
+        side.as(gtk.Widget).addCssClass("compy-sidebar");
         side.addTopBar(side_header.as(gtk.Widget));
+        side.addBottomBar(footer.as(gtk.Widget));
         side.setContent(scroller.as(gtk.Widget));
 
-        // Content.
-        a.title = adw.WindowTitle.new("Compy", "");
-        const header = adw.HeaderBar.new();
-        header.setTitleWidget(a.title.as(gtk.Widget));
-        header.packEnd(paneMenu().as(gtk.Widget));
-        const new_window = gtk.Button.newFromIconName("tab-new-symbolic");
-        new_window.as(gtk.Widget).setTooltipText("New window");
-        new_window.as(gtk.Actionable).setActionName("app.new-window");
-        header.packEnd(new_window.as(gtk.Widget));
+        // Content: one rounded card with the window's title and pane buttons above its panes.
+        const title_row = gtk.Box.new(.horizontal, 2);
+        title_row.as(gtk.Widget).addCssClass("card-title");
+        // While the sidebar is hidden, the card carries the window controls and the toggle.
+        const start = gtk.Box.new(.horizontal, 2);
+        start.append(gtk.WindowControls.new(.start).as(gtk.Widget));
+        start.append(icons.button(.sidebar, "Show sidebar", "app.toggle-sidebar").as(gtk.Widget));
+        start.as(gtk.Widget).setVisible(0);
+        a.card_start = start.as(gtk.Widget);
+        title_row.append(start.as(gtk.Widget));
+        title_row.append(icons.image(.terminal, 16));
+        a.title = gtk.Label.new("Compy");
+        a.title.as(gtk.Widget).addCssClass("title");
+        a.title.setEllipsize(.end);
+        a.title.setXalign(0);
+        a.title.as(gtk.Widget).setHexpand(1);
+        a.title.as(gtk.Widget).setMarginStart(6);
+        title_row.append(a.title.as(gtk.Widget));
+        title_row.append(icons.button(.split_right, "Split right", "app.split-right").as(gtk.Widget));
+        title_row.append(icons.button(.split_down, "Split down", "app.split-down").as(gtk.Widget));
+        title_row.append(icons.button(.zoom, "Zoom pane", "app.zoom-pane").as(gtk.Widget));
+        title_row.append(icons.button(.close, "Close pane", "app.close-pane").as(gtk.Widget));
+        const handle = gtk.WindowHandle.new();
+        handle.setChild(title_row.as(gtk.Widget));
 
         a.stack = gtk.Stack.new();
         a.stack.setTransitionType(.crossfade);
+        a.stack.as(gtk.Widget).setVexpand(1);
         a.status = adw.StatusPage.new();
         a.retry_button = gtk.Button.newWithLabel("Try again");
         a.retry_button.as(gtk.Widget).addCssClass("pill");
@@ -113,16 +154,20 @@ pub const App = struct {
         _ = a.stack.addNamed(a.status.as(gtk.Widget), "status");
         _ = a.stack.addNamed(a.connectPage(), "connect");
 
-        const content = adw.ToolbarView.new();
-        content.addTopBar(header.as(gtk.Widget));
-        content.setContent(a.stack.as(gtk.Widget));
+        const card = gtk.Box.new(.vertical, 0);
+        card.as(gtk.Widget).addCssClass("window-card");
+        card.as(gtk.Widget).setOverflow(.hidden);
+        card.append(handle.as(gtk.Widget));
+        card.append(a.stack.as(gtk.Widget));
+        a.card = card.as(gtk.Widget);
 
         const split = adw.OverlaySplitView.new();
         a.split = split;
         split.setSidebar(side.as(gtk.Widget));
-        split.setContent(content.as(gtk.Widget));
-        split.setMinSidebarWidth(200);
+        split.setContent(card.as(gtk.Widget));
+        split.setMinSidebarWidth(220);
         split.setMaxSidebarWidth(280);
+        _ = gobject.Object.signals.notify.connect(split, *App, &sidebarShown, a, .{ .detail = "show-sidebar" });
 
         a.toasts = adw.ToastOverlay.new();
         a.toasts.setChild(split.as(gtk.Widget));
@@ -138,6 +183,12 @@ pub const App = struct {
             a.stack.setVisibleChildName("connect");
         }
         win.present();
+    }
+
+    fn sidebarShown(split: *adw.OverlaySplitView, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
+        const shown = split.getShowSidebar() != 0;
+        a.card_start.setVisible(@intFromBool(!shown));
+        if (shown) a.card.removeCssClass("alone") else a.card.addCssClass("alone");
     }
 
     fn connectPage(a: *App) *gtk.Widget {
@@ -307,8 +358,8 @@ pub const App = struct {
         const label = sessionLabel(s, sid);
         var sub_buf: [256]u8 = undefined;
         const sub = std.fmt.bufPrintSentinel(&sub_buf, "{s}", .{label}, 0) catch "";
-        a.title.setTitle(title.ptr);
-        a.title.setSubtitle(sub.ptr);
+        _ = sub;
+        a.title.setText(title.ptr);
         a.selectSidebarRow();
     }
 
@@ -341,8 +392,16 @@ pub const App = struct {
                 const item = gtk.Label.new(title.ptr);
                 item.setXalign(0);
                 item.setEllipsize(.end);
+                item.as(gtk.Widget).addCssClass("row-title");
+                item.as(gtk.Widget).setHexpand(1);
+                const line = gtk.Box.new(.horizontal, 8);
+                line.append(icons.image(.terminal, 16));
+                line.append(item.as(gtk.Widget));
+                const more = menuButton(windowMenu(session.id, w.id), "Window");
+                more.as(gtk.Widget).addCssClass("row-more");
+                line.append(more.as(gtk.Widget));
                 const row = gtk.ListBoxRow.new();
-                row.setChild(item.as(gtk.Widget));
+                row.setChild(line.as(gtk.Widget));
                 a.sidebar.append(row.as(gtk.Widget));
                 a.rows.append(gpa, .{
                     .session_id = gpa.dupe(u8, session.id) catch continue,
@@ -464,7 +523,20 @@ pub const App = struct {
             .{ "paste", paste, "" },
             .{ "retry", retry, "" },
             .{ "change-server", changeServer, "" },
+            .{ "toggle-sidebar", toggleSidebar, "" },
         };
+        inline for (.{ .{ "close-window", closeWindowAction }, .{ "rename-window", renameWindowAction } }) |e| {
+            const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
+            const Thunk = struct {
+                fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
+                    const text = std.mem.span(param.?.getString(null));
+                    const space = std.mem.indexOfScalar(u8, text, ' ') orelse return;
+                    e[1](app, text[0..space], text[space + 1 ..]);
+                }
+            };
+            _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
+            a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
+        }
         inline for (entries) |e| {
             const action = gio.SimpleAction.new(e[0], null);
             const Thunk = struct {
@@ -534,12 +606,59 @@ pub const App = struct {
         if (a.server) |s| s.retry();
     }
 
+    fn closeWindowAction(a: *App, session_id: []const u8, window_id: []const u8) void {
+        if (a.server) |s| s.closeWindow(session_id, window_id);
+    }
+
+    fn renameWindowAction(a: *App, session_id: []const u8, window_id: []const u8) void {
+        const s = a.server orelse return;
+        const v = s.sessionView(session_id) orelse return;
+        const w = v.window(window_id) orelse return;
+        var buf: [256]u8 = undefined;
+        const current = windowTitle(&buf, w, v);
+        const dialog = adw.AlertDialog.new("Rename window", null);
+        const entry = gtk.Entry.new();
+        entry.as(gtk.Editable).setText(current.ptr);
+        entry.setActivatesDefault(1);
+        dialog.setExtraChild(entry.as(gtk.Widget));
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("rename", "Rename");
+        dialog.setResponseAppearance("rename", .suggested);
+        dialog.setDefaultResponse("rename");
+        const ctx = gpa.create(RenameCtx) catch return;
+        ctx.* = .{
+            .app = a,
+            .entry = entry,
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .window_id = gpa.dupe(u8, window_id) catch return,
+        };
+        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &renamed, ctx, .{});
+        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+    }
+
+    const RenameCtx = struct { app: *App, entry: *gtk.Entry, session_id: []u8, window_id: []u8 };
+
+    fn renamed(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *RenameCtx) callconv(.c) void {
+        defer {
+            gpa.free(ctx.session_id);
+            gpa.free(ctx.window_id);
+            gpa.destroy(ctx);
+        }
+        if (!std.mem.eql(u8, std.mem.span(response), "rename")) return;
+        const label = std.mem.trim(u8, std.mem.span(ctx.entry.as(gtk.Editable).getText()), " ");
+        if (ctx.app.server) |s| s.renameWindow(ctx.session_id, ctx.window_id, label);
+    }
+
+    fn toggleSidebar(a: *App) void {
+        a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
+    }
+
     fn changeServer(a: *App) void {
         a.stack.setVisibleChildName("connect");
     }
 };
 
-fn paneMenu() *gtk.MenuButton {
+fn appMenu() *gio.MenuModel {
     const menu = gio.Menu.new();
     const panes = gio.Menu.new();
     panes.append("Split right", "app.split-right");
@@ -552,9 +671,30 @@ fn paneMenu() *gtk.MenuButton {
     other.append("New session", "app.new-session");
     other.append("Change server…", "app.change-server");
     menu.appendSection(null, other.as(gio.MenuModel));
+    return menu.as(gio.MenuModel);
+}
+
+/// The "•••" menu on a window's row. Its actions carry "session window" as their target.
+fn windowMenu(session_id: []const u8, window_id: []const u8) *gio.MenuModel {
+    var buf: [512]u8 = undefined;
+    const target = std.fmt.bufPrintSentinel(&buf, "{s} {s}", .{ session_id, window_id }, 0) catch "";
+    const menu = gio.Menu.new();
+    inline for (.{ .{ "Rename…", "app.rename-window" }, .{ "Close window", "app.close-window" } }) |e| {
+        const item = gio.MenuItem.new(e[0], null);
+        item.setActionAndTargetValue(e[1], glib.Variant.newString(target.ptr));
+        menu.appendItem(item);
+    }
+    return menu.as(gio.MenuModel);
+}
+
+fn menuButton(model: *gio.MenuModel, tooltip: [:0]const u8) *gtk.MenuButton {
     const button = gtk.MenuButton.new();
-    button.setIconName("open-menu-symbolic");
-    button.setMenuModel(menu.as(gio.MenuModel));
+    button.setChild(icons.image(.more, 16));
+    button.setMenuModel(model);
+    button.as(gtk.Widget).setTooltipText(tooltip.ptr);
+    button.as(gtk.Widget).addCssClass("icon-button");
+    button.as(gtk.Widget).addCssClass("flat");
+    button.as(gtk.Widget).setValign(.center);
     return button;
 }
 
