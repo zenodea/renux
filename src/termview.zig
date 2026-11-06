@@ -104,6 +104,16 @@ pub const TermView = struct {
     selecting: bool = false,
     /// Whether the press that may start a selection belongs to the program, which takes the mouse.
     drag_to_program: bool = false,
+    /// The button held for a program's drag, and the last cell reported, so moves within a cell
+    /// aren't sent again.
+    held_button: []const u8 = "left",
+    last_motion: [2]u16 = .{ 65535, 65535 },
+    /// How fast a selection drag past the top or bottom edge scrolls, in rows a tick.
+    edge_scroll: f64 = 0,
+    edge_timer: c_uint = 0,
+    edge_point: [2]f64 = .{ 0, 0 },
+    menu: ?*gtk.PopoverMenu = null,
+    menu_link: ?[:0]u8 = null,
     /// Called when this pane is clicked, so the workspace can mark it focused.
     on_focus: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
 
@@ -237,6 +247,9 @@ pub const TermView = struct {
 
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
         v.im.as(gtk.IMContext).setClientWidget(null);
+        if (v.edge_timer != 0) _ = glib.Source.remove(v.edge_timer);
+        if (v.menu) |m| m.as(gtk.Widget).unparent();
+        if (v.menu_link) |l| gpa.free(l);
         v.im.as(gobject.Object).unref();
         if (v.size_timer != 0) _ = glib.Source.remove(v.size_timer);
         if (v.scroll_tick != 0) v.widget().removeTickCallback(v.scroll_tick);
@@ -549,11 +562,22 @@ pub const TermView = struct {
         const cell = v.cellAt(x, y);
         const button = gesture.as(gtk.GestureSingle).getCurrentButton();
         if (v.programHasMouse(mods)) {
-            v.server.sendMouse(v.session_id, v.block_id, "press", buttonName(gesture), cell[0], cell[1]);
+            v.held_button = buttonName(gesture);
+            v.last_motion = cell;
+            v.server.sendMouse(v.session_id, v.block_id, "press", v.held_button, cell[0], cell[1]);
             return;
         }
         if (button == 2) return v.pastePrimary();
+        if (button == 3) return v.openMenu(x, y);
         if (button != 1) return;
+        if (mods & keys.shift != 0 and n_press == 1) {
+            if (t.extendSelection(cell[0], cell[1])) {
+                v.copySelection(true);
+                v.selecting = true;
+                v.widget().queueDraw();
+            }
+            return;
+        }
         if (n_press == 2) {
             t.selectWord(cell[0], cell[1]);
             v.copySelection(true);
@@ -620,19 +644,67 @@ pub const TermView = struct {
     }
 
     fn onDragUpdate(gesture: *gtk.GestureDrag, dx: f64, dy: f64, v: *TermView) callconv(.c) void {
-        if (v.drag_to_program) return;
+        const x = v.drag_origin[0] + dx;
+        const y = v.drag_origin[1] + dy;
+        if (v.drag_to_program) {
+            // Programs that take the mouse see the drag, one report per cell.
+            const cell = v.cellAt(x, y);
+            if (cell[0] == v.last_motion[0] and cell[1] == v.last_motion[1]) return;
+            v.last_motion = cell;
+            v.server.sendMouse(v.session_id, v.block_id, "motion", v.held_button, cell[0], cell[1]);
+            return;
+        }
         if (gesture.as(gtk.GestureSingle).getCurrentButton() != 1) return;
         if (!v.selecting and @abs(dx) < 4 and @abs(dy) < 4) return;
         const t = v.term() orelse return;
+        const first = !v.selecting;
         v.selecting = true;
-        const cell = v.cellAt(v.drag_origin[0] + dx, v.drag_origin[1] + dy);
+        v.edge_point = .{ x, y };
+        v.extendTo(t, x, y, first);
+        // Past the top or bottom edge, the view scrolls to keep selecting.
+        const h: f64 = @floatFromInt(v.widget().getHeight());
+        v.edge_scroll = if (y < 0) @max(-4, y / 24) else if (y > h) @min(4, (y - h) / 24) else 0;
+        if (v.edge_scroll != 0 and v.edge_timer == 0) v.edge_timer = glib.timeoutAdd(50, &edgeTick, v);
+    }
+
+    fn extendTo(v: *TermView, t: *term_mod.Term, x: f64, y: f64, first: bool) void {
+        const cell = v.cellAt(x, @max(pad, y));
         const last_col = t.frame.cols -| 1;
         const last_row = t.frame.rows -| 1;
-        t.selectRange(@min(v.anchor[0], last_col), @min(v.anchor[1], last_row), @min(cell[0], last_col), @min(cell[1], last_row));
+        const cx = @min(cell[0], last_col);
+        const cy = @min(cell[1], last_row);
+        if (first) {
+            t.selectRange(@min(v.anchor[0], last_col), @min(v.anchor[1], last_row), cx, cy);
+        } else if (!t.extendSelection(cx, cy)) {
+            t.selectRange(@min(v.anchor[0], last_col), @min(v.anchor[1], last_row), cx, cy);
+        }
         v.widget().queueDraw();
     }
 
+    fn edgeTick(data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        if (v.edge_scroll == 0 or !v.selecting) {
+            v.edge_timer = 0;
+            return 0;
+        }
+        const t = v.term() orelse return 1;
+        // Up into history, or back down; the selection's start stays pinned to its text.
+        v.scroll_px = std.math.clamp(v.scroll_px - v.edge_scroll * v.cell_h, 0, v.maxScroll());
+        v.scroll_target = v.scroll_px;
+        _ = t.render(true);
+        const rows_up = @floor(v.scroll_px / v.cell_h);
+        const current_up: f64 = @floatFromInt(t.frame.scroll_total -| t.frame.scroll_len -| t.frame.scroll_offset);
+        if (current_up != rows_up) {
+            t.scroll(@intFromFloat(current_up - rows_up));
+            _ = t.render(true);
+        }
+        const h: f64 = @floatFromInt(v.widget().getHeight());
+        v.extendTo(t, v.edge_point[0], std.math.clamp(v.edge_point[1], 0, h - 1), false);
+        return 1;
+    }
+
     fn onDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, v: *TermView) callconv(.c) void {
+        v.edge_scroll = 0;
         if (v.selecting) v.copySelection(true);
         // The release that ends a drag also reaches the click gesture, which checks this.
         const Later = struct {
@@ -643,6 +715,82 @@ pub const TermView = struct {
             }
         };
         _ = glib.idleAdd(&Later.run, v);
+    }
+
+    /// The right-click menu: copy, paste, a link under the pointer, and this pane's layout.
+    fn openMenu(v: *TermView, x: f64, y: f64) void {
+        const t = v.term() orelse return;
+        if (v.menu_link) |l| gpa.free(l);
+        const cell = v.cellAt(x, y);
+        v.menu_link = v.linkAt(t, cell[0], cell[1]);
+        const sel = t.selectionText();
+        defer if (sel) |s_| gpa.free(s_);
+        if (v.menu == null) {
+            const group = gio.SimpleActionGroup.new();
+            inline for (.{ .{ "copy", menuCopy }, .{ "paste", menuPaste }, .{ "open-link", menuOpenLink }, .{ "copy-link", menuCopyLink } }) |e| {
+                const action = gio.SimpleAction.new(e[0], null);
+                const Thunk = struct {
+                    fn run(_: *gio.SimpleAction, _: ?*glib.Variant, tv: *TermView) callconv(.c) void {
+                        e[1](tv);
+                    }
+                };
+                _ = gio.SimpleAction.signals.activate.connect(action, *TermView, &Thunk.run, v, .{});
+                group.as(gio.ActionMap).addAction(action.as(gio.Action));
+            }
+            v.widget().insertActionGroup("pane", group.as(gio.ActionGroup));
+        }
+        const menu = gio.Menu.new();
+        const edit = gio.Menu.new();
+        if (sel != null) edit.append("Copy", "pane.copy");
+        edit.append("Paste", "pane.paste");
+        menu.appendSection(null, edit.as(gio.MenuModel));
+        if (v.menu_link != null) {
+            const link = gio.Menu.new();
+            link.append("Open Link", "pane.open-link");
+            link.append("Copy Link", "pane.copy-link");
+            menu.appendSection(null, link.as(gio.MenuModel));
+        }
+        const layout = gio.Menu.new();
+        const target = gpa.dupeSentinel(u8, v.block_id, 0) catch return;
+        defer gpa.free(target);
+        inline for (.{ .{ "Split Right", "app.pane-split-right" }, .{ "Split Down", "app.pane-split-down" }, .{ "Float or Dock", "app.pane-float" }, .{ "Zoom", "app.pane-zoom" }, .{ "Close Pane", "app.pane-close" } }) |e| {
+            const item = gio.MenuItem.new(e[0], null);
+            item.setActionAndTargetValue(e[1], glib.Variant.newString(target.ptr));
+            layout.appendItem(item);
+        }
+        menu.appendSection(null, layout.as(gio.MenuModel));
+        if (v.menu) |old| old.as(gtk.Widget).unparent();
+        const pop = gtk.PopoverMenu.newFromModel(menu.as(gio.MenuModel));
+        pop.as(gtk.Widget).setParent(v.widget());
+        pop.as(gtk.Popover).setHasArrow(0);
+        const r: gdk.Rectangle = .{ .f_x = @intFromFloat(x), .f_y = @intFromFloat(y), .f_width = 1, .f_height = 1 };
+        pop.as(gtk.Popover).setPointingTo(&r);
+        pop.as(gtk.Popover).popup();
+        v.menu = pop;
+    }
+
+    /// For the development script.
+    pub fn showMenuAt(v: *TermView, x: f64, y: f64) void {
+        v.openMenu(x, y);
+    }
+
+    fn menuCopy(v: *TermView) void {
+        v.copySelection(false);
+    }
+
+    fn menuPaste(v: *TermView) void {
+        v.pasteClipboard();
+    }
+
+    fn menuOpenLink(v: *TermView) void {
+        const l = v.menu_link orelse return;
+        const launcher = gtk.UriLauncher.new(l.ptr);
+        launcher.launch(@ptrCast(@alignCast(v.widget().getRoot())), null, null, null);
+    }
+
+    fn menuCopyLink(v: *TermView) void {
+        const l = v.menu_link orelse return;
+        v.widget().getClipboard().setText(l.ptr);
     }
 
     /// Copies the selection to the clipboard, or to the primary selection that middle-click pastes.

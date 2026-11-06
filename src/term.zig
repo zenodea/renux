@@ -188,6 +188,14 @@ pub const Term = struct {
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel);
     }
 
+    /// Moves the end of the selection, keeping its start where it is even if that scrolled away.
+    pub fn extendSelection(self: *Term, x: u16, y: u32) bool {
+        var sel: c.GhosttySelection = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_SELECTION, &sel) != c.GHOSTTY_SUCCESS) return false;
+        if (!self.viewportRef(x, y, &sel.end)) return false;
+        return c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
+    }
+
     pub fn clearSelection(self: *Term) void {
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, null);
     }

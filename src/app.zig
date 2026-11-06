@@ -1541,6 +1541,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "divider")) {
             const dx = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateDivider(dx);
+        } else if (std.mem.eql(u8, cmd, "menu")) {
+            tv.showMenuAt(120, 120);
         } else if (std.mem.eql(u8, cmd, "zoom")) {
             tv.zoomBy(std.fmt.parseFloat(f64, it.next() orelse "0") catch 0);
         } else if (std.mem.eql(u8, cmd, "scroll")) {
