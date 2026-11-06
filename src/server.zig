@@ -853,6 +853,55 @@ pub const Server = struct {
         });
     }
 
+    /// A floating layer's bounds as sent: the server refuses any that don't fit the window, and
+    /// float rounding can push an edge just past 1, so they stay a hair inside it.
+    fn layerBounds(r: view.Rect) [4]f64 {
+        const steps = 10_000.0;
+        const down = struct {
+            fn f(v: f64) f64 {
+                return @floor(v * steps) / steps;
+            }
+        }.f;
+        const x = std.math.clamp(down(r.x), 0, 0.9);
+        const y = std.math.clamp(down(r.y), 0, 0.9);
+        const margin = 1.0 / steps;
+        return .{ x, y, @min(down(r.w), 1.0 - x - margin), @min(down(r.h), 1.0 - y - margin) };
+    }
+
+    pub fn floatBlock(s: *Server, session_id: []const u8, block_id: []const u8, bounds: view.Rect) void {
+        s.act(session_id, "session.float_block", .{ .session_id = session_id, .block_id = block_id, .bounds = layerBounds(bounds) });
+    }
+
+    pub fn setLayerMinimized(s: *Server, session_id: []const u8, layer_id: []const u8, minimized: bool) void {
+        if (minimized) {
+            s.act(session_id, "session.set_layer_state", .{ .session_id = session_id, .layer_id = layer_id, .state = "minimized" });
+        } else {
+            s.act(session_id, "session.set_layer_state", .{ .session_id = session_id, .layer_id = layer_id, .state = "normal", .focus = true });
+        }
+    }
+
+    pub fn resizeLayer(s: *Server, session_id: []const u8, layer_id: []const u8, bounds: view.Rect) void {
+        s.act(session_id, "session.resize_layer", .{ .session_id = session_id, .layer_id = layer_id, .bounds = layerBounds(bounds) });
+    }
+
+    pub fn raiseLayer(s: *Server, session_id: []const u8, layer_id: []const u8) void {
+        s.act(session_id, "session.raise_layer", .{ .session_id = session_id, .layer_id = layer_id });
+    }
+
+    pub fn moveBlock(s: *Server, session_id: []const u8, block_id: []const u8, anchor_id: []const u8, horizontal: bool, before: bool) void {
+        s.act(session_id, "session.move_block", .{
+            .session_id = session_id,
+            .block_id = block_id,
+            .anchor_block_id = anchor_id,
+            .direction = if (horizontal) "horizontal" else "vertical",
+            .side = if (before) "before" else "after",
+        });
+    }
+
+    pub fn swapBlocks(s: *Server, session_id: []const u8, a: []const u8, b: []const u8) void {
+        s.act(session_id, "session.swap_blocks", .{ .session_id = session_id, .block_id = a, .other_block_id = b });
+    }
+
     pub fn newWindow(s: *Server, session_id: []const u8) void {
         s.act(session_id, "session.new_window", .{ .session_id = session_id, .layout = shell_layout });
     }

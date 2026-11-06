@@ -49,6 +49,12 @@ const css =
     \\.find-bar { padding: 8px 8px 0 0; }
     \\.content.alone .find-bar { padding-left: 8px; }
     \\.find-count { color: @compy_secondary; font-size: 0.9em; min-width: 52px; }
+    \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
+    \\window.tight .content .workspace { margin: 0; }
+    \\window.tight .pane-card { border-radius: 0; border: none; box-shadow: none; }
+    \\window.tight .workspace { background-color: @compy_stroke_subtle; }
+    \\window.tight .pane-card.focused .pane-title .title { color: @accent_color; }
+    \\window.tight .pane-card.floating { border: 1px solid @compy_stroke; border-radius: 8px; box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.connect-box { margin: 0 24px; }
 ;
 
@@ -199,6 +205,7 @@ pub const App = struct {
         a.window.setContent(a.toasts.as(gtk.Widget));
 
         a.addActions();
+        a.setTight(config.tight());
         installShotHook(a);
 
         if (config.serverUrl()) |url| {
@@ -628,6 +635,7 @@ pub const App = struct {
             .{ "pane-split-down", splitDown },
             .{ "pane-zoom", zoomPane },
             .{ "pane-close", closePane },
+            .{ "pane-float", floatPane },
         }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
@@ -635,6 +643,31 @@ pub const App = struct {
                     const block = std.mem.span(param.?.getString(null));
                     if (app.workspace) |ws| ws.focus(block);
                     e[1](app);
+                }
+            };
+            _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
+            a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
+        }
+        {
+            const action = gio.SimpleAction.new("restore-layer", glib.VariantType.new("s"));
+            const Thunk = struct {
+                fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
+                    const layer = std.mem.span(param.?.getString(null));
+                    const s = app.server orelse return;
+                    const sid = app.session_id orelse return;
+                    s.setLayerMinimized(sid, layer, false);
+                }
+            };
+            _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
+            a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
+        }
+        {
+            const action = gio.SimpleAction.newStateful("tight", null, glib.Variant.newBoolean(@intFromBool(config.tight())));
+            const Thunk = struct {
+                fn run(act: *gio.SimpleAction, _: ?*glib.Variant, app: *App) callconv(.c) void {
+                    const on = !Workspace.isTight();
+                    act.setState(glib.Variant.newBoolean(@intFromBool(on)));
+                    app.setTight(on);
                 }
             };
             _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
@@ -698,6 +731,25 @@ pub const App = struct {
         const v = t[0].sessionView(t[1]) orelse return;
         const w = v.windowOf(t[2]) orelse return;
         t[0].zoomBlock(t[1], t[2], w.zoomed_block_id == null);
+    }
+
+    /// Floats a tiled pane in the middle of the window, or minimizes a floating one to the tray.
+    fn floatPane(a: *App) void {
+        const t = a.target() orelse return;
+        const ws = a.workspace orelse return;
+        const p = ws.paneOf(t[2]) orelse return;
+        if (p.floating) {
+            t[0].setLayerMinimized(t[1], p.layer_id, true);
+        } else {
+            t[0].floatBlock(t[1], t[2], .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
+        }
+    }
+
+    pub fn setTight(a: *App, on: bool) void {
+        @import("workspace.zig").setTight(on);
+        config.saveTight(on);
+        if (on) a.window.as(gtk.Widget).addCssClass("tight") else a.window.as(gtk.Widget).removeCssClass("tight");
+        if (a.workspace) |ws| ws.root.queueAllocate();
     }
 
     fn newWindow(a: *App) void {
@@ -862,6 +914,7 @@ fn appMenu() *gio.MenuModel {
     menu.appendSection(null, panes.as(gio.MenuModel));
     const other = gio.Menu.new();
     other.append("Find…", "app.find");
+    other.append("Tight layout", "app.tight");
     other.append("New window", "app.new-window");
     other.append("New session", "app.new-session");
     other.append("Change server…", "app.change-server");
@@ -968,7 +1021,26 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             continue;
         };
         std.log.info("script: {s}", .{cmd});
-        if (std.mem.eql(u8, cmd, "find")) {
+        if (std.mem.eql(u8, cmd, "action")) {
+            const name = it.next() orelse continue;
+            const z = gpa.dupeSentinel(u8, name, 0) catch continue;
+            defer gpa.free(z);
+            const param: ?*glib.Variant = if (it.next()) |arg| blk: {
+                const za = gpa.dupeSentinel(u8, arg, 0) catch continue;
+                defer gpa.free(za);
+                break :blk glib.Variant.newString(za.ptr);
+            } else if (std.mem.startsWith(u8, name, "pane-")) glib.Variant.newString(@ptrCast((gpa.dupeSentinel(u8, tv.block_id, 0) catch continue).ptr)) else null;
+            a.app.as(gio.ActionGroup).activateAction(z.ptr, param);
+        } else if (std.mem.eql(u8, cmd, "carry")) {
+            const x = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+            const y = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+            ws.simulateCarry(tv.block_id, x, y);
+        } else if (std.mem.eql(u8, cmd, "drop")) {
+            ws.simulateDrop();
+        } else if (std.mem.eql(u8, cmd, "divider")) {
+            const dx = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+            ws.simulateDivider(dx);
+        } else if (std.mem.eql(u8, cmd, "find")) {
             a.openFind();
             const z = gpa.dupeSentinel(u8, rest, 0) catch continue;
             defer gpa.free(z);
