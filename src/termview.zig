@@ -222,6 +222,15 @@ pub const TermView = struct {
         v.baseline = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
     }
 
+    pub fn fontChanged(v: *TermView) void {
+        v.measure();
+        v.want_cols = 0;
+        v.want_rows = 0;
+        const w = v.widget();
+        onResize(v.area, w.getWidth(), w.getHeight(), v);
+        w.queueDraw();
+    }
+
     // Size.
 
     fn onResize(_: *gtk.DrawingArea, width: c_int, height: c_int, v: *TermView) callconv(.c) void {

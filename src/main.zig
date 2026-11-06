@@ -20,4 +20,5 @@ test {
     _ = @import("links.zig");
     _ = @import("programs.zig");
     _ = @import("blockicon.zig");
+    _ = @import("palette.zig");
 }

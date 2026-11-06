@@ -5,13 +5,13 @@ const gtk = @import("gtk");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
 
-pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, search, bell, up, down };
+pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, search, bell, up, down, right };
 
 pub fn image(kind: Kind, size: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();
     area.setContentWidth(size);
     area.setContentHeight(size);
-    area.setDrawFunc(&draw, @ptrFromInt(@intFromEnum(kind) + 1), null);
+    area.setDrawFunc(&draw, @ptrFromInt(@as(usize, @intFromEnum(kind)) + 1), null);
     const w = area.as(gtk.Widget);
     w.setCanTarget(0);
     w.setValign(.center);
@@ -126,6 +126,10 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int,
         .down => {
             line(cr, 4, 6, 8, 10);
             line(cr, 8, 10, 12, 6);
+        },
+        .right => {
+            line(cr, 6, 4, 10, 8);
+            line(cr, 10, 8, 6, 12);
         },
         .bell => {
             cr.moveTo(4, 11);

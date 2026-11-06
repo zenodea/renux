@@ -200,18 +200,11 @@ pub const Workspace = struct {
         gpa.free(p.layer_id);
     }
 
-    /// Places a layer's panes. Floating layers fit their layout inside `bounds`.
+    /// Places a layer's panes; `bounds` is set for a floating layer.
     fn placeNode(ws: *Workspace, session_id: []const u8, node: *const view.Node, layer_id: []const u8, bounds: ?view.Rect) void {
         switch (node.*) {
-            .leaf => |l| {
-                const r = if (bounds) |b| view.Rect{
-                    .x = b.x + l.rect.x * b.w,
-                    .y = b.y + l.rect.y * b.h,
-                    .w = l.rect.w * b.w,
-                    .h = l.rect.h * b.h,
-                } else l.rect;
-                ws.place(session_id, l.block_id, layer_id, r, bounds != null);
-            },
+            // Leaf rectangles are already in window fractions, floating layers included.
+            .leaf => |l| ws.place(session_id, l.block_id, layer_id, l.rect, bounds != null),
             .split => |s| {
                 if (bounds == null and ws.resizing == null) ws.dividers.append(gpa, .{
                     .horizontal = s.horizontal,
@@ -422,6 +415,11 @@ pub const Workspace = struct {
 
     pub fn isShown(ws: *Workspace, block_id: []const u8) bool {
         return ws.paneOf(block_id) != null;
+    }
+
+    /// The terminal font changed: every pane measures its cells again and refits.
+    pub fn fontChanged(ws: *Workspace) void {
+        for (ws.panes.items) |p| p.term.fontChanged();
     }
 
     /// After reconnecting, sizes must be sent again.

@@ -33,9 +33,42 @@ pub fn saveServerUrl(url: []const u8) void {
     _ = glib.fileSetContents(p.ptr, url.ptr, @intCast(url.len), null);
 }
 
+var font_buf: [128:0]u8 = undefined;
+
 pub fn fontName() [:0]const u8 {
     if (std.c.getenv("COMPY_FONT")) |f| return std.mem.span(f);
-    return "Monospace 11";
+    const p = path("font") orelse return "Monospace 11";
+    defer gpa.free(p);
+    var contents: [*]u8 = undefined;
+    var len: usize = 0;
+    if (glib.fileGetContents(p.ptr, &contents, &len, null) == 0) return "Monospace 11";
+    defer glib.free(contents);
+    const t = std.mem.trim(u8, contents[0..len], " \n");
+    if (t.len == 0 or t.len >= font_buf.len) return "Monospace 11";
+    @memcpy(font_buf[0..t.len], t);
+    font_buf[t.len] = 0;
+    return font_buf[0..t.len :0];
+}
+
+pub fn saveFont(name: []const u8) void {
+    const dir = std.fmt.allocPrintSentinel(gpa, "{s}/compy", .{std.mem.span(glib.getUserConfigDir())}, 0) catch return;
+    defer gpa.free(dir);
+    _ = glib.mkdirWithParents(dir.ptr, 0o700);
+    const p = path("font") orelse return;
+    defer gpa.free(p);
+    _ = glib.fileSetContents(p.ptr, name.ptr, @intCast(name.len), null);
+}
+
+/// Desktop alerts are on unless turned off.
+pub fn alerts() bool {
+    const p = path("alerts") orelse return true;
+    defer gpa.free(p);
+    if (glib.fileTest(p.ptr, .{ .exists = true }) == 0) return true;
+    return flag("alerts");
+}
+
+pub fn saveAlerts(on: bool) void {
+    saveFlag("alerts", on);
 }
 
 /// Small on/off settings live in their own files under ~/.config/compy.

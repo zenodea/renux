@@ -22,7 +22,19 @@ pub const Session = struct {
     label: []u8,
 };
 
-pub const Change = enum { state, sessions, view, message, block, alert };
+pub const Change = enum { state, sessions, view, message, block, alert, keymap };
+
+/// An action from the person's Rex config that Compy can run, with the keys bound to it.
+pub const Action = struct {
+    name: []const u8,
+    title: []const u8,
+    description: []const u8,
+    category: []const u8,
+    keywords: []const u8,
+    keys: []const u8,
+    args: ?[]const u8,
+    needs_args: bool,
+};
 
 pub const StatusKind = enum { working, blocked, done, failed, other };
 
@@ -92,6 +104,8 @@ pub const Server = struct {
     alert_block: std.ArrayList(u8) = .empty,
     host_colors: ?stream_mod.Colors = null,
     observer: ?Observer = null,
+    keymap_arena: std.heap.ArenaAllocator = .init(gpa),
+    actions: []Action = &.{},
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
     performer: ?Performer = null,
 
@@ -133,6 +147,7 @@ pub const Server = struct {
         s.sessions.deinit(gpa);
         s.reason.deinit(gpa);
         s.message.deinit(gpa);
+        s.keymap_arena.deinit();
         if (s.reconnect_token) |t| gpa.free(t);
         if (s.rex_version) |v| gpa.free(v);
         gpa.free(s.url);
@@ -149,6 +164,10 @@ pub const Server = struct {
         s.reason.clearRetainingCapacity();
         s.reason.appendSlice(gpa, reason) catch {};
         s.notify(.state, null);
+    }
+
+    pub fn notifyMessage(s: *Server, text: []const u8) void {
+        s.showMessage(text);
     }
 
     fn showMessage(s: *Server, text: []const u8) void {
@@ -245,6 +264,7 @@ pub const Server = struct {
                 for (s.sessions.items) |session| s.refreshView(session.id, -1);
                 s.retries = 0;
                 s.setState(.online, "");
+                s.fetchKeymap();
                 s.notify(.sessions, null);
 
                 // Streams carry on; any whose session ended while away are dropped.
@@ -940,6 +960,72 @@ pub const Server = struct {
     };
 
     /// Runs a change in a session, attaching to it first if needed. Failures are shown.
+    /// Reads the person's actions and bindings for the command palette.
+    pub fn fetchKeymap(s: *Server) void {
+        s.call("client.keymap", .{}, void, {}, gotKeymap);
+    }
+
+    fn gotKeymap(s: *Server, _: *void, r: Result) void {
+        const payload = switch (r) {
+            .ok => |p| p,
+            .err => return,
+        };
+        _ = s.keymap_arena.reset(.free_all);
+        const a = s.keymap_arena.allocator();
+        var list: std.ArrayList(Action) = .empty;
+        for (json.array(payload, "actions")) |item| {
+            const kind = json.str(item, "kind") orelse "";
+            // Client actions belong to one specific app, such as Rex on a Mac.
+            if (!eql(kind, "lua") and !eql(kind, "block")) continue;
+            const name = json.str(item, "name") orelse continue;
+            var keys: std.ArrayList(u8) = .empty;
+            var args: ?[]const u8 = null;
+            for (json.array(payload, "bindings")) |b| {
+                if (json.str(b, "mode") != null) continue;
+                if (!eql(json.str(b, "action") orelse "", name)) continue;
+                if (keys.items.len > 0) break;
+                for (json.array(b, "keys"), 0..) |k, i| {
+                    if (i > 0) keys.append(a, ' ') catch {};
+                    switch (k) {
+                        .string => |t| keys.appendSlice(a, t) catch {},
+                        else => {},
+                    }
+                }
+                if (json.get(b, "args")) |v| if (v != .null) {
+                    args = std.json.Stringify.valueAlloc(a, v, .{}) catch null;
+                };
+            }
+            list.append(a, .{
+                .name = a.dupe(u8, name) catch continue,
+                .title = a.dupe(u8, json.str(item, "title") orelse name) catch continue,
+                .description = a.dupe(u8, json.str(item, "description") orelse "") catch continue,
+                .category = a.dupe(u8, json.str(item, "category") orelse "") catch continue,
+                .keywords = a.dupe(u8, json.str(item, "keywords") orelse "") catch continue,
+                .keys = keys.items,
+                .args = args,
+                .needs_args = json.array(json.get(item, "args"), "required").len > 0,
+            }) catch {};
+        }
+        s.actions = list.items;
+        s.notify(.keymap, null);
+    }
+
+    /// Runs one of the person's Rex actions, as the palette does.
+    pub fn runAction(s: *Server, session_id: []const u8, block_id: ?[]const u8, action: []const u8, args: ?[]const u8) void {
+        // Fields go out only when set, as the Android app sends them.
+        if (block_id) |b| {
+            if (args) |t| {
+                s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .block_id = b, .args = json.Raw{ .text = t }, .origin = "palette" });
+            } else {
+                s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .block_id = b, .origin = "palette" });
+            }
+        } else if (args) |t| {
+            s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .args = json.Raw{ .text = t }, .origin = "palette" });
+        } else {
+            s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .origin = "palette" });
+        }
+    }
+
     fn act(s: *Server, session_id: []const u8, method: []const u8, payload: anytype) void {
         if (s.control == null) return s.showMessage("Not connected to the server");
         if (s.attached.contains(session_id)) {
