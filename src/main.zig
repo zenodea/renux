@@ -1,0 +1,19 @@
+const std = @import("std");
+const App = @import("app.zig").App;
+
+pub fn main() !void {
+    const app = try App.create();
+    std.process.exit(@intCast(app.run()));
+}
+
+test {
+    _ = @import("ws.zig");
+    _ = @import("term.zig");
+    _ = @import("control.zig");
+    _ = @import("json.zig");
+    _ = @import("view.zig");
+    _ = @import("stream.zig");
+    _ = @import("server.zig");
+    _ = @import("keys.zig");
+    _ = @import("theme.zig");
+}

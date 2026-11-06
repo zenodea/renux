@@ -1,0 +1,211 @@
+//! The panes of one Rex window, tiled the way the server lays them out. Panes keep their
+//! terminal views across layout changes, so a split or a resize doesn't reconnect anything.
+const std = @import("std");
+const gobject = @import("gobject");
+const gtk = @import("gtk");
+const view = @import("view.zig");
+const Server = @import("server.zig").Server;
+const TermView = @import("termview.zig").TermView;
+
+const gpa = std.heap.c_allocator;
+
+/// Space between panes, and around the edge.
+pub var gap: f64 = 6;
+
+const Pane = struct {
+    block_id: []u8,
+    frame: *gtk.Widget,
+    term: *TermView,
+    rect: view.Rect = .{},
+    seen: bool = false,
+};
+
+pub const Workspace = struct {
+    root: *gtk.Widget,
+    server: *Server,
+    session_id: ?[]u8 = null,
+    window_id: ?[]u8 = null,
+    focused: ?[]u8 = null,
+    panes: std.ArrayList(Pane) = .empty,
+
+    pub fn create(server: *Server) !*Workspace {
+        const ws = try gpa.create(Workspace);
+        const box = gtk.Box.new(.horizontal, 0);
+        const root = box.as(gtk.Widget);
+        root.setHexpand(1);
+        root.setVexpand(1);
+        root.addCssClass("workspace");
+        const layout = gtk.CustomLayout.new(null, &measure, &allocate);
+        root.setLayoutManager(layout.as(gtk.LayoutManager));
+        ws.* = .{ .root = root, .server = server };
+        gobject.Object.setData(root.as(gobject.Object), "compy-workspace", ws);
+        return ws;
+    }
+
+    /// Shows a window, or nothing when `window` is null.
+    pub fn show(ws: *Workspace, session_id: []const u8, window: ?*const view.Window) void {
+        const same_session = if (ws.session_id) |s| std.mem.eql(u8, s, session_id) else false;
+        if (!same_session) {
+            ws.clear();
+            replace(&ws.session_id, session_id);
+        }
+        const w = window orelse return ws.clear();
+        replace(&ws.window_id, w.id);
+        if (w.focused_block_id) |f| replace(&ws.focused, f);
+
+        for (ws.panes.items) |*p| p.seen = false;
+        if (w.zoomed_block_id) |z| {
+            ws.place(session_id, z, .{});
+        } else if (w.tiled()) |layer| {
+            if (layer.layout) |node| ws.placeNode(session_id, node);
+        }
+        // Floating layers sit over the tiles, at their bounds.
+        if (w.zoomed_block_id == null) for (w.layers) |layer| {
+            if (!layer.floating or layer.minimized) continue;
+            if (layer.layout) |node| ws.placeNodeIn(session_id, node, layer.bounds);
+        };
+
+        var i: usize = 0;
+        while (i < ws.panes.items.len) {
+            if (!ws.panes.items[i].seen) {
+                const p = ws.panes.orderedRemove(i);
+                ws.drop(p);
+            } else i += 1;
+        }
+        ws.markFocus();
+        ws.root.queueAllocate();
+    }
+
+    pub fn clear(ws: *Workspace) void {
+        for (ws.panes.items) |p| ws.drop(p);
+        ws.panes.clearRetainingCapacity();
+    }
+
+    fn drop(ws: *Workspace, p: Pane) void {
+        p.frame.unparent();
+        ws.server.releaseTerminal(p.block_id);
+        gpa.free(p.block_id);
+    }
+
+    fn placeNode(ws: *Workspace, session_id: []const u8, node: *const view.Node) void {
+        switch (node.*) {
+            .leaf => |l| ws.place(session_id, l.block_id, l.rect),
+            .split => |s| {
+                ws.placeNode(session_id, s.before);
+                ws.placeNode(session_id, s.after);
+            },
+        }
+    }
+
+    /// Places a floating layer's panes inside its bounds.
+    fn placeNodeIn(ws: *Workspace, session_id: []const u8, node: *const view.Node, bounds: view.Rect) void {
+        switch (node.*) {
+            .leaf => |l| ws.place(session_id, l.block_id, .{
+                .x = bounds.x + l.rect.x * bounds.w,
+                .y = bounds.y + l.rect.y * bounds.h,
+                .w = l.rect.w * bounds.w,
+                .h = l.rect.h * bounds.h,
+            }),
+            .split => |s| {
+                ws.placeNodeIn(session_id, s.before, bounds);
+                ws.placeNodeIn(session_id, s.after, bounds);
+            },
+        }
+    }
+
+    fn place(ws: *Workspace, session_id: []const u8, block_id: []const u8, rect: view.Rect) void {
+        for (ws.panes.items) |*p| if (std.mem.eql(u8, p.block_id, block_id)) {
+            p.rect = rect;
+            p.seen = true;
+            return;
+        };
+        const tv = TermView.create(ws.server, session_id, block_id) catch return;
+        tv.on_focus = .{ .ctx = ws, .f = clicked };
+        const frame = tv.widget();
+        frame.addCssClass("pane");
+        frame.setOverflow(.hidden);
+        frame.setParent(ws.root);
+        ws.panes.append(gpa, .{
+            .block_id = gpa.dupe(u8, block_id) catch return,
+            .frame = frame,
+            .term = tv,
+            .rect = rect,
+            .seen = true,
+        }) catch {};
+    }
+
+    fn clicked(ctx: *anyopaque, block_id: []const u8) void {
+        const ws: *Workspace = @ptrCast(@alignCast(ctx));
+        replace(&ws.focused, block_id);
+        ws.markFocus();
+        if (ws.session_id) |s| ws.server.focusBlock(s, block_id);
+    }
+
+    fn markFocus(ws: *Workspace) void {
+        for (ws.panes.items) |p| {
+            const on = if (ws.focused) |f| std.mem.eql(u8, f, p.block_id) else false;
+            if (on) p.frame.addCssClass("focused") else p.frame.removeCssClass("focused");
+        }
+    }
+
+    /// Gives the keyboard to the focused pane.
+    pub fn grabFocus(ws: *Workspace) void {
+        for (ws.panes.items) |p| {
+            if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) {
+                _ = p.frame.grabFocus();
+                return;
+            };
+        }
+        if (ws.panes.items.len > 0) _ = ws.panes.items[0].frame.grabFocus();
+    }
+
+    /// The pane with the keyboard, or the one the server says is focused.
+    pub fn focusedBlock(ws: *Workspace) ?[]const u8 {
+        return ws.focused;
+    }
+
+    /// After reconnecting, sizes must be sent again.
+    pub fn resendSizes(ws: *Workspace) void {
+        for (ws.panes.items) |p| p.term.resendSize();
+    }
+
+    fn fromWidget(w: *gtk.Widget) *Workspace {
+        return @ptrCast(@alignCast(gobject.Object.getData(w.as(gobject.Object), "compy-workspace").?));
+    }
+};
+
+fn measure(_: *gtk.Widget, _: gtk.Orientation, _: c_int, minimum: *c_int, natural: *c_int, min_baseline: *c_int, nat_baseline: *c_int) callconv(.c) void {
+    minimum.* = 120;
+    natural.* = 640;
+    min_baseline.* = -1;
+    nat_baseline.* = -1;
+}
+
+fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
+    const ws = Workspace.fromWidget(widget);
+    const w: f64 = @floatFromInt(width);
+    const h: f64 = @floatFromInt(height);
+    const half = gap / 2;
+    for (ws.panes.items) |p| {
+        // Each pane gives up half a gap on every side, inside an edge of half a gap.
+        const x0 = half + p.rect.x * (w - gap) + half;
+        const y0 = half + p.rect.y * (h - gap) + half;
+        const x1 = half + (p.rect.x + p.rect.w) * (w - gap) - half;
+        const y1 = half + (p.rect.y + p.rect.h) * (h - gap) - half;
+        var a: gtk.Allocation = .{
+            .f_x = @intFromFloat(@round(x0)),
+            .f_y = @intFromFloat(@round(y0)),
+            .f_width = @intFromFloat(@max(1, @round(x1) - @round(x0))),
+            .f_height = @intFromFloat(@max(1, @round(y1) - @round(y0))),
+        };
+        p.frame.sizeAllocate(&a, -1);
+    }
+}
+
+fn replace(slot: *?[]u8, value: []const u8) void {
+    if (slot.*) |old| {
+        if (std.mem.eql(u8, old, value)) return;
+        gpa.free(old);
+    }
+    slot.* = gpa.dupe(u8, value) catch null;
+}

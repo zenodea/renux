@@ -1,0 +1,19 @@
+.{
+    .name = .compy,
+    .version = "0.1.0",
+    .fingerprint = 0x3d1cf5c824aac144,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .ghostty = .{ .path = "../third_party/ghostty" },
+        .gobject = .{
+            // Ghostty's own build of zig-gobject, so the bindings match its GTK code.
+            .url = "https://deps.files.ghostty.org/gobject-2026-10-02-38-1.tar.zst",
+            .hash = "gobject-0.3.2-Skun7LuIogBbEh-6WrLeEzMaRCnOMB3eOf__RaPYSMCZ",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
