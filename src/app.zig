@@ -559,6 +559,9 @@ pub const App = struct {
             },
         }
         const palette = theme.Palette.from(source);
+        const ac = palette.accent;
+        termview.cursor_accent = (@as(u32, @intFromFloat(@round(ac.r * 255))) << 16) | (@as(u32, @intFromFloat(@round(ac.g * 255))) << 8) | @as(u32, @intFromFloat(@round(ac.b * 255)));
+        a.redrawAll();
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         palette.css(&out.writer) catch return;
@@ -2110,13 +2113,16 @@ const FrameLog = struct {
     }
 
     fn flush(clock: *gdk.FrameClock) void {
-        if (frames > 1) std.log.info("frames: {d} in {d} ms, worst gap {d:.1} ms, work avg {d:.1} ms worst {d:.1} ms, refresh {d:.1} ms", .{
+        if (frames > 1) std.log.info("frames: {d} in {d} ms, worst gap {d:.1} ms, work avg {d:.1} ms worst {d:.1} ms, refresh {d:.1} ms, ticking: panes {d} scroll {d} corner {}", .{
             frames,
             @divTrunc(last_end - window_start, 1000),
             @as(f64, @floatFromInt(worst_gap)) / 1000,
             @as(f64, @floatFromInt(@divTrunc(work_total, frames))) / 1000,
             @as(f64, @floatFromInt(worst_work)) / 1000,
             @as(f64, @floatFromInt(refresh(clock))) / 1000,
+            @import("workspace.zig").ticking,
+            termview.scroll_ticking,
+            if (shot_app) |a| a.corner_tick != 0 else false,
         });
         frames = 0;
         worst_gap = 0;

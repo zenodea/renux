@@ -18,6 +18,12 @@ pub const Settings = struct {
     brand_icons: bool = true,
     cursor_style: CursorStyle = .program,
     cursor_blink: bool = true,
+    /// The bar cursor's width in pixels.
+    cursor_width: f64 = 2,
+    /// Row height as a multiple of the font's own line height.
+    line_height: f64 = 1,
+    /// Extra pixels between characters; negative brings them closer.
+    letter_spacing: f64 = 0,
     alerts: bool = true,
     alert_blocked: bool = true,
     alert_error: bool = true,
@@ -62,6 +68,16 @@ fn boolean(kf: *glib.KeyFile, key: [*:0]const u8, default: bool) bool {
     return v != 0;
 }
 
+fn number(kf: *glib.KeyFile, key: [*:0]const u8, default: f64, min: f64, max: f64) f64 {
+    var err: ?*glib.Error = null;
+    const v = kf.getDouble("compy", key, &err);
+    if (err) |e| {
+        e.free();
+        return default;
+    }
+    return if (std.math.isFinite(v)) std.math.clamp(v, min, max) else default;
+}
+
 fn enumOf(comptime E: type, kf: *glib.KeyFile, key: [*:0]const u8, default: E) E {
     const v = str(kf, key, @tagName(default));
     defer gpa.free(v);
@@ -87,6 +103,9 @@ pub fn load() void {
     s.brand_icons = boolean(kf, "brand-icons", true);
     s.cursor_style = enumOf(CursorStyle, kf, "cursor-style", .program);
     s.cursor_blink = boolean(kf, "cursor-blink", true);
+    s.cursor_width = number(kf, "cursor-width", 2, 1, 6);
+    s.line_height = number(kf, "line-height", 1, 0.8, 2);
+    s.letter_spacing = number(kf, "letter-spacing", 0, -2, 6);
     s.alerts = boolean(kf, "alerts", true);
     s.alert_blocked = boolean(kf, "alert-blocked", true);
     s.alert_error = boolean(kf, "alert-error", true);
@@ -189,6 +208,9 @@ pub fn save() void {
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
     kf.setString("compy", "cursor-style", @tagName(s.cursor_style));
+    kf.setDouble("compy", "cursor-width", s.cursor_width);
+    kf.setDouble("compy", "line-height", s.line_height);
+    kf.setDouble("compy", "letter-spacing", s.letter_spacing);
 
     var labels: std.ArrayList(?[*:0]const u8) = .empty;
     var urls: std.ArrayList(?[*:0]const u8) = .empty;

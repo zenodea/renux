@@ -121,6 +121,29 @@ fn toggled(row: *adw.SwitchRow, _: *gobject.ParamSpec, t: *Toggle) callconv(.c) 
     if (t.after) |f| f(t.ctx.app);
 }
 
+const Number = struct { ctx: *Ctx, field: *f64, after: *const fn (*App) void };
+
+/// A number spinner bound to one of the settings, applied as it changes.
+fn numberRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, subtitle: ?[:0]const u8, field: *f64, min: f64, max: f64, step: f64, digits: c_uint, after: *const fn (*App) void) void {
+    const row = adw.SpinRow.newWithRange(min, max, step);
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    if (subtitle) |s| row.as(adw.ActionRow).setSubtitle(s.ptr);
+    row.setDigits(digits);
+    row.setValue(field.*);
+    const n = gpa.create(Number) catch return;
+    n.* = .{ .ctx = ctx, .field = field, .after = after };
+    _ = gobject.Object.signals.notify.connect(row, *Number, &numberChanged, n, .{ .detail = "value" });
+    g.add(row.as(gtk.Widget));
+}
+
+fn numberChanged(row: *adw.SpinRow, _: *gobject.ParamSpec, n: *Number) callconv(.c) void {
+    const v = row.getValue();
+    if (v == n.field.*) return;
+    n.field.* = v;
+    settings.save();
+    n.after(n.ctx.app);
+}
+
 /// Segmented buttons for an enum setting, like Rex's Comfortable / Compact.
 fn segments(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, comptime E: type, field: *E, labels: []const [:0]const u8, after: *const fn (*App) void) void {
     const row = adw.ActionRow.new();
@@ -368,9 +391,12 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const g = group(p, "Typography", null);
     fontRows(ctx, g);
+    numberRow(ctx, g, "Line height", "Row height as a multiple of the font's own", &settings.current.line_height, 0.8, 2, 0.05, 2, App.fontChanged);
+    numberRow(ctx, g, "Letter spacing", "Extra pixels between characters", &settings.current.letter_spacing, -2, 6, 0.5, 1, App.fontChanged);
 
     const c = group(p, "Cursor", null);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
+    numberRow(ctx, c, "Bar width", "In pixels, for the bar and underline cursors. The cursor takes the theme's accent color", &settings.current.cursor_width, 1, 6, 0.5, 1, App.redrawAll);
     switchRow(ctx, c, "Blink", "In the pane with the keyboard", &settings.current.cursor_blink, App.redrawAll);
 
     const colors = group(p, "Colors and Bell", null);

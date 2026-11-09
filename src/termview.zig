@@ -72,6 +72,10 @@ pub const Font = struct {
 };
 
 pub var font: ?Font = null;
+/// The theme's accent as 0xRRGGBB, which the cursor takes unless a program sets its own.
+pub var cursor_accent: u32 = 0;
+/// How many panes are animating a scroll, for COMPY_PERF.
+pub var scroll_ticking: u32 = 0;
 
 /// The terminal's own widget. It draws through GTK's snapshot, so text goes to the GPU's glyph
 /// cache, and each row's drawing is kept until that row changes.
@@ -170,6 +174,8 @@ pub const TermView = struct {
     /// Row drawings by position in the view; the last slot is the partly shown row above it.
     rows_cache: std.ArrayList(RowCache) = .empty,
     layout: ?*pango.Layout = null,
+    /// The letter spacing the layout was given, in pixels.
+    spacing: f64 = 0,
     server: *Server,
     session_id: []u8,
     block_id: []u8,
@@ -370,7 +376,10 @@ pub const TermView = struct {
         if (v.size_timer != 0) _ = glib.Source.remove(v.size_timer);
         if (v.flash_timer != 0) _ = glib.Source.remove(v.flash_timer);
         if (v.drag_idle != 0) _ = glib.Source.remove(v.drag_idle);
-        if (v.scroll_tick != 0) v.widget().removeTickCallback(v.scroll_tick);
+        if (v.scroll_tick != 0) {
+            v.widget().removeTickCallback(v.scroll_tick);
+            scroll_ticking -= 1;
+        }
         v.canvas.view = null;
         v.dropRows();
         v.rows_cache.deinit(gpa);
@@ -391,9 +400,14 @@ pub const TermView = struct {
         var w: c_int = 0;
         var h: c_int = 0;
         layout.getSize(&w, &h);
-        v.cell_w = @as(f64, @floatFromInt(w)) / pango.SCALE / 40.0;
-        v.cell_h = @ceil(@as(f64, @floatFromInt(h)) / pango.SCALE);
-        v.baseline = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
+        const prefs = &@import("settings.zig").current;
+        const natural_h = @ceil(@as(f64, @floatFromInt(h)) / pango.SCALE);
+        v.cell_w = @max(1, @as(f64, @floatFromInt(w)) / pango.SCALE / 40.0 + prefs.letter_spacing);
+        v.cell_h = @max(1, @round(natural_h * prefs.line_height));
+        // Taller rows keep the text in their middle.
+        v.baseline = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE + @floor((v.cell_h - natural_h) / 2);
+        v.spacing = prefs.letter_spacing;
+        if (v.layout) |l| setSpacing(l, v.spacing);
     }
 
     pub fn fontOf(v: *TermView) ?Font {
@@ -826,6 +840,7 @@ pub const TermView = struct {
         if (v.scroll_tick != 0) return;
         v.last_frame_us = 0;
         v.scroll_tick = v.widget().addTickCallback(&scrollTick, v, null);
+        scroll_ticking += 1;
     }
 
     fn scrollTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
@@ -848,6 +863,7 @@ pub const TermView = struct {
         v.widget().queueDraw();
         if (v.scroll_velocity == 0 and v.scroll_px == v.scroll_target) {
             v.scroll_tick = 0;
+            scroll_ticking -= 1;
             return 0;
         }
         return 1;
@@ -1243,6 +1259,16 @@ fn fillRect(sn: *gtk.Snapshot, color: u32, alpha: f64, x: f64, y: f64, w: f64, h
 
 /// Places a layout with its baseline at `baseline`. Fallback fonts have other ascents, so
 /// placing by the top would put their glyphs at the wrong height.
+/// Spreads characters apart by `px` (or closer, when negative), so runs of text stay on a grid
+/// of the wider cells: Pango leaves the space off a run's first and last character.
+fn setSpacing(layout: *pango.Layout, px: f64) void {
+    if (px == 0) return layout.setAttributes(null);
+    const list = pango.AttrList.new();
+    defer list.unref();
+    list.insert(pango.attrLetterSpacingNew(@intFromFloat(@round(px * pango.SCALE))));
+    layout.setAttributes(list);
+}
+
 fn layoutOnBaseline(sn: *gtk.Snapshot, layout: *pango.Layout, color: gdk.RGBA, x: f64, baseline: f64) void {
     const own = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
     sn.save();
@@ -1264,6 +1290,7 @@ const TermDraw = struct {
     fn layoutOf(v: *TermView) *pango.Layout {
         if (v.layout) |l| return l;
         const l = v.widget().createPangoLayout(null);
+        setSpacing(l, v.spacing);
         v.layout = l;
         return l;
     }
@@ -1466,7 +1493,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     if (f.cursor_visible and f.cursor_y < f.rows and f.cursor_x < f.cols and f.scroll_offset + f.scroll_len >= f.scroll_total) {
         const cx = pad + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w;
         const cy = pad + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
-        const color = if (f.cursor_color != 0) f.cursor_color else f.fg;
+        // A program's own cursor color wins; otherwise the theme's accent, like Rex.
+        const color = if (f.cursor_color != 0 and f.cursor_color != f.fg) f.cursor_color else if (cursor_accent != 0) cursor_accent else f.fg;
         const focused = v.widget().hasFocus() != 0;
         const prefs = &@import("settings.zig").current;
         const style: c_int = switch (prefs.cursor_style) {
@@ -1486,8 +1514,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
             fillRect(sn, color, 1, cx, cy, 1, v.cell_h);
             fillRect(sn, color, 1, cx + cw - 1, cy, 1, v.cell_h);
         } else switch (style) {
-            0 => fillRect(sn, color, 1, cx, cy, 2, v.cell_h),
-            2 => fillRect(sn, color, 1, cx, cy + v.cell_h - 2, cw, 2),
+            0 => fillRect(sn, color, 1, cx, cy, prefs.cursor_width, v.cell_h),
+            2 => fillRect(sn, color, 1, cx, cy + v.cell_h - prefs.cursor_width, cw, prefs.cursor_width),
             else => {
                 fillRect(sn, color, 1, cx, cy, cw, v.cell_h);
                 // The character under a block cursor, in the background color.

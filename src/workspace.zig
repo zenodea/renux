@@ -1098,6 +1098,7 @@ pub const Workspace = struct {
         if (ws.tick != 0) return;
         ws.last_time = 0;
         ws.tick = ws.root.addTickCallback(&onTick, ws, null);
+        ticking += 1;
     }
 
     fn onTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
@@ -1130,6 +1131,7 @@ pub const Workspace = struct {
         ws.root.queueAllocate();
         if (!busy) {
             ws.tick = 0;
+            ticking -= 1;
             return 0;
         }
         return 1;
@@ -1315,6 +1317,9 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
 /// Places a card at its animated rect. The card takes that size rather than being scaled: scaling
 /// makes the GPU redraw every glyph at a new size each frame, which cost 6 to 300 ms a frame.
 /// The terminal inside keeps its grid until the size settles, since resizes are debounced.
+/// How many workspaces are animating, for COMPY_PERF.
+pub var ticking: u32 = 0;
+
 fn allocateAt(w: *gtk.Widget, r: [4]f64, size: [2]f64) void {
     _ = size;
     const cw: c_int = @intFromFloat(@max(1, @round(r[2])));
