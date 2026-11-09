@@ -1270,7 +1270,8 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     }
     for (ws.leaving.items) |l| {
         l.frame.setOpacity(@max(0, l.alpha));
-        allocateAt(l.frame, l.cur, l.size);
+        // A leaving card keeps its size, so its terminal never asks the server for a new one.
+        allocateAt(l.frame, .{ l.cur[0] + (l.cur[2] - l.size[0]) / 2, l.cur[1] + (l.cur[3] - l.size[1]) / 2, l.size[0], l.size[1] }, l.size);
     }
     // A joined layer's card wraps its panes where they are drawn now, a pixel outside them.
     for (ws.backdrops.items) |bd| {
@@ -1311,22 +1312,23 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
 
 /// Places a card at `r`. While it's on its way somewhere, the card keeps the size it's headed
 /// for and the GPU scales and moves it there, so its terminal isn't drawn again on every frame.
+/// Places a card at its animated rect. The card takes that size rather than being scaled: scaling
+/// makes the GPU redraw every glyph at a new size each frame, which cost 6 to 300 ms a frame.
+/// The terminal inside keeps its grid until the size settles, since resizes are debounced.
 fn allocateAt(w: *gtk.Widget, r: [4]f64, size: [2]f64) void {
-    const sw = @max(1, size[0]);
-    const sh = @max(1, size[1]);
-    if (@abs(r[2] - sw) < 0.5 and @abs(r[3] - sh) < 0.5) {
-        var a: gtk.Allocation = .{
-            .f_x = @intFromFloat(@round(r[0])),
-            .f_y = @intFromFloat(@round(r[1])),
-            .f_width = @intFromFloat(sw),
-            .f_height = @intFromFloat(sh),
-        };
+    _ = size;
+    const cw: c_int = @intFromFloat(@max(1, @round(r[2])));
+    const ch: c_int = @intFromFloat(@max(1, @round(r[3])));
+    const fx = @round(r[0]);
+    const fy = @round(r[1]);
+    if (@abs(r[0] - fx) < 0.01 and @abs(r[1] - fy) < 0.01) {
+        var a: gtk.Allocation = .{ .f_x = @intFromFloat(fx), .f_y = @intFromFloat(fy), .f_width = cw, .f_height = ch };
         w.sizeAllocate(&a, -1);
         return;
     }
+    // Moving by fractions of a pixel keeps slow glides smooth on HiDPI screens.
     const t = gsk.Transform.new().translate(&.{ .f_x = @floatCast(r[0]), .f_y = @floatCast(r[1]) }) orelse return;
-    const scaled = if (std.c.getenv("COMPY_NOSCALE") != null) t else t.scale(@floatCast(@max(0.01, r[2] / sw)), @floatCast(@max(0.01, r[3] / sh)));
-    w.allocate(@intFromFloat(sw), @intFromFloat(sh), -1, scaled);
+    w.allocate(cw, ch, -1, t);
 }
 
 /// Two arrows passing each other, on a drop target that swaps.
