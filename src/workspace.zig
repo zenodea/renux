@@ -245,6 +245,11 @@ pub const Workspace = struct {
                 if (ws.snap) ws.drop(p) else ws.leave(p);
             } else i += 1;
         }
+        // Floating layers draw over every tiled pane, in the server's order, back to front.
+        if (w.zoomed_block_id == null) for (w.layers) |layer| {
+            if (!layer.floating or layer.minimized) continue;
+            for (ws.panes.items) |p| if (p.floating and std.mem.eql(u8, p.layer_id, layer.id)) p.frame.insertBefore(ws.root, null);
+        };
         if (ws.moving != null) {
             ws.moving = null;
             if (dragged) |d| for (ws.panes.items, 0..) |p, k| if (p.block_id.ptr == d) {

@@ -948,6 +948,22 @@ pub const Server = struct {
         s.act(session_id, "session.float_block", .{ .session_id = session_id, .block_id = block_id, .bounds = layerBounds(bounds) });
     }
 
+    /// A new shell in its own floating layer of the shown window.
+    pub fn newFloating(s: *Server, session_id: []const u8, window_id: []const u8, bounds: view.Rect) void {
+        s.act(session_id, "session.new_layer", .{ .session_id = session_id, .window_id = window_id, .bounds = layerBounds(bounds), .layout = shell_layout, .focus = true });
+    }
+
+    /// Moves a window just before another in the session's order, or to the end.
+    pub fn moveWindow(s: *Server, session_id: []const u8, window_id: []const u8, before: ?[]const u8) void {
+        if (before) |b| {
+            s.act(session_id, "session.move_window", .{ .session_id = session_id, .window_id = window_id, .before_window_id = b });
+        } else s.act(session_id, "session.move_window", .{ .session_id = session_id, .window_id = window_id });
+    }
+
+    pub fn renameBlock(s: *Server, session_id: []const u8, block_id: []const u8, label: []const u8) void {
+        s.act(session_id, "session.set_block_label", .{ .session_id = session_id, .block_id = block_id, .label = label });
+    }
+
     pub fn setLayerMinimized(s: *Server, session_id: []const u8, layer_id: []const u8, minimized: bool) void {
         if (minimized) {
             s.act(session_id, "session.set_layer_state", .{ .session_id = session_id, .layer_id = layer_id, .state = "minimized" });

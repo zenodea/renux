@@ -30,6 +30,8 @@ pub const Settings = struct {
     terminal_opacity: f64 = 1,
     /// Blurs what shows through. On Linux the desktop decides; KDE and Hyprland do it.
     blur: bool = true,
+    /// The sidebar's width in pixels, set by dragging its edge.
+    sidebar_width: f64 = 250,
     alerts: bool = true,
     alert_blocked: bool = true,
     alert_error: bool = true,
@@ -115,6 +117,7 @@ pub fn load() void {
     s.window_opacity = number(kf, "window-opacity", 1, 0.2, 1);
     s.terminal_opacity = number(kf, "terminal-opacity", 1, 0.2, 1);
     s.blur = boolean(kf, "blur", true);
+    s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
     s.alerts = boolean(kf, "alerts", true);
     s.alert_blocked = boolean(kf, "alert-blocked", true);
     s.alert_error = boolean(kf, "alert-error", true);
@@ -223,6 +226,7 @@ pub fn save() void {
     kf.setDouble("compy", "window-opacity", s.window_opacity);
     kf.setDouble("compy", "terminal-opacity", s.terminal_opacity);
     kf.setBoolean("compy", "blur", @intFromBool(s.blur));
+    kf.setDouble("compy", "sidebar-width", s.sidebar_width);
 
     var labels: std.ArrayList(?[*:0]const u8) = .empty;
     var urls: std.ArrayList(?[*:0]const u8) = .empty;

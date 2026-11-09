@@ -8,6 +8,7 @@ const gio = @import("gio");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
 const gsk = @import("gsk");
+const pango = @import("pango");
 const adw = @import("adw");
 const server_mod = @import("server.zig");
 const view = @import("view.zig");
@@ -50,6 +51,8 @@ const css =
     \\.session-tool { opacity: 0; min-width: 22px; min-height: 22px; }
     \\row.session-row:hover .session-tool, .session-tool.folded { opacity: 0.6; }
     \\row.session-row .session-tool:hover { opacity: 1; }
+    \\.sidebar-handle { background: none; }
+    \\.sidebar-handle:hover { background-image: linear-gradient(to right, transparent 3px, alpha(@accent_bg_color, 0.6) 3px, alpha(@accent_bg_color, 0.6) 5px, transparent 5px); }
     \\.sidebar-footer { padding: 8px 12px 12px 12px; }
     \\.sidebar-footer > * { margin-left: 2px; }
     \\.filter-pill { border-radius: 99px; min-height: 30px; padding: 0 8px; transition: background-color 140ms ease-out, color 140ms ease-out; }
@@ -291,10 +294,23 @@ pub const App = struct {
 
         const split = adw.OverlaySplitView.new();
         a.split = split;
-        split.setSidebar(side.as(gtk.Widget));
+        // The sidebar's right edge can be dragged to make it wider or narrower.
+        const side_overlay = gtk.Overlay.new();
+        side_overlay.setChild(side.as(gtk.Widget));
+        const handle = gtk.Box.new(.vertical, 0);
+        handle.as(gtk.Widget).addCssClass("sidebar-handle");
+        handle.as(gtk.Widget).setHalign(.end);
+        handle.as(gtk.Widget).setSizeRequest(8, -1);
+        handle.as(gtk.Widget).setCursorFromName("col-resize");
+        const handle_drag = gtk.GestureDrag.new();
+        _ = gtk.GestureDrag.signals.drag_begin.connect(handle_drag, *App, &sidebarDragBegin, a, .{});
+        _ = gtk.GestureDrag.signals.drag_update.connect(handle_drag, *App, &sidebarDragUpdate, a, .{});
+        _ = gtk.GestureDrag.signals.drag_end.connect(handle_drag, *App, &sidebarDragEnd, a, .{});
+        handle.as(gtk.Widget).addController(handle_drag.as(gtk.EventController));
+        side_overlay.addOverlay(handle.as(gtk.Widget));
+        split.setSidebar(side_overlay.as(gtk.Widget));
         split.setContent(card.as(gtk.Widget));
-        split.setMinSidebarWidth(220);
-        split.setMaxSidebarWidth(280);
+        a.setSidebarWidth(settings.current.sidebar_width);
         _ = gobject.Object.signals.notify.connect(split, *App, &sidebarShown, a, .{ .detail = "show-sidebar" });
 
         a.toasts = adw.ToastOverlay.new();
@@ -366,6 +382,28 @@ pub const App = struct {
         S.buf[n] = ':';
         S.buf[n + 1] = 0;
         return S.buf[0 .. n + 1 :0];
+    }
+
+    var sidebar_drag_start: f64 = 0;
+
+    fn setSidebarWidth(a: *App, width: f64) void {
+        const w = std.math.clamp(width, 180, 480);
+        a.split.setMaxSidebarWidth(w);
+        a.split.setMinSidebarWidth(w);
+        a.split.setSidebarWidthFraction(1);
+    }
+
+    fn sidebarDragBegin(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
+        sidebar_drag_start = a.split.getMaxSidebarWidth();
+    }
+
+    fn sidebarDragUpdate(_: *gtk.GestureDrag, dx: f64, _: f64, a: *App) callconv(.c) void {
+        a.setSidebarWidth(sidebar_drag_start + dx);
+    }
+
+    fn sidebarDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
+        settings.current.sidebar_width = a.split.getMaxSidebarWidth();
+        settings.save();
     }
 
     fn sidebarShown(split: *adw.OverlaySplitView, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
@@ -1098,6 +1136,100 @@ pub const App = struct {
             return true;
         }
         if (std.mem.eql(u8, action, "session.switch")) return a.did(switchSession);
+        return a.moreActions(action, args);
+    }
+
+    /// The rest of Rex's client and session actions that make sense in Compy.
+    fn moreActions(a: *App, action: []const u8, args: ?@import("json.zig").Value) bool {
+        const J = @import("json.zig");
+        const is = struct {
+            fn f(x: []const u8, y: []const u8) bool {
+                return std.mem.eql(u8, x, y);
+            }
+        }.f;
+        if (is(action, "client.font.increase")) return a.fontStep(1);
+        if (is(action, "client.font.decrease")) return a.fontStep(-1);
+        if (is(action, "client.font.reset")) return a.fontStep(0);
+        if (is(action, "client.find.next")) return a.did(findNext);
+        if (is(action, "client.find.previous")) return a.did(findPrev);
+        if (is(action, "client.mode.exit_all")) {
+            termview.setKeyMode("");
+            return true;
+        }
+        if (is(action, "client.prompt.next")) return a.did(promptNext);
+        if (is(action, "client.prompt.previous")) return a.did(promptPrev);
+        if (is(action, "client.scroll.page_up")) return a.scrollPage(true);
+        if (is(action, "client.scroll.page_down")) return a.scrollPage(false);
+        if (is(action, "client.tab.close_others")) return a.closeOtherWindows();
+        if (is(action, "client.tab.move.forward")) return a.moveWindowStep(true);
+        if (is(action, "client.tab.move.backward")) return a.moveWindowStep(false);
+        if (is(action, "client.tab.move")) {
+            const by = J.int(args, "offset") orelse J.int(args, "delta") orelse 1;
+            return a.moveWindowStep(by > 0);
+        }
+        if (is(action, "client.window.fullscreen.toggle")) {
+            if (a.window.as(gtk.Window).isFullscreen() != 0) a.window.as(gtk.Window).unfullscreen() else a.window.as(gtk.Window).fullscreen();
+            return true;
+        }
+        if (is(action, "client.window.close") or is(action, "client.close")) {
+            a.window.as(gtk.Window).close();
+            return true;
+        }
+        if (is(action, "client.visibility.toggle")) {
+            a.window.as(gtk.Window).minimize();
+            return true;
+        }
+        if (is(action, "client.window.new")) {
+            a.toast("Compy uses one window; ctrl+a c opens a new tab in it");
+            return true;
+        }
+        if (is(action, "client.settings") or is(action, "client.theme.change") or is(action, "client.shortcuts.edit") or is(action, "client.theme.import")) return a.did(openSettings);
+        if (is(action, "client.appearance.switch_mode")) {
+            settings.current.color_scheme = if (adw.StyleManager.getDefault().getDark() != 0) .light else .dark;
+            settings.save();
+            a.theme_for = null;
+            a.applyTheme();
+            return true;
+        }
+        if (is(action, "client.sidebar.filter.focus")) {
+            a.split.setShowSidebar(1);
+            a.filter_button.popup();
+            return true;
+        }
+        if (is(action, "client.host.add")) {
+            a.addHostDialog();
+            return true;
+        }
+        if (is(action, "client.tab_style.toggle")) {
+            settings.current.show_headers = !settings.current.show_headers;
+            settings.save();
+            a.headersChanged();
+            return true;
+        }
+        if (is(action, "client.notice.dismiss")) return true;
+        if (is(action, "client.version.copy")) {
+            a.window.as(gtk.Widget).getClipboard().setText("Compy for Linux");
+            a.toast("Version copied");
+            return true;
+        }
+        if (is(action, "session.new_window")) return a.did(newWindow);
+        if (is(action, "session.close_window")) {
+            const s = a.server orelse return false;
+            const sid = a.session_id orelse return false;
+            const w = a.shownWindow() orelse return false;
+            s.closeWindow(sid, w.id);
+            return true;
+        }
+        if (is(action, "session.close")) return a.confirmCloseSession();
+        if (is(action, "session.zoom_block")) return a.did(zoomPane);
+        if (is(action, "session.focus_next_pane")) return a.focusStep(1);
+        if (is(action, "session.focus_previous_pane")) return a.focusStep(-1);
+        if (is(action, "session.focus_next_window")) return a.stepWindow(1);
+        if (is(action, "session.focus_previous_window")) return a.stepWindow(-1);
+        if (is(action, "session.focus_direction")) return a.focusDirection(J.str(args, "direction") orelse return false);
+        if (is(action, "session.collapse")) return a.foldSessions(.current, true);
+        if (is(action, "session.expand")) return a.foldSessions(.current, false);
+        if (is(action, "session.collapse_others")) return a.foldSessions(.others, true);
         return false;
     }
 
@@ -1200,28 +1332,38 @@ pub const App = struct {
         const J = @import("json.zig");
         const eql = std.mem.eql;
         if (eql(u8, name, "zoom")) return a.did(zoomPane);
+        if (std.mem.startsWith(u8, name, "focus.")) return a.focusDirection(name[6..]);
+        if (std.mem.startsWith(u8, name, "split.")) return a.splitToward(name[6..]);
+        if (std.mem.startsWith(u8, name, "move.")) return a.moveToward(name[5..]);
+        if (eql(u8, name, "close_others")) return a.closeOthers();
+        if (eql(u8, name, "minimize_floating")) return a.did(minimizePane);
+        if (eql(u8, name, "minimize_all_floating")) return a.minimizeAllFloating();
+        if (eql(u8, name, "new_floating")) return a.newFloatingPane();
+        if (eql(u8, name, "rename")) return a.renamePaneAction();
+        if (eql(u8, name, "copy_id")) {
+            const t = a.target() orelse return false;
+            const z = gpa.dupeSentinel(u8, t[2], 0) catch return false;
+            defer gpa.free(z);
+            a.window.as(gtk.Widget).getClipboard().setText(z.ptr);
+            a.toast("Pane ID copied");
+            return true;
+        }
         if (eql(u8, name, "close")) return a.did(closePane);
         if (eql(u8, name, "float")) return a.did(floatPane);
         if (eql(u8, name, "focus_next")) return a.focusStep(1);
         if (eql(u8, name, "focus_previous")) return a.focusStep(-1);
         if (eql(u8, name, "split")) {
             const dir = J.str(args, "direction") orelse "right";
-            if (eql(u8, dir, "down") or eql(u8, dir, "vertical")) a.splitDown() else a.splitRight();
-            return true;
+            return a.splitToward(if (eql(u8, dir, "vertical")) "down" else if (eql(u8, dir, "horizontal")) "right" else dir);
         }
+        if (eql(u8, name, "move")) return a.moveToward(J.str(args, "direction") orelse return false);
         if (eql(u8, name, "resize")) {
             const dir = J.str(args, "direction") orelse return false;
             const amount: f64 = @floatFromInt(J.int(args, "amount") orelse 3);
             return a.resizeFocused(dir, amount);
         }
         if (eql(u8, name, "balance")) return a.balance();
-        if (eql(u8, name, "focus")) {
-            const ws = a.workspace orelse return false;
-            const next_pane = ws.neighbor(J.str(args, "direction") orelse return false) orelse return true;
-            ws.focus(next_pane);
-            ws.grabFocus();
-            return true;
-        }
+        if (eql(u8, name, "focus")) return a.focusDirection(J.str(args, "direction") orelse return false);
         if (eql(u8, name, "send_key")) {
             // A key the config passes through, such as the prefix itself pressed twice.
             const ws = a.workspace orelse return false;
@@ -1234,6 +1376,166 @@ pub const App = struct {
             return true;
         }
         return false;
+    }
+
+    fn focusDirection(a: *App, dir: []const u8) bool {
+        const ws = a.workspace orelse return false;
+        const next_pane = ws.neighbor(dir) orelse return true;
+        ws.focus(next_pane);
+        ws.grabFocus();
+        return true;
+    }
+
+    /// A new shell beside the focused pane: right, left, down or up, or along its longer side.
+    fn splitToward(a: *App, dir: []const u8) bool {
+        const t = a.target() orelse return false;
+        const eql = std.mem.eql;
+        var horizontal = eql(u8, dir, "right") or eql(u8, dir, "left");
+        if (eql(u8, dir, "auto")) {
+            const ws = a.workspace orelse return false;
+            const tv = ws.focusedView() orelse return false;
+            horizontal = tv.widget().getWidth() >= tv.widget().getHeight() * 2;
+        } else if (!horizontal and !eql(u8, dir, "down") and !eql(u8, dir, "up")) return false;
+        t[0].newSplit(t[1], t[2], horizontal, eql(u8, dir, "left") or eql(u8, dir, "up"));
+        return true;
+    }
+
+    /// Moves the focused pane past its neighbor in a direction.
+    fn moveToward(a: *App, dir: []const u8) bool {
+        const t = a.target() orelse return false;
+        const ws = a.workspace orelse return false;
+        const other = ws.neighbor(dir) orelse return true;
+        const eql = std.mem.eql;
+        t[0].moveBlock(t[1], t[2], other, eql(u8, dir, "left") or eql(u8, dir, "right"), eql(u8, dir, "left") or eql(u8, dir, "up"));
+        return true;
+    }
+
+    fn closeOthers(a: *App) bool {
+        const t = a.target() orelse return false;
+        const ws = a.workspace orelse return false;
+        for (ws.panes.items) |p| if (!std.mem.eql(u8, p.block_id, t[2])) t[0].closeBlock(t[1], p.block_id);
+        return true;
+    }
+
+    fn minimizeAllFloating(a: *App) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const ws = a.workspace orelse return false;
+        var done: [32][]const u8 = undefined;
+        var n: usize = 0;
+        for (ws.panes.items) |p| if (p.floating) {
+            const seen = for (done[0..n]) |d| {
+                if (std.mem.eql(u8, d, p.layer_id)) break true;
+            } else false;
+            if (seen or n == done.len) continue;
+            done[n] = p.layer_id;
+            n += 1;
+            s.setLayerMinimized(sid, p.layer_id, true);
+        };
+        return true;
+    }
+
+    fn newFloatingPane(a: *App) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const w = a.shownWindow() orelse return false;
+        s.newFloating(sid, w.id, .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
+        return true;
+    }
+
+    /// The whole font a step bigger or smaller, or back to where it started.
+    fn fontStep(a: *App, delta: i32) bool {
+        const z = gpa.dupeSentinel(u8, settings.current.font, 0) catch return false;
+        defer gpa.free(z);
+        const desc = pango.FontDescription.fromString(z.ptr);
+        defer desc.free();
+        if (start_font_size == 0) start_font_size = desc.getSize();
+        const size = if (delta == 0) start_font_size else std.math.clamp(desc.getSize() + delta * pango.SCALE, 6 * pango.SCALE, 40 * pango.SCALE);
+        desc.setSize(size);
+        const text = desc.toString();
+        defer glib.free(text);
+        settings.setString(&settings.current.font, std.mem.span(text));
+        a.fontChanged();
+        return true;
+    }
+
+    fn scrollPage(a: *App, up: bool) bool {
+        const ws = a.workspace orelse return false;
+        const tv = ws.focusedView() orelse return false;
+        const rows = @as(f64, @floatFromInt(tv.widget().getHeight())) / @max(1, tv.cell_h);
+        tv.scrollBy(if (up) -rows / 3 else rows / 3);
+        return true;
+    }
+
+    fn closeOtherWindows(a: *App) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const v = s.sessionView(sid) orelse return false;
+        const w = a.shownWindow() orelse return false;
+        for (v.windows) |*other| if (other != w) s.closeWindow(sid, other.id);
+        return true;
+    }
+
+    /// Moves the shown window one place earlier or later in the session.
+    fn moveWindowStep(a: *App, forward: bool) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        const v = s.sessionView(sid) orelse return false;
+        const w = a.shownWindow() orelse return false;
+        for (v.windows, 0..) |*other, i| if (other == w) {
+            if (forward) {
+                if (i + 1 >= v.windows.len) return true;
+                s.moveWindow(sid, w.id, if (i + 2 < v.windows.len) v.windows[i + 2].id else null);
+            } else {
+                if (i == 0) return true;
+                s.moveWindow(sid, w.id, v.windows[i - 1].id);
+            }
+            return true;
+        };
+        return false;
+    }
+
+    fn setCollapsed(a: *App, session_id: []const u8, fold: bool) void {
+        if (fold) {
+            if (a.collapsed.contains(session_id)) return;
+            const key = gpa.dupe(u8, session_id) catch return;
+            a.collapsed.put(gpa, key, {}) catch gpa.free(key);
+        } else if (a.collapsed.fetchRemove(session_id)) |e| gpa.free(e.key);
+    }
+
+    fn foldSessions(a: *App, which: enum { current, others }, fold: bool) bool {
+        const s = a.server orelse return false;
+        const sid = a.session_id orelse return false;
+        for (s.sessions.items) |session| {
+            const is_current = std.mem.eql(u8, session.id, sid);
+            if ((which == .current) == is_current) a.setCollapsed(session.id, fold);
+        }
+        a.rebuildSidebar();
+        return true;
+    }
+
+    fn confirmCloseSession(a: *App) bool {
+        const sid = a.session_id orelse return false;
+        const dialog = adw.AlertDialog.new("Close this session?", "Every window and program in it ends.");
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("close", "Close Session");
+        dialog.setResponseAppearance("close", .destructive);
+        dialog.setDefaultResponse("cancel");
+        const id = gpa.dupeSentinel(u8, sid, 0) catch return false;
+        const Done = struct {
+            fn run(_: *adw.AlertDialog, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
+                const owned: [*:0]u8 = @ptrCast(data.?);
+                defer glib.free(@ptrCast(owned));
+                if (!std.mem.eql(u8, std.mem.span(response), "close")) return;
+                const app = mode_app orelse return;
+                if (app.server) |srv| srv.destroySession(std.mem.span(owned));
+            }
+        };
+        const z = glib.strdup(id.ptr);
+        gpa.free(id);
+        _ = adw.AlertDialog.signals.response.connect(dialog, ?*anyopaque, &Done.run, @ptrCast(z), .{});
+        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+        return true;
     }
 
     fn focusStep(a: *App, delta: i64) bool {
@@ -1476,7 +1778,9 @@ pub const App = struct {
         for (ws.panes.items) |other| if (!other.floating) {
             return t[0].moveBlock(t[1], t[2], other.block_id, true, false);
         };
-        t[0].notifyMessage("There's no tiled pane to put it next to");
+        // Rex can only dock beside a tiled pane, so with none the layer fills the window instead.
+        t[0].resizeLayer(t[1], p.layer_id, .{ .x = 0, .y = 0, .w = 1, .h = 1 });
+        a.toast("No tiled pane to dock beside, so it fills the window");
     }
 
     /// Minimizes a pane to the tray. A tiled pane floats first, then goes once the server says so.
@@ -1516,9 +1820,22 @@ pub const App = struct {
         s.newWindow(sid);
     }
 
+    /// Asks for the new session's name first; left empty, the server picks one.
     fn newSession(a: *App) void {
-        const s = a.server orelse return;
-        s.createSession("");
+        if (a.server == null) return;
+        const ctx = gpa.create(RenameCtx) catch return;
+        ctx.* = .{ .app = a, .entry = undefined, .session_id = gpa.dupe(u8, "") catch return, .window_id = gpa.dupe(u8, "") catch return, .create = true };
+        a.askName("New session", "", "Name, or leave empty for a random one", "Create", ctx);
+    }
+
+    fn renamePaneAction(a: *App) bool {
+        const t = a.target() orelse return false;
+        const info = t[0].blockInfo(t[2]);
+        const current: []const u8 = if (info) |i| (i.title orelse "") else "";
+        const ctx = gpa.create(RenameCtx) catch return false;
+        ctx.* = .{ .app = a, .entry = undefined, .session_id = gpa.dupe(u8, t[1]) catch return false, .window_id = gpa.dupe(u8, "") catch return false, .block_id = gpa.dupe(u8, t[2]) catch return false };
+        a.askName("Rename pane", current, null, "Rename", ctx);
+        return true;
     }
 
     fn paste(a: *App) void {
@@ -1560,19 +1877,51 @@ pub const App = struct {
         dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
     }
 
-    const RenameCtx = struct { app: *App, entry: *gtk.Entry, session_id: []u8, window_id: []u8 };
+    const RenameCtx = struct {
+        app: *App,
+        entry: *gtk.Entry,
+        session_id: []u8,
+        window_id: []u8,
+        /// Set when a pane is renamed.
+        block_id: []u8 = &.{},
+        /// Set when the name is for a session about to be created.
+        create: bool = false,
+    };
 
     fn renamed(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *RenameCtx) callconv(.c) void {
         defer {
             gpa.free(ctx.session_id);
             gpa.free(ctx.window_id);
+            if (ctx.block_id.len > 0) gpa.free(ctx.block_id);
             gpa.destroy(ctx);
         }
         if (!std.mem.eql(u8, std.mem.span(response), "rename")) return;
         const label = std.mem.trim(u8, std.mem.span(ctx.entry.as(gtk.Editable).getText()), " ");
         const s = ctx.app.server orelse return;
+        if (ctx.create) return s.createSession(label);
+        if (ctx.block_id.len > 0) return s.renameBlock(ctx.session_id, ctx.block_id, label);
         // No window means the session itself is renamed.
         if (ctx.window_id.len == 0) s.renameSession(ctx.session_id, label) else s.renameWindow(ctx.session_id, ctx.window_id, label);
+    }
+
+    /// Asks for a name in a small dialog, then acts on it as `ctx` says.
+    fn askName(a: *App, title: [:0]const u8, current: []const u8, placeholder: ?[:0]const u8, ok: [:0]const u8, ctx: *RenameCtx) void {
+        const dialog = adw.AlertDialog.new(title.ptr, null);
+        const entry = gtk.Entry.new();
+        const z = gpa.dupeSentinel(u8, current, 0) catch return;
+        defer gpa.free(z);
+        entry.as(gtk.Editable).setText(z.ptr);
+        if (placeholder) |p| entry.setPlaceholderText(p.ptr);
+        entry.setActivatesDefault(1);
+        dialog.setExtraChild(entry.as(gtk.Widget));
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("rename", ok.ptr);
+        dialog.setResponseAppearance("rename", .suggested);
+        dialog.setDefaultResponse("rename");
+        ctx.entry = entry;
+        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &renamed, ctx, .{});
+        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+        _ = entry.as(gtk.Widget).grabFocus();
     }
 
     // Find.
@@ -1790,6 +2139,8 @@ fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
 }
 
 var mode_app: ?*App = null;
+/// The font size Compy started with, which client.font.reset goes back to.
+var start_font_size: c_int = 0;
 
 /// Shows the start of a key sequence, such as "ctrl+a …", until it's finished.
 fn chordChanged(pending: []const u8) void {
