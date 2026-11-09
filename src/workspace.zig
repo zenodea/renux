@@ -385,11 +385,14 @@ pub const Workspace = struct {
             if (p.floating != floating) {
                 p.floating = floating;
                 if (floating) p.frame.addCssClass("floating") else p.frame.removeCssClass("floating");
+                p.term.floating = floating;
+                p.term.widget().queueDraw();
                 p.grip.setVisible(@intFromBool(floating));
             }
             return;
         };
         const tv = TermView.create(ws.server, session_id, block_id) catch return;
+        tv.floating = floating;
         tv.on_focus = .{ .ctx = ws, .f = clicked };
         tv.on_copied = .{ .ctx = ws, .f = showCopied };
         const owned = gpa.dupe(u8, block_id) catch return;

@@ -22,6 +22,9 @@ const Palette = @import("palette.zig").Palette;
 
 const gpa = std.heap.c_allocator;
 
+/// The window's corner radius while see-through, which the Mac's frosted glass matches.
+const window_radius = 12;
+
 const css =
     \\window.compy, window.compy .sidebar-pane { background-color: @compy_shell; }
     \\*, *:focus-visible, *:focus-within { outline: none; outline-width: 0; }
@@ -32,24 +35,27 @@ const css =
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
     \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
     \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
-    \\.compy-sidebar list > row { border-radius: 9px; min-height: 34px; padding: 3px 4px 3px 10px; margin: 1px 0; }
+    \\.compy-sidebar list > row { border-radius: 8px; min-height: 28px; padding: 0 4px 0 8px; margin: 0; }
     \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
     \\.compy-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
     \\.compy-sidebar .row-title { font-size: 0.95em; }
     \\.row-more { opacity: 0; }
+    \\.row-more, .row-more > button { min-height: 22px; min-width: 22px; padding: 0; }
     \\row:hover .row-more, row:selected .row-more { opacity: 0.6; }
     \\.session-heading { font-size: 0.82em; color: @compy_secondary; }
-    \\.compy-sidebar list > row.session-row { min-height: 28px; margin-top: 12px; padding: 0 2px 0 10px; background: none; }
-    \\.compy-sidebar list > row.host-row { min-height: 26px; margin-top: 18px; padding: 0 10px; background: none; }
+    \\.compy-sidebar list > row.session-row { min-height: 22px; margin-top: 8px; padding: 0 2px 0 8px; background: none; }
+    \\.compy-sidebar list > row.host-row { min-height: 22px; margin-top: 12px; padding: 0 8px; background: none; }
     \\.compy-sidebar list > row.host-row:first-child { margin-top: 4px; }
     \\.host-heading { font-weight: 700; font-size: 0.88em; }
-    \\.session-tool { opacity: 0; min-width: 24px; min-height: 24px; }
+    \\.session-tool { opacity: 0; min-width: 22px; min-height: 22px; }
     \\row.session-row:hover .session-tool, .session-tool.folded { opacity: 0.6; }
     \\row.session-row .session-tool:hover { opacity: 1; }
     \\.sidebar-footer { padding: 8px 12px 12px 12px; }
     \\.sidebar-footer > * { margin-left: 2px; }
-    \\.filter-pill { border-radius: 99px; min-height: 30px; padding: 0 8px; }
-    \\.filter-pill.filtered { padding: 0 14px 0 9px; background-color: alpha(@window_fg_color, 0.08); }
+    \\.filter-pill { border-radius: 99px; min-height: 30px; padding: 0 8px; transition: background-color 140ms ease-out, color 140ms ease-out; }
+    \\.filter-pill.filtered { padding: 0 12px 0 9px; background-color: alpha(@accent_bg_color, 0.16); color: @accent_color; box-shadow: inset 0 0 0 1px alpha(@accent_bg_color, 0.35); }
+    \\.filter-pill.filtered:hover { background-color: alpha(@accent_bg_color, 0.24); }
+    \\.filter-pill.filtered label { font-weight: 600; font-size: 0.9em; }
     \\.window-card.alone { margin-left: 8px; }
     \\.content .workspace { margin: 6px 8px 8px 0; }
     \\.content.alone .workspace { margin: 6px 8px 8px 8px; }
@@ -152,6 +158,7 @@ pub const App = struct {
     /// The shown session was chosen by the app, not the person.
     auto_picked: bool = false,
     theme_css: ?*gtk.CssProvider = null,
+    look_css: ?*gtk.CssProvider = null,
     theme_for: ?@import("stream.zig").Colors = null,
 
     pub fn create() !*App {
@@ -219,6 +226,8 @@ pub const App = struct {
         const pill = gtk.Box.new(.horizontal, 6);
         pill.append(icons.image(.filter, 16));
         a.filter_label = gtk.Label.new("Filter");
+        a.filter_label.setEllipsize(.end);
+        a.filter_label.setMaxWidthChars(16);
         pill.append(a.filter_label.as(gtk.Widget));
         a.filter_button.setChild(pill.as(gtk.Widget));
         a.filter_button.as(gtk.Widget).addCssClass("filter-pill");
@@ -328,6 +337,7 @@ pub const App = struct {
         // is using; otherwise their typing lands in Compy.
         if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
         if (std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
+        a.applyLook();
     }
 
     /// The desktop's button layout with every button on the left, such as "close" from GNOME's
@@ -1672,6 +1682,32 @@ pub const App = struct {
         }
         a.theme_for = null;
         a.applyTheme();
+    }
+
+    /// Applies the window and terminal opacity and the blur behind them.
+    pub fn applyLook(a: *App) void {
+        const prefs = &settings.current;
+        termview.term_opacity = prefs.terminal_opacity;
+        const provider = a.look_css orelse blk: {
+            const p = gtk.CssProvider.new();
+            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+            a.look_css = p;
+            break :blk p;
+        };
+        var buf: [1024]u8 = undefined;
+        const see_through = prefs.window_opacity < 1 or prefs.terminal_opacity < 1;
+        const css_text = if (!see_through) "" else std.fmt.bufPrintSentinel(&buf,
+            \\window.compy {{ border-radius: {d}px; }}
+            \\window.compy, window.compy .sidebar-pane {{ background-color: alpha(@compy_shell, {d:.2}); }}
+            \\window.tight .workspace {{ background-color: alpha(@compy_stroke_subtle, {d:.2}); }}
+            \\.pane-card:not(.floating) {{ background-color: transparent; }}
+            \\.pane-card:not(.floating) .pane-title {{ background-color: alpha(@view_bg_color, {d:.2}); }}
+        , .{ window_radius, prefs.window_opacity, prefs.window_opacity, prefs.terminal_opacity }, 0) catch "";
+        provider.loadFromString(css_text.ptr);
+        if (builtin.os.tag == .macos) if (a.window.as(gtk.Native).getSurface()) |surface| {
+            @import("macos.zig").setBlur(surface, see_through and prefs.blur, window_radius);
+        };
+        a.redrawAll();
     }
 
     pub fn headersChanged(a: *App) void {

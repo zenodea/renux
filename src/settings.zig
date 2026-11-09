@@ -24,6 +24,12 @@ pub const Settings = struct {
     line_height: f64 = 1,
     /// Extra pixels between characters; negative brings them closer.
     letter_spacing: f64 = 0,
+    /// How opaque the window behind the panes is, from 0.2 to 1.
+    window_opacity: f64 = 1,
+    /// How opaque the terminals are, from 0.2 to 1. Floating panes stay solid.
+    terminal_opacity: f64 = 1,
+    /// Blurs what shows through. On Linux the desktop decides; KDE and Hyprland do it.
+    blur: bool = true,
     alerts: bool = true,
     alert_blocked: bool = true,
     alert_error: bool = true,
@@ -106,6 +112,9 @@ pub fn load() void {
     s.cursor_width = number(kf, "cursor-width", 2, 1, 6);
     s.line_height = number(kf, "line-height", 1, 0.8, 2);
     s.letter_spacing = number(kf, "letter-spacing", 0, -2, 6);
+    s.window_opacity = number(kf, "window-opacity", 1, 0.2, 1);
+    s.terminal_opacity = number(kf, "terminal-opacity", 1, 0.2, 1);
+    s.blur = boolean(kf, "blur", true);
     s.alerts = boolean(kf, "alerts", true);
     s.alert_blocked = boolean(kf, "alert-blocked", true);
     s.alert_error = boolean(kf, "alert-error", true);
@@ -211,6 +220,9 @@ pub fn save() void {
     kf.setDouble("compy", "cursor-width", s.cursor_width);
     kf.setDouble("compy", "line-height", s.line_height);
     kf.setDouble("compy", "letter-spacing", s.letter_spacing);
+    kf.setDouble("compy", "window-opacity", s.window_opacity);
+    kf.setDouble("compy", "terminal-opacity", s.terminal_opacity);
+    kf.setBoolean("compy", "blur", @intFromBool(s.blur));
 
     var labels: std.ArrayList(?[*:0]const u8) = .empty;
     var urls: std.ArrayList(?[*:0]const u8) = .empty;

@@ -74,6 +74,8 @@ pub const Font = struct {
 pub var font: ?Font = null;
 /// The theme's accent as 0xRRGGBB, which the cursor takes unless a program sets its own.
 pub var cursor_accent: u32 = 0;
+/// How opaque a terminal's own background is.
+pub var term_opacity: f64 = 1;
 /// How many panes are animating a scroll, for COMPY_PERF.
 pub var scroll_ticking: u32 = 0;
 
@@ -176,6 +178,8 @@ pub const TermView = struct {
     layout: ?*pango.Layout = null,
     /// The letter spacing the layout was given, in pixels.
     spacing: f64 = 0,
+    /// Floating panes stay solid when terminals are see-through, so what's below doesn't show.
+    floating: bool = false,
     server: *Server,
     session_id: []u8,
     block_id: []u8,
@@ -1432,7 +1436,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
 
-    fillRect(sn, f.bg, 1, 0, 0, w, h);
+    fillRect(sn, f.bg, if (v.floating) 1 else term_opacity, 0, 0, w, h);
     sn.pushClip(&.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
     defer sn.pop();
 

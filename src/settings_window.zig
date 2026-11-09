@@ -144,6 +144,26 @@ fn numberChanged(row: *adw.SpinRow, _: *gobject.ParamSpec, n: *Number) callconv(
     n.after(n.ctx.app);
 }
 
+const Percent = struct { ctx: *Ctx, field: *f64 };
+
+/// A 20 to 100 percent spinner for an opacity, stored as 0.2 to 1.
+fn percentRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, subtitle: [:0]const u8, field: *f64) void {
+    const row = adw.SpinRow.newWithRange(20, 100, 5);
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    row.as(adw.ActionRow).setSubtitle(subtitle.ptr);
+    row.setValue(@round(field.* * 100));
+    const n = gpa.create(Percent) catch return;
+    n.* = .{ .ctx = ctx, .field = field };
+    _ = gobject.Object.signals.notify.connect(row, *Percent, &percentChanged, n, .{ .detail = "value" });
+    g.add(row.as(gtk.Widget));
+}
+
+fn percentChanged(row: *adw.SpinRow, _: *gobject.ParamSpec, n: *Percent) callconv(.c) void {
+    n.field.* = row.getValue() / 100;
+    settings.save();
+    n.ctx.app.applyLook();
+}
+
 /// Segmented buttons for an enum setting, like Rex's Comfortable / Compact.
 fn segments(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, comptime E: type, field: *E, labels: []const [:0]const u8, after: *const fn (*App) void) void {
     const row = adw.ActionRow.new();
@@ -393,6 +413,11 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     fontRows(ctx, g);
     numberRow(ctx, g, "Line height", "Row height as a multiple of the font's own", &settings.current.line_height, 0.8, 2, 0.05, 2, App.fontChanged);
     numberRow(ctx, g, "Letter spacing", "Extra pixels between characters", &settings.current.letter_spacing, -2, 6, 0.5, 1, App.fontChanged);
+
+    const look = group(p, "Transparency", "Below 100%, the desktop shows through. On Linux, KDE and Hyprland blur it; GNOME doesn't.");
+    percentRow(ctx, look, "Window", "Behind the panes and the sidebar", &settings.current.window_opacity);
+    percentRow(ctx, look, "Terminals", "Floating panes stay solid", &settings.current.terminal_opacity);
+    switchRow(ctx, look, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
 
     const c = group(p, "Cursor", null);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
