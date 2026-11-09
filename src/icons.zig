@@ -1,11 +1,15 @@
-//! Small line icons drawn with Cairo in the widget's own text color, so they follow the theme
-//! and look the same on every distribution, whatever icon theme it ships.
+//! The Android app's icons (Material Icons Round), drawn in the widget's own text color, so they
+//! follow the theme and look the same on every distribution, whatever icon theme it ships.
 const std = @import("std");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
+const rsvg = @import("rsvg");
+const table = @import("ui_icons.zig");
 
-pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, search, bell, up, down, right, new_session, add_host, filter, minimize };
+const gpa = std.heap.c_allocator;
+
+pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, palette, interface, keyboard, search, bell, up, down, right, new_session, add_host, filter, minimize };
 
 pub fn image(kind: Kind, size: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();
@@ -35,164 +39,35 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int,
     const kind: Kind = @enumFromInt(@intFromPtr(data) - 1);
     var color: gdk.RGBA = undefined;
     area.as(gtk.Widget).getColor(&color);
-    cr.setSourceRgba(color.f_red, color.f_green, color.f_blue, color.f_alpha);
-    // Icons are drawn on a 16-unit grid, centred.
-    const s = @as(f64, @floatFromInt(@min(width, height))) / 16.0;
-    cr.translate((@as(f64, @floatFromInt(width)) - 16 * s) / 2, (@as(f64, @floatFromInt(height)) - 16 * s) / 2);
-    cr.scale(s, s);
-    cr.setLineWidth(1.4);
-    cr.setLineCap(.round);
-    cr.setLineJoin(.round);
-    switch (kind) {
-        .sidebar => {
-            roundRect(cr, 2, 3, 12, 10, 2);
-            cr.stroke();
-            line(cr, 6.5, 3, 6.5, 13);
-        },
-        .more => {
-            for ([_]f64{ 4, 8, 12 }) |x| {
-                cr.arc(x, 8, 1.2, 0, 2 * std.math.pi);
-                cr.fill();
-            }
-        },
-        .plus => {
-            line(cr, 8, 3, 8, 13);
-            line(cr, 3, 8, 13, 8);
-        },
-        .split_right => {
-            roundRect(cr, 2, 3, 12, 10, 2);
-            cr.stroke();
-            line(cr, 8, 3, 8, 13);
-        },
-        .split_down => {
-            roundRect(cr, 2, 3, 12, 10, 2);
-            cr.stroke();
-            line(cr, 2, 8, 14, 8);
-        },
-        .float => {
-            roundRect(cr, 2, 5, 8, 7, 1.5);
-            cr.stroke();
-            roundRect(cr, 6, 3, 8, 7, 1.5);
-            cr.stroke();
-        },
-        .zoom => {
-            line(cr, 9.5, 2.5, 13.5, 2.5);
-            line(cr, 13.5, 2.5, 13.5, 6.5);
-            line(cr, 13.5, 2.5, 9.5, 6.5);
-            line(cr, 2.5, 9.5, 2.5, 13.5);
-            line(cr, 2.5, 13.5, 6.5, 13.5);
-            line(cr, 2.5, 13.5, 6.5, 9.5);
-        },
-        .close => {
-            line(cr, 4, 4, 12, 12);
-            line(cr, 12, 4, 4, 12);
-        },
-        .terminal => {
-            roundRect(cr, 1.5, 2.5, 13, 11, 2.5);
-            cr.stroke();
-            line(cr, 4.5, 6, 6.8, 8);
-            line(cr, 6.8, 8, 4.5, 10);
-            line(cr, 8.5, 10.5, 11.5, 10.5);
-        },
-        .server => {
-            roundRect(cr, 2, 2.5, 12, 4.5, 1.5);
-            cr.stroke();
-            roundRect(cr, 2, 9, 12, 4.5, 1.5);
-            cr.stroke();
-            cr.arc(5, 4.75, 0.8, 0, 2 * std.math.pi);
-            cr.fill();
-            cr.arc(5, 11.25, 0.8, 0, 2 * std.math.pi);
-            cr.fill();
-        },
-        .gear => {
-            cr.arc(8, 8, 2.2, 0, 2 * std.math.pi);
-            cr.stroke();
-            for (0..8) |i| {
-                const a = @as(f64, @floatFromInt(i)) * std.math.pi / 4;
-                line(cr, 8 + @cos(a) * 4.3, 8 + @sin(a) * 4.3, 8 + @cos(a) * 6, 8 + @sin(a) * 6);
-            }
-            cr.arc(8, 8, 4.3, 0, 2 * std.math.pi);
-            cr.stroke();
-        },
-        .search => {
-            cr.arc(7, 7, 4, 0, 2 * std.math.pi);
-            cr.stroke();
-            line(cr, 10, 10, 13.5, 13.5);
-        },
-        .up => {
-            line(cr, 4, 10, 8, 6);
-            line(cr, 8, 6, 12, 10);
-        },
-        .down => {
-            line(cr, 4, 6, 8, 10);
-            line(cr, 8, 10, 12, 6);
-        },
-        .right => {
-            line(cr, 6, 4, 10, 8);
-            line(cr, 10, 8, 6, 12);
-        },
-        .new_session => {
-            // Two stacked windows with a plus, like Rex's.
-            roundRect(cr, 5, 4.5, 9, 7.5, 1.5);
-            cr.stroke();
-            line(cr, 6.5, 2.5, 12.5, 2.5);
-            cr.arc(4, 12, 3, 0, 2 * std.math.pi);
-            cr.fill();
-            cr.setOperator(.clear);
-            line(cr, 2.6, 12, 5.4, 12);
-            line(cr, 4, 10.6, 4, 13.4);
-            cr.setOperator(.over);
-        },
-        .add_host => {
-            // A globe with a plus.
-            cr.arc(9, 7, 5.2, 0, 2 * std.math.pi);
-            cr.stroke();
-            line(cr, 3.8, 7, 14.2, 7);
-            cr.save();
-            cr.translate(9, 7);
-            cr.scale(0.45, 1);
-            cr.arc(0, 0, 5.2, 0, 2 * std.math.pi);
-            cr.restore();
-            cr.stroke();
-            cr.arc(4, 12, 3, 0, 2 * std.math.pi);
-            cr.fill();
-            cr.setOperator(.clear);
-            line(cr, 2.6, 12, 5.4, 12);
-            line(cr, 4, 10.6, 4, 13.4);
-            cr.setOperator(.over);
-        },
-        .filter => {
-            cr.arc(8, 8, 6, 0, 2 * std.math.pi);
-            cr.stroke();
-            line(cr, 5, 6, 11, 6);
-            line(cr, 6, 8.2, 10, 8.2);
-            line(cr, 7, 10.4, 9, 10.4);
-        },
-        .minimize => line(cr, 4, 11.5, 12, 11.5),
-        .bell => {
-            cr.moveTo(4, 11);
-            cr.curveTo(4, 5, 5, 3, 8, 3);
-            cr.curveTo(11, 3, 12, 5, 12, 11);
-            cr.closePath();
-            cr.stroke();
-            line(cr, 3, 11, 13, 11);
-            line(cr, 7, 13.5, 9, 13.5);
-        },
-    }
+    const h = handleFor(kind, color) orelse return;
+    const side: f64 = @floatFromInt(@min(width, height));
+    const viewport: rsvg.Rectangle = .{
+        .f_x = (@as(f64, @floatFromInt(width)) - side) / 2,
+        .f_y = (@as(f64, @floatFromInt(height)) - side) / 2,
+        .f_width = side,
+        .f_height = side,
+    };
+    _ = h.renderDocument(cr, &viewport, null);
 }
 
-fn line(cr: *cairo.Context, x0: f64, y0: f64, x1: f64, y1: f64) void {
-    cr.moveTo(x0, y0);
-    cr.lineTo(x1, y1);
-    cr.stroke();
-}
+var handles: std.AutoHashMapUnmanaged(u64, *rsvg.Handle) = .empty;
 
-fn roundRect(cr: *cairo.Context, x: f64, y: f64, w: f64, h: f64, r: f64) void {
-    const pi: f64 = std.math.pi;
-    cr.newSubPath();
-    cr.arc(x + w - r, y + r, r, -pi / 2, 0);
-    cr.arc(x + w - r, y + h - r, r, 0, pi / 2);
-    cr.arc(x + r, y + h - r, r, pi / 2, pi);
-    cr.arc(x + r, y + r, r, pi, 3 * pi / 2);
-    cr.closePath();
+/// The icon as an SVG in this color, parsed once per color.
+fn handleFor(kind: Kind, color: gdk.RGBA) ?*rsvg.Handle {
+    const icon = for (table.icons) |i| {
+        if (std.mem.eql(u8, i.name, @tagName(kind))) break i;
+    } else return null;
+    const r: u8 = @intFromFloat(@round(std.math.clamp(color.f_red, 0, 1) * 255));
+    const g: u8 = @intFromFloat(@round(std.math.clamp(color.f_green, 0, 1) * 255));
+    const b: u8 = @intFromFloat(@round(std.math.clamp(color.f_blue, 0, 1) * 255));
+    const a: u8 = @intFromFloat(@round(std.math.clamp(color.f_alpha, 0, 1) * 255));
+    const key = (@as(u64, @intFromEnum(kind)) << 32) | (@as(u64, r) << 24) | (@as(u64, g) << 16) | (@as(u64, b) << 8) | a;
+    if (handles.get(key)) |h| return h;
+    const svg = std.fmt.allocPrint(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><path fill=\"#{x:0>2}{x:0>2}{x:0>2}\" fill-opacity=\"{d:.3}\" transform=\"{s}\" d=\"{s}\"/></svg>", .{
+        r, g, b, @as(f64, @floatFromInt(a)) / 255, icon.transform, icon.path,
+    }) catch return null;
+    defer gpa.free(svg);
+    const h = rsvg.Handle.newFromData(svg.ptr, svg.len, null) orelse return null;
+    handles.put(gpa, key, h) catch {};
+    return h;
 }

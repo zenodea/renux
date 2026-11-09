@@ -21,12 +21,12 @@ const Section = struct { title: [:0]const u8, icon: icons.Kind, build: *const fn
 
 const sections = [_]Section{
     .{ .title = "Server", .icon = .server, .build = serverPage },
-    .{ .title = "Interface", .icon = .split_right, .build = interfacePage },
-    .{ .title = "Themes", .icon = .gear, .build = themesPage },
+    .{ .title = "Interface", .icon = .interface, .build = interfacePage },
+    .{ .title = "Themes", .icon = .palette, .build = themesPage },
     .{ .title = "Terminal", .icon = .terminal, .build = terminalPage },
-    .{ .title = "Shortcuts", .icon = .search, .build = shortcutsPage },
+    .{ .title = "Shortcuts", .icon = .keyboard, .build = shortcutsPage },
     .{ .title = "Notifications", .icon = .bell, .build = notificationsPage },
-    .{ .title = "Remote Hosts", .icon = .plus, .build = hostsPage },
+    .{ .title = "Remote Hosts", .icon = .add_host, .build = hostsPage },
 };
 
 const Ctx = struct {

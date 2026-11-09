@@ -306,6 +306,7 @@ pub const TermView = struct {
 
     fn changed(ctx: *anyopaque) void {
         const v: *TermView = @ptrCast(@alignCast(ctx));
+        if (perf_log and key_at != 0 and echo_at == 0) echo_at = glib.getMonotonicTime();
         v.widget().queueDraw();
         v.updateTitle();
     }
@@ -508,6 +509,10 @@ pub const TermView = struct {
 
     pub fn handleKey(v: *TermView, keyval: c_uint, mods: u4) c_int {
         if (keys.isModifier(keyval)) return 0;
+        if (perf_log) {
+            key_at = glib.getMonotonicTime();
+            echo_at = 0;
+        }
         // In a Rex key mode, keys run that mode's bindings instead of typing.
         if (key_mode_len > 0) {
             v.modeKey(keyval, mods);
@@ -1249,6 +1254,9 @@ fn layoutOnBaseline(sn: *gtk.Snapshot, layout: *pango.Layout, color: gdk.RGBA, x
 var perf_total: i64 = 0;
 var perf_count: i64 = 0;
 var perf_log = false;
+/// With COMPY_PERF: when the last key was pressed and when the server's answer arrived.
+var key_at: i64 = 0;
+var echo_at: i64 = 0;
 
 const TermDraw = struct {
     /// The view's own layout, made from the widget's Pango context, the one the cell size was
@@ -1367,6 +1375,15 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
 }
 
 pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
+    if (perf_log and echo_at != 0) {
+        const now = glib.getMonotonicTime();
+        std.log.info("key: server answered in {d:.1} ms, drawn at {d:.1} ms", .{
+            @as(f64, @floatFromInt(echo_at - key_at)) / 1000,
+            @as(f64, @floatFromInt(now - key_at)) / 1000,
+        });
+        key_at = 0;
+        echo_at = 0;
+    }
     const started = glib.getMonotonicTime();
     defer if (perf_log) {
         perf_total += glib.getMonotonicTime() - started;
