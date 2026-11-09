@@ -62,11 +62,6 @@ const css =
     \\.pane-card.floating.focused { box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 8px 28px alpha(black, 0.45); }
     \\.layer-card { background-color: @compy_stroke_subtle; border: 1px solid @compy_stroke_subtle; border-radius: 11px; box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.layer-card.focused { border-color: alpha(@accent_bg_color, 0.85); }
-    \\.pane-card.joined, .pane-card.joined.floating, .pane-card.joined.focused, .pane-card.joined.floating.focused { border: none; border-radius: 0; box-shadow: none; }
-    \\.pane-card.joined.c-tl { border-top-left-radius: 10px; }
-    \\.pane-card.joined.c-tr { border-top-right-radius: 10px; }
-    \\.pane-card.joined.c-bl { border-bottom-left-radius: 10px; }
-    \\.pane-card.joined.c-br { border-bottom-right-radius: 10px; }
     \\.pane-card.joined.focused .pane-title .title { color: @accent_color; }
     \\.pane-title { min-height: 38px; padding: 0 6px 0 12px; }
     \\.pane-tools > * { margin-left: 2px; }
@@ -88,6 +83,12 @@ const css =
     \\window.tight .workspace { background-color: @compy_stroke_subtle; }
     \\window.tight .pane-card.focused .pane-title .title { color: @accent_color; }
     \\window.tight .pane-card.floating { border: 1px solid @compy_stroke; border-radius: 8px; box-shadow: 0 8px 28px alpha(black, 0.45); }
+    \\.pane-card.joined, .pane-card.joined.floating, .pane-card.joined.focused, .pane-card.joined.floating.focused { border: none; box-shadow: none; }
+    \\window .pane-card.joined.floating { border-radius: 0; }
+    \\window .pane-card.joined.floating.c-tl { border-top-left-radius: 10px; }
+    \\window .pane-card.joined.floating.c-tr { border-top-right-radius: 10px; }
+    \\window .pane-card.joined.floating.c-bl { border-bottom-left-radius: 10px; }
+    \\window .pane-card.joined.floating.c-br { border-bottom-right-radius: 10px; }
     \\.palette { padding: 12px; }
     \\.palette-category { color: @compy_secondary; font-size: 0.85em; }
     \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
@@ -326,6 +327,7 @@ pub const App = struct {
         // When driven by tests, show the window without taking the keyboard from what the person
         // is using; otherwise their typing lands in Compy.
         if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
+        if (std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
     }
 
     /// The desktop's button layout with every button on the left, such as "close" from GNOME's
@@ -2001,6 +2003,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             }
         } else if (std.mem.eql(u8, cmd, "bench")) {
             tv.bench();
+        } else if (std.mem.eql(u8, cmd, "benchwin")) {
+            benchWindow(a);
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
         } else if (std.mem.eql(u8, cmd, "divider")) {
@@ -2043,6 +2047,117 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         tv.widget().queueDraw();
     }
     return 1;
+}
+
+/// Development: with COMPY_PERF set, logs each second of drawing: frames shown, the longest
+/// gap between frames, and how long Compy spent making a frame.
+const FrameLog = struct {
+    var start: i64 = 0;
+    var last_end: i64 = 0;
+    var window_start: i64 = 0;
+    var frames: u32 = 0;
+    var worst_gap: i64 = 0;
+    var work_total: i64 = 0;
+    var worst_work: i64 = 0;
+
+    fn watch(clock: *gdk.FrameClock) void {
+        _ = gdk.FrameClock.signals.update.connect(clock, ?*anyopaque, &began, null, .{});
+        _ = gdk.FrameClock.signals.layout.connect(clock, ?*anyopaque, &began, null, .{});
+        _ = gdk.FrameClock.signals.layout.connect(clock, ?*anyopaque, &laidOut, null, .{ .after = true });
+        _ = gdk.FrameClock.signals.paint.connect(clock, ?*anyopaque, &began, null, .{});
+        _ = gdk.FrameClock.signals.after_paint.connect(clock, ?*anyopaque, &ended, null, .{});
+    }
+
+    var counter: i64 = -1;
+    var layout_end: i64 = 0;
+
+    fn laidOut(_: *gdk.FrameClock, _: ?*anyopaque) callconv(.c) void {
+        layout_end = glib.getMonotonicTime();
+    }
+
+    /// GTK skips the phases nothing asked for, so the frame starts at the first one that runs.
+    fn began(clock: *gdk.FrameClock, _: ?*anyopaque) callconv(.c) void {
+        const c = clock.getFrameCounter();
+        if (c == counter) return;
+        counter = c;
+        start = glib.getMonotonicTime();
+        layout_end = start;
+    }
+
+    fn ended(clock: *gdk.FrameClock, _: ?*anyopaque) callconv(.c) void {
+        const now = glib.getMonotonicTime();
+        // A pause of more than half a second starts a new measurement.
+        if (now - last_end > 500_000) {
+            flush(clock);
+            window_start = now;
+        } else {
+            worst_gap = @max(worst_gap, now - last_end);
+        }
+        last_end = now;
+        frames += 1;
+        const work = now - start;
+        if (work > 12_000) std.log.info("slow frame: {d:.1} ms, layout {d:.1}, paint {d:.1}", .{
+            @as(f64, @floatFromInt(work)) / 1000,
+            @as(f64, @floatFromInt(layout_end - start)) / 1000,
+            @as(f64, @floatFromInt(now - layout_end)) / 1000,
+        });
+        work_total += work;
+        worst_work = @max(worst_work, work);
+        if (now - window_start >= 1_000_000) {
+            flush(clock);
+            window_start = now;
+        }
+    }
+
+    fn flush(clock: *gdk.FrameClock) void {
+        if (frames > 1) std.log.info("frames: {d} in {d} ms, worst gap {d:.1} ms, work avg {d:.1} ms worst {d:.1} ms, refresh {d:.1} ms", .{
+            frames,
+            @divTrunc(last_end - window_start, 1000),
+            @as(f64, @floatFromInt(worst_gap)) / 1000,
+            @as(f64, @floatFromInt(@divTrunc(work_total, frames))) / 1000,
+            @as(f64, @floatFromInt(worst_work)) / 1000,
+            @as(f64, @floatFromInt(refresh(clock))) / 1000,
+        });
+        frames = 0;
+        worst_gap = 0;
+        work_total = 0;
+        worst_work = 0;
+    }
+
+    fn refresh(clock: *gdk.FrameClock) i64 {
+        var interval: i64 = 0;
+        var presentation: i64 = 0;
+        clock.getRefreshInfo(clock.getFrameTime(), &interval, &presentation);
+        return interval;
+    }
+};
+
+/// Development: times a whole-window frame, building the snapshot and rendering it at 2x.
+fn benchWindow(a: *App) void {
+    const w = a.window.as(gtk.Widget);
+    const width: f64 = @floatFromInt(w.getWidth());
+    const height: f64 = @floatFromInt(w.getHeight());
+    const renderer = a.window.as(gtk.Native).getRenderer() orelse return;
+    var snap_us: i64 = 0;
+    var render_us: i64 = 0;
+    const n = 30;
+    for (0..n) |_| {
+        const t0 = glib.getMonotonicTime();
+        const paintable = gtk.WidgetPaintable.new(w);
+        const snap = gtk.Snapshot.new();
+        snap.scale(2, 2);
+        paintable.as(gdk.Paintable).snapshot(snap.as(gdk.Snapshot), width, height);
+        const node = snap.freeToNode() orelse return;
+        const t1 = glib.getMonotonicTime();
+        const texture = renderer.renderTexture(node, null);
+        texture.as(gobject.Object).unref();
+        node.unref();
+        paintable.as(gobject.Object).unref();
+        const t2 = glib.getMonotonicTime();
+        snap_us += t1 - t0;
+        render_us += t2 - t1;
+    }
+    std.log.info("benchwin: {d}x{d} at 2x, snapshot {d} us, render {d} us per frame", .{ width, height, @divTrunc(snap_us, n), @divTrunc(render_us, n) });
 }
 
 fn takeShot(_: ?*anyopaque) callconv(.c) c_int {

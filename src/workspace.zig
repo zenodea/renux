@@ -719,8 +719,18 @@ pub const Workspace = struct {
                 if (q.floating and std.mem.eql(u8, q.layer_id, p.layer_id)) n += 1;
             };
             p.joined = n > 1;
-            const b = p.bounds;
-            const eps = 0.002;
+            // The layer's outer edges, from its panes: the server's bounds can differ slightly.
+            var b = p.rect;
+            if (p.floating) for (ws.panes.items) |q| {
+                if (!q.floating or !std.mem.eql(u8, q.layer_id, p.layer_id)) continue;
+                const x1 = @max(b.x + b.w, q.rect.x + q.rect.w);
+                const y1 = @max(b.y + b.h, q.rect.y + q.rect.h);
+                b.x = @min(b.x, q.rect.x);
+                b.y = @min(b.y, q.rect.y);
+                b.w = x1 - b.x;
+                b.h = y1 - b.y;
+            };
+            const eps = 0.01;
             const l = @abs(p.rect.x - b.x) < eps;
             const t = @abs(p.rect.y - b.y) < eps;
             const r = @abs(p.rect.x + p.rect.w - (b.x + b.w)) < eps;
@@ -1315,7 +1325,7 @@ fn allocateAt(w: *gtk.Widget, r: [4]f64, size: [2]f64) void {
         return;
     }
     const t = gsk.Transform.new().translate(&.{ .f_x = @floatCast(r[0]), .f_y = @floatCast(r[1]) }) orelse return;
-    const scaled = t.scale(@floatCast(@max(0.01, r[2] / sw)), @floatCast(@max(0.01, r[3] / sh)));
+    const scaled = if (std.c.getenv("COMPY_NOSCALE") != null) t else t.scale(@floatCast(@max(0.01, r[2] / sw)), @floatCast(@max(0.01, r[3] / sh)));
     w.allocate(@intFromFloat(sw), @intFromFloat(sh), -1, scaled);
 }
 

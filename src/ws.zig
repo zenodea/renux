@@ -362,7 +362,7 @@ fn post(s: *Socket, event: Event) void {
     p.s = s;
     p.event = copy;
     s.ref();
-    _ = glib.idleAdd(&deliver, p);
+    _ = glib.idleAddFull(glib.PRIORITY_DEFAULT, &deliver, p, null);
 }
 
 fn deliver(data: ?*anyopaque) callconv(.c) c_int {
