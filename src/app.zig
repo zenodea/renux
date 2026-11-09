@@ -128,6 +128,8 @@ pub const App = struct {
     window_id: ?[]u8 = null,
     rebuilding: bool = false,
     was_online: bool = false,
+    /// The shown session was chosen by the app, not the person.
+    auto_picked: bool = false,
     theme_css: ?*gtk.CssProvider = null,
     theme_for: ?@import("stream.zig").Colors = null,
 
@@ -545,7 +547,9 @@ pub const App = struct {
             for (s.sessions.items) |session| if (std.mem.eql(u8, session.id, sel)) {
                 found = true;
             };
-            if (found) {
+            // A session the app chose itself gives way once another turns out to have windows.
+            const empty = if (s.sessionView(sel)) |v| v.windows.len == 0 else true;
+            if (found and !(a.auto_picked and empty and a.firstWithWindows(s) != null)) {
                 if (s.sessionView(sel)) |v| {
                     if (a.window_id) |wid| if (v.window(wid) == null) setSlot(&a.window_id, null);
                 }
@@ -555,8 +559,16 @@ pub const App = struct {
             setSlot(&a.window_id, null);
         }
         if (s.sessions.items.len == 0) return;
-        setSlot(&a.session_id, s.sessions.items[0].id);
+        setSlot(&a.session_id, a.firstWithWindows(s) orelse s.sessions.items[0].id);
+        a.auto_picked = true;
         a.showSelected();
+    }
+
+    fn firstWithWindows(_: *App, s: *Server) ?[]const u8 {
+        for (s.sessions.items) |session| if (s.sessionView(session.id)) |v| {
+            if (v.windows.len > 0) return session.id;
+        };
+        return null;
     }
 
     fn clientLabel() []const u8 {
@@ -884,6 +896,7 @@ pub const App = struct {
         for (a.hosts.items) |h| if (std.mem.eql(u8, h.page, where[0..space])) a.selectHost(h);
         const session_id = where[space + 1 ..];
         const s = a.server orelse return;
+        a.auto_picked = false;
         setSlot(&a.session_id, session_id);
         if (s.sessionView(session_id)) |v| if (v.windowOf(block_id)) |w| {
             setSlot(&a.window_id, w.id);
@@ -896,6 +909,8 @@ pub const App = struct {
     }
 
     fn selectSidebarRow(a: *App) void {
+        // Nothing stays highlighted when the shown window has no row, such as an empty session.
+        a.sidebar.unselectAll();
         const s = a.server orelse return;
         const here = a.current orelse return;
         const sid = a.session_id orelse return;
@@ -918,6 +933,7 @@ pub const App = struct {
         if (index >= a.rows.items.len) return;
         const r = a.rows.items[index] orelse return;
         a.selectHost(r.host);
+        a.auto_picked = false;
         setSlot(&a.session_id, r.session_id);
         setSlot(&a.window_id, r.window_id);
         if (a.server) |s| s.focusWindow(r.session_id, r.window_id);
@@ -935,6 +951,7 @@ pub const App = struct {
         a.selectHost(h);
         const J = @import("json.zig");
         if (session_id) |sid| if (!eqlOpt(a.session_id, sid)) {
+            a.auto_picked = false;
             setSlot(&a.session_id, sid);
             setSlot(&a.window_id, null);
         };
@@ -1457,6 +1474,7 @@ pub const App = struct {
 
     fn newWindowIn(a: *App, session_id: []const u8) void {
         const s = a.server orelse return;
+        a.auto_picked = false;
         setSlot(&a.session_id, session_id);
         setSlot(&a.window_id, null); // follow the new active window
         s.newWindow(session_id);

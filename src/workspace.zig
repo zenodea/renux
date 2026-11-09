@@ -66,6 +66,7 @@ pub const Workspace = struct {
     root: *gtk.Widget,
     overlay: *gtk.Widget,
     tray: *gtk.Box,
+    empty: *gtk.Widget,
     server: *Server,
     session_id: ?[]u8 = null,
     window_id: ?[]u8 = null,
@@ -110,7 +111,25 @@ pub const Workspace = struct {
         // The workspace owns these, since it moves them above the cards by re-parenting.
         _ = overlay.as(gobject.Object).refSink();
         _ = tray.as(gobject.Object).refSink();
-        ws.* = .{ .root = root, .overlay = overlay.as(gtk.Widget), .tray = tray, .server = server };
+
+        // What a session without windows shows: a way to open one.
+        const empty = gtk.Box.new(.vertical, 12);
+        const ew = empty.as(gtk.Widget);
+        ew.setHalign(.center);
+        ew.setValign(.center);
+        ew.addCssClass("empty-session");
+        const note = gtk.Label.new("No windows in this session");
+        note.as(gtk.Widget).addCssClass("dim-label");
+        empty.append(note.as(gtk.Widget));
+        const open_one = gtk.Button.newWithLabel("New Window");
+        open_one.as(gtk.Actionable).setActionName("app.new-window");
+        open_one.as(gtk.Widget).addCssClass("pill");
+        open_one.as(gtk.Widget).setHalign(.center);
+        empty.append(open_one.as(gtk.Widget));
+        ew.setVisible(0);
+        ew.setParent(root);
+
+        ws.* = .{ .root = root, .overlay = overlay.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
         overlay.setDrawFunc(&drawOverlay, ws, null);
         gobject.Object.setData(root.as(gobject.Object), "compy-workspace", ws);
 
@@ -134,6 +153,7 @@ pub const Workspace = struct {
         }
         ws.clearDividers();
         ws.clearTray();
+        ws.empty.setVisible(@intFromBool(window == null));
         const w = window orelse return ws.clear();
         replace(&ws.window_id, w.id);
         if (w.focused_block_id) |f| replace(&ws.focused, f);
@@ -773,6 +793,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     }
     var all: gtk.Allocation = .{ .f_x = 0, .f_y = 0, .f_width = width, .f_height = height };
     ws.overlay.sizeAllocate(&all, -1);
+    if (ws.empty.getVisible() != 0) ws.empty.sizeAllocate(&all, -1);
     // The tray sits at the bottom left, as wide as its chips.
     var min: c_int = 0;
     var nat: c_int = 0;
