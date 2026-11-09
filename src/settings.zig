@@ -27,6 +27,8 @@ pub const Settings = struct {
     improve_contrast: bool = true,
     visual_bell: bool = true,
     paste_warning: bool = true,
+    /// Selecting text in a pane also puts it on the clipboard, not only the primary selection.
+    copy_on_select: bool = true,
     /// Empty follows each host's theme; otherwise a built-in theme's name or `file:PATH`.
     theme: []u8,
     /// Empty uses this computer's name.
@@ -94,6 +96,7 @@ pub fn load() void {
     s.improve_contrast = boolean(kf, "improve-contrast", true);
     s.visual_bell = boolean(kf, "visual-bell", true);
     s.paste_warning = boolean(kf, "paste-warning", true);
+    s.copy_on_select = boolean(kf, "copy-on-select", true);
 
     // Hosts are stored as matching lists of labels and addresses.
     var n_labels: usize = 0;
@@ -182,7 +185,7 @@ pub fn save() void {
         .{ "alert-error", s.alert_error },     .{ "alert-done", s.alert_done },
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
-        .{ "paste-warning", s.paste_warning },
+        .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
     kf.setString("compy", "cursor-style", @tagName(s.cursor_style));

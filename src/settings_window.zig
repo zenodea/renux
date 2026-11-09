@@ -385,7 +385,8 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     const colors = group(p, "Colors and Bell", null);
     switchRow(ctx, colors, "Improve text contrast", "Adjust text that would be hard to read against its background", &settings.current.improve_contrast, App.redrawAll);
     switchRow(ctx, colors, "Flash on bell", "Briefly light up a pane when its program rings the bell", &settings.current.visual_bell, null);
-    const paste = group(p, "Pasting", null);
+    const paste = group(p, "Copy and Paste", null);
+    switchRow(ctx, paste, "Copy on select", "Selected text goes straight to the clipboard. Programs that handle the mouse themselves, such as Claude Code, copy their own selections", &settings.current.copy_on_select, null);
     switchRow(ctx, paste, "Ask before pasting several lines", "Unless the program knows it's a paste, each line could run as a command", &settings.current.paste_warning, null);
     return p.as(gtk.Widget);
 }

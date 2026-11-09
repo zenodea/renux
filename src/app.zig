@@ -46,8 +46,9 @@ const css =
     \\.filter-pill.filtered { padding: 0 14px 0 9px; background-color: alpha(@window_fg_color, 0.08); }
     \\.window-card.alone { margin-left: 8px; }
     \\.content .workspace { margin: 8px 8px 8px 0; }
-    \\.content.alone .workspace { margin: 0 8px 8px 8px; }
-    \\.top-strip { min-height: 46px; padding: 0 10px 0 0; }
+    \\.content.alone .workspace { margin: 4px 8px 8px 8px; }
+    \\window.no-headers .content.alone .workspace { margin-top: 46px; }
+    \\window.tight .content.alone .workspace { margin: 4px 0 0 0; }
     \\.window-corner { min-height: 46px; padding: 0 6px 0 12px; }
     \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; }
     \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
@@ -65,6 +66,9 @@ const css =
     \\.content.alone .find-bar { padding-left: 8px; }
     \\.find-count { color: @compy_secondary; font-size: 0.9em; min-width: 52px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
+    \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
+    \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
+    \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
     \\window.tight .content .workspace { margin: 0; }
     \\window.tight .pane-card { border-radius: 0; border: none; box-shadow: none; }
     \\window.tight .workspace { background-color: @compy_stroke_subtle; }
@@ -97,7 +101,7 @@ pub const App = struct {
     sidebar: *gtk.ListBox = undefined,
     split: *adw.OverlaySplitView = undefined,
     card: *gtk.Widget = undefined,
-    card_start: *gtk.Widget = undefined,
+    corner: *gtk.Widget = undefined,
     stack: *gtk.Stack = undefined,
     status: *adw.StatusPage = undefined,
     retry_button: *gtk.Button = undefined,
@@ -168,11 +172,17 @@ pub const App = struct {
         scroller.setChild(a.sidebar.as(gtk.Widget));
         scroller.as(gtk.Widget).setVexpand(1);
         // The window controls and the sidebar toggle sit in a fixed corner above everything, so the
-        // toggle never moves; the sidebar header and the top strip leave room for that corner.
+        // toggle never moves; the sidebar header leaves room for it, and so does the top-left pane
+        // while the sidebar is hidden.
         const corner_size = gtk.SizeGroup.new(.horizontal);
         const corner = gtk.Box.new(.horizontal, 4);
         corner.as(gtk.Widget).addCssClass("window-corner");
-        corner.append(gtk.WindowControls.new(.start).as(gtk.Widget));
+        // The window's buttons sit in the corner with the sidebar toggle, like Rex's: the desktop's
+        // own buttons, in its order, all moved to the left.
+        const controls = gtk.WindowControls.new(.start);
+        controls.setDecorationLayout(cornerLayout().ptr);
+        controls.as(gtk.Widget).addCssClass("corner-controls");
+        corner.append(controls.as(gtk.Widget));
         corner.append(icons.button(.sidebar, "Toggle sidebar", "app.toggle-sidebar").as(gtk.Widget));
         corner.as(gtk.Widget).setHalign(.start);
         corner.as(gtk.Widget).setValign(.start);
@@ -211,21 +221,8 @@ pub const App = struct {
         side.setContent(scroller.as(gtk.Widget));
 
         // Content: the panes, each its own card, on the window's background. While the sidebar is
-        // hidden, a slim strip above them carries the window controls and the sidebar toggle.
-        const strip = gtk.Box.new(.horizontal, 4);
-        strip.as(gtk.Widget).addCssClass("top-strip");
-        const strip_room = gtk.Box.new(.horizontal, 0);
-        corner_size.addWidget(strip_room.as(gtk.Widget));
-        strip.append(strip_room.as(gtk.Widget));
-        const strip_space = gtk.Box.new(.horizontal, 0);
-        strip_space.as(gtk.Widget).setHexpand(1);
-        strip.append(strip_space.as(gtk.Widget));
-        strip.append(gtk.WindowControls.new(.end).as(gtk.Widget));
-        const strip_handle = gtk.WindowHandle.new();
-        strip_handle.setChild(strip.as(gtk.Widget));
-        strip_handle.as(gtk.Widget).setVisible(0);
-        a.card_start = strip_handle.as(gtk.Widget);
-
+        // hidden, the top-left pane's title makes room for the corner.
+        a.corner = corner.as(gtk.Widget);
         a.stack = gtk.Stack.new();
         a.stack.setTransitionType(.crossfade);
         a.stack.as(gtk.Widget).setVexpand(1);
@@ -262,7 +259,6 @@ pub const App = struct {
 
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).addCssClass("content");
-        card.append(a.card_start);
         card.append(a.find_bar.as(gtk.Widget));
         card.append(a.stack.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
@@ -297,6 +293,7 @@ pub const App = struct {
         a.setTight(settings.current.tight);
         themes.active = themes.resolve(settings.current.theme);
         @import("workspace.zig").show_headers = settings.current.show_headers;
+        a.markHeaders();
         _ = glib.timeoutAdd(530, &blinkTick, a);
         installShotHook(a);
 
@@ -313,10 +310,49 @@ pub const App = struct {
         if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
     }
 
+    /// The desktop's button layout with every button on the left, such as "close" from GNOME's
+    /// "appmenu:close".
+    fn cornerLayout() [:0]const u8 {
+        const S = struct {
+            var buf: [128]u8 = undefined;
+        };
+        var value: ?[*:0]u8 = null;
+        if (gtk.Settings.getDefault()) |gs| gobject.Object.get(gs.as(gobject.Object), "gtk-decoration-layout", &value, @as(?*anyopaque, null));
+        const raw = if (value) |v| std.mem.span(v) else "close,minimize,maximize";
+        defer if (value) |v| glib.free(v);
+        var n: usize = 0;
+        var it = std.mem.tokenizeAny(u8, raw, ",:");
+        while (it.next()) |b| {
+            // The app menu and icon have no place in the corner.
+            if (std.mem.eql(u8, b, "appmenu") or std.mem.eql(u8, b, "icon")) continue;
+            if (n + b.len + 2 >= S.buf.len) break;
+            if (n > 0) {
+                S.buf[n] = ',';
+                n += 1;
+            }
+            @memcpy(S.buf[n .. n + b.len], b);
+            n += b.len;
+        }
+        S.buf[n] = ':';
+        S.buf[n + 1] = 0;
+        return S.buf[0 .. n + 1 :0];
+    }
+
     fn sidebarShown(split: *adw.OverlaySplitView, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
         const shown = split.getShowSidebar() != 0;
-        a.card_start.setVisible(@intFromBool(!shown));
         if (shown) a.card.removeCssClass("alone") else a.card.addCssClass("alone");
+        a.cornerChanged();
+    }
+
+    /// Tells the panes how much of their top-left the corner covers.
+    fn cornerChanged(a: *App) void {
+        const W = @import("workspace.zig");
+        var min: c_int = 0;
+        var nat: c_int = 0;
+        a.corner.measure(.horizontal, -1, &min, &nat, null, null);
+        // Less the workspace's margin and the title's own padding.
+        W.corner_room = if (a.split.getShowSidebar() != 0) 0 else @max(0, nat - 14);
+        for (a.hosts.items) |h| h.workspace.cornerChanged();
     }
 
     fn connectPage(a: *App) *gtk.Widget {
@@ -1465,6 +1501,13 @@ pub const App = struct {
     pub fn headersChanged(a: *App) void {
         @import("workspace.zig").show_headers = settings.current.show_headers;
         for (a.hosts.items) |h| h.workspace.headersChanged();
+        a.markHeaders();
+    }
+
+    /// Without title rows, nothing makes room for the corner, so the panes start below it.
+    fn markHeaders(a: *App) void {
+        const w = a.window.as(gtk.Widget);
+        if (settings.current.show_headers) w.removeCssClass("no-headers") else w.addCssClass("no-headers");
     }
 
     pub fn redrawAll(a: *App) void {

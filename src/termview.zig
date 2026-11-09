@@ -248,7 +248,7 @@ pub const TermView = struct {
         return copy(out, "Terminal");
     }
 
-    fn isShell(p: []const u8) bool {
+    pub fn isShell(p: []const u8) bool {
         for ([_][]const u8{ "zsh", "bash", "fish", "sh", "dash", "nu", "elvish", "xonsh", "pwsh" }) |sh| if (std.mem.eql(u8, p, sh)) return true;
         return false;
     }
@@ -706,7 +706,7 @@ pub const TermView = struct {
         if (button != 1) return;
         if (mods & keys.shift != 0 and n_press == 1) {
             if (t.extendSelection(cell[0], cell[1])) {
-                v.copySelection(true);
+                v.selectionMade();
                 v.selecting = true;
                 v.widget().queueDraw();
             }
@@ -714,11 +714,11 @@ pub const TermView = struct {
         }
         if (n_press == 2) {
             t.selectWord(cell[0], cell[1]);
-            v.copySelection(true);
+            v.selectionMade();
             v.widget().queueDraw();
         } else if (n_press == 3) {
             t.selectRange(0, cell[1], t.frame.cols -| 1, cell[1]);
-            v.copySelection(true);
+            v.selectionMade();
             v.widget().queueDraw();
         }
     }
@@ -858,7 +858,7 @@ pub const TermView = struct {
     fn onDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, v: *TermView) callconv(.c) void {
         v.edge_scroll = 0;
         v.dragging_bar = false;
-        if (v.selecting) v.copySelection(true);
+        if (v.selecting) v.selectionMade();
         // The release that ends a drag also reaches the click gesture, which checks this.
         const Later = struct {
             fn run(data: ?*anyopaque) callconv(.c) c_int {
@@ -956,6 +956,13 @@ pub const TermView = struct {
     fn menuCopyLink(v: *TermView) void {
         const l = v.menu_link orelse return;
         v.widget().getClipboard().setText(l.ptr);
+    }
+
+    /// A selection was finished: it becomes the primary selection, and with Copy on select also
+    /// the clipboard.
+    fn selectionMade(v: *TermView) void {
+        v.copySelection(true);
+        if (@import("settings.zig").current.copy_on_select) v.copySelection(false);
     }
 
     /// Copies the selection to the clipboard, or to the primary selection that middle-click pastes.
