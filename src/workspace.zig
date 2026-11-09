@@ -13,6 +13,7 @@ const gobject = @import("gobject");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
+const gsk = @import("gsk");
 const view = @import("view.zig");
 const Server = @import("server.zig").Server;
 const TermView = @import("termview.zig").TermView;
@@ -50,8 +51,16 @@ const Pane = struct {
     term: *TermView,
     grip: *gtk.Widget,
     title_row: *gtk.Widget,
+    /// "Copied", shown for a moment after the pane's selection reaches the clipboard.
+    copied: *gtk.Widget,
+    copied_timer: c_uint = 0,
+    copied_until: i64 = 0,
     rect: view.Rect = .{},
     floating: bool = false,
+    /// A floating pane's whole layer, in window fractions; its panes move and resize together.
+    bounds: view.Rect = .{},
+    /// Where the pane was when a drag began.
+    drag_start: view.Rect = .{},
     seen: bool = false,
     /// Where the card is drawn now, in pixels, and how fast that is moving toward `rect`.
     cur: [4]f64 = .{ 0, 0, 0, 0 },
@@ -62,7 +71,7 @@ const Pane = struct {
 };
 
 /// A card whose pane went away, fading out where it was.
-const Leaving = struct { frame: *gtk.Widget, cur: [4]f64, alpha: f64, block_id: []u8 };
+const Leaving = struct { frame: *gtk.Widget, cur: [4]f64, size: [2]f64, alpha: f64, block_id: []u8 };
 
 const Divider = struct {
     horizontal: bool,
@@ -80,7 +89,12 @@ pub const Workspace = struct {
     }
 
     root: *gtk.Widget,
-    overlay: *gtk.Widget,
+    /// While a tiled pane is carried: a small card under the pointer, and where it would land.
+    ghost: *gtk.Widget,
+    target: *gtk.Widget,
+    swap_arrows: *gtk.Widget,
+    target_cur: [4]f64 = .{ 0, 0, 0, 0 },
+    target_vel: [4]f64 = .{ 0, 0, 0, 0 },
     tray: *gtk.Box,
     empty: *gtk.Widget,
     server: *Server,
@@ -100,8 +114,10 @@ pub const Workspace = struct {
     pointer: [2]f64 = .{ 0, 0 },
     zone: Zone = .none,
     zone_pane: ?usize = null,
-    /// Where a floating card started, for moving and resizing it.
+    /// Where a floating layer started, for moving and resizing it.
     float_start: view.Rect = .{},
+    /// The ratio under the pointer while a divider is dragged; the panes follow it here at once.
+    local_ratio: f64 = 0,
     float_resizing: bool = false,
     // Animation.
     leaving: std.ArrayList(Leaving) = .empty,
@@ -121,14 +137,31 @@ pub const Workspace = struct {
         const layout = gtk.CustomLayout.new(null, &measure, &allocate);
         root.setLayoutManager(layout.as(gtk.LayoutManager));
 
-        // Drawn above the cards: drop targets and the card being carried.
-        const overlay = gtk.DrawingArea.new();
-        overlay.as(gtk.Widget).setCanTarget(0);
+        // Above the cards while one is carried. They are plain widgets the GPU moves around,
+        // so carrying never repaints the whole window.
+        const ghost = gtk.Box.new(.horizontal, 0);
+        ghost.as(gtk.Widget).addCssClass("carry-ghost");
+        ghost.as(gtk.Widget).setCanTarget(0);
+        ghost.as(gtk.Widget).setVisible(0);
+        const target = gtk.Box.new(.horizontal, 0);
+        target.as(gtk.Widget).addCssClass("drop-target");
+        target.as(gtk.Widget).setCanTarget(0);
+        target.as(gtk.Widget).setVisible(0);
+        const arrows = gtk.DrawingArea.new();
+        arrows.setContentWidth(40);
+        arrows.setContentHeight(28);
+        arrows.setDrawFunc(&drawSwap, null, null);
+        arrows.as(gtk.Widget).setHexpand(1);
+        arrows.as(gtk.Widget).setHalign(.center);
+        arrows.as(gtk.Widget).setValign(.center);
+        arrows.as(gtk.Widget).setVisible(0);
+        target.append(arrows.as(gtk.Widget));
         const tray = gtk.Box.new(.horizontal, 6);
         tray.as(gtk.Widget).addCssClass("tray");
 
         // The workspace owns these, since it moves them above the cards by re-parenting.
-        _ = overlay.as(gobject.Object).refSink();
+        _ = ghost.as(gobject.Object).refSink();
+        _ = target.as(gobject.Object).refSink();
         _ = tray.as(gobject.Object).refSink();
 
         // What a session without windows shows: a way to open one.
@@ -148,8 +181,7 @@ pub const Workspace = struct {
         ew.setVisible(0);
         ew.setParent(root);
 
-        ws.* = .{ .root = root, .overlay = overlay.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
-        overlay.setDrawFunc(&drawOverlay, ws, null);
+        ws.* = .{ .root = root, .ghost = ghost.as(gtk.Widget), .target = target.as(gtk.Widget), .swap_arrows = arrows.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
         gobject.Object.setData(root.as(gobject.Object), "compy-workspace", ws);
 
         const drag = gtk.GestureDrag.new();
@@ -185,7 +217,7 @@ pub const Workspace = struct {
         // A drag in progress follows its pane by block, since the list can change under it.
         const dragged: ?[*]const u8 = if (ws.moving) |m| (if (m < ws.panes.items.len) ws.panes.items[m].block_id.ptr else null) else null;
         if (w.zoomed_block_id) |z| {
-            ws.place(session_id, z, "", .{}, false);
+            ws.place(session_id, z, "", .{}, null);
         } else if (w.tiled()) |layer| {
             if (layer.layout) |node| ws.placeNode(session_id, node, layer.id, null);
         }
@@ -221,9 +253,12 @@ pub const Workspace = struct {
             ws.zone_pane = null;
             ws.zone = .none;
         };
-        // Keep the overlay and tray above the cards.
-        ws.overlay.unparent();
-        ws.overlay.setParent(ws.root);
+        // Keep the carried card, its target and the tray above the cards.
+        inline for (.{ ws.target, ws.ghost }) |top| {
+            top.unparent();
+            top.setParent(ws.root);
+        }
+        if (ws.resizing != null) ws.followDivider();
         ws.tray.as(gtk.Widget).unparent();
         ws.tray.as(gtk.Widget).setParent(ws.root);
         ws.markFocus();
@@ -271,7 +306,8 @@ pub const Workspace = struct {
         p.frame.setCanTarget(0);
         gpa.free(p.layer_id);
         // The terminal stays until the card has faded, so it fades with its text.
-        ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .alpha = p.alpha, .block_id = p.block_id }) catch {
+        const r = ws.pixels(p.rect);
+        ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id }) catch {
             p.frame.unparent();
             ws.server.releaseTerminal(p.block_id);
             gpa.free(p.block_id);
@@ -298,7 +334,7 @@ pub const Workspace = struct {
     fn placeNode(ws: *Workspace, session_id: []const u8, node: *const view.Node, layer_id: []const u8, bounds: ?view.Rect) void {
         switch (node.*) {
             // Leaf rectangles are already in window fractions, floating layers included.
-            .leaf => |l| ws.place(session_id, l.block_id, layer_id, l.rect, bounds != null),
+            .leaf => |l| ws.place(session_id, l.block_id, layer_id, l.rect, bounds),
             .split => |s| {
                 if (bounds == null and ws.resizing == null) ws.dividers.append(gpa, .{
                     .horizontal = s.horizontal,
@@ -313,9 +349,16 @@ pub const Workspace = struct {
         }
     }
 
-    fn place(ws: *Workspace, session_id: []const u8, block_id: []const u8, layer_id: []const u8, rect: view.Rect, floating: bool) void {
+    fn place(ws: *Workspace, session_id: []const u8, block_id: []const u8, layer_id: []const u8, rect: view.Rect, bounds: ?view.Rect) void {
+        const floating = bounds != null;
         for (ws.panes.items) |*p| if (std.mem.eql(u8, p.block_id, block_id)) {
+            // A floating layer being dragged here keeps its place until the server hears the drop.
+            if (ws.draggingLayer(p.layer_id)) {
+                p.seen = true;
+                return;
+            }
             p.rect = rect;
+            p.bounds = bounds orelse .{};
             p.seen = true;
             replace2(&p.layer_id, layer_id);
             if (p.floating != floating) {
@@ -327,6 +370,7 @@ pub const Workspace = struct {
         };
         const tv = TermView.create(ws.server, session_id, block_id) catch return;
         tv.on_focus = .{ .ctx = ws, .f = clicked };
+        tv.on_copied = .{ .ctx = ws, .f = showCopied };
         const owned = gpa.dupe(u8, block_id) catch return;
 
         // The title row: the program's tile and title, then this pane's buttons.
@@ -422,6 +466,15 @@ pub const Workspace = struct {
         const frame_overlay = gtk.Overlay.new();
         frame_overlay.setChild(card.as(gtk.Widget));
         frame_overlay.addOverlay(gw);
+        const copied = gtk.Label.new("Copied");
+        const cw = copied.as(gtk.Widget);
+        cw.addCssClass("copied-chip");
+        cw.setHalign(.end);
+        cw.setValign(.start);
+        cw.setMarginTop(if (show_headers) 46 else 10);
+        cw.setMarginEnd(14);
+        cw.setCanTarget(0);
+        frame_overlay.addOverlay(cw);
         const frame = frame_overlay.as(gtk.Widget);
         frame.addCssClass("pane-card");
         frame.setOverflow(.hidden);
@@ -436,8 +489,10 @@ pub const Workspace = struct {
             .term = tv,
             .grip = gw,
             .title_row = row.as(gtk.Widget),
+            .copied = cw,
             .rect = rect,
             .floating = floating,
+            .bounds = bounds orelse .{},
             .seen = true,
         }) catch {};
     }
@@ -477,6 +532,28 @@ pub const Workspace = struct {
         }
     }
 
+    /// Fades "Copied" in on the pane, then out again; CSS does the easing.
+    fn showCopied(ctx: *anyopaque, block_id: []const u8) void {
+        const ws: *Workspace = @ptrCast(@alignCast(ctx));
+        const p = ws.paneOf(block_id) orelse return;
+        p.copied.addCssClass("shown");
+        if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
+        const Hide = struct {
+            fn run(data: ?*anyopaque) callconv(.c) c_int {
+                const w: *Workspace = @ptrCast(@alignCast(data.?));
+                // Each pane's timer is cleared here; the one that fired is past its time.
+                const now = glib.getMonotonicTime();
+                for (w.panes.items) |*q| if (q.copied_timer != 0 and now >= q.copied_until) {
+                    q.copied.removeCssClass("shown");
+                    q.copied_timer = 0;
+                };
+                return 0;
+            }
+        };
+        p.copied_until = glib.getMonotonicTime() + 900_000;
+        p.copied_timer = glib.timeoutAdd(900, &Hide.run, ws);
+    }
+
     fn markFocus(ws: *Workspace) void {
         for (ws.panes.items) |p| {
             const on = if (ws.focused) |f| std.mem.eql(u8, f, p.block_id) else false;
@@ -487,6 +564,32 @@ pub const Workspace = struct {
     pub fn paneOf(ws: *Workspace, block_id: []const u8) ?*Pane {
         for (ws.panes.items) |*p| if (std.mem.eql(u8, p.block_id, block_id)) return p;
         return null;
+    }
+
+    /// The pane next to the focused one in a direction (left, right, up or down): the nearest
+    /// one beside it, preferring the one that overlaps it most.
+    pub fn neighbor(ws: *Workspace, direction: []const u8) ?[]const u8 {
+        const cur = ws.paneOf(ws.focused orelse return null) orelse return null;
+        const c = cur.rect;
+        const eps = 0.001;
+        var best: ?[]const u8 = null;
+        var best_dist: f64 = std.math.inf(f64);
+        var best_overlap: f64 = -1;
+        for (ws.panes.items) |p| {
+            if (p.floating != cur.floating or std.mem.eql(u8, p.block_id, cur.block_id)) continue;
+            const r = p.rect;
+            const horizontal = std.mem.eql(u8, direction, "left") or std.mem.eql(u8, direction, "right");
+            const dist = if (std.mem.eql(u8, direction, "left")) c.x - (r.x + r.w) else if (std.mem.eql(u8, direction, "right")) r.x - (c.x + c.w) else if (std.mem.eql(u8, direction, "up")) c.y - (r.y + r.h) else r.y - (c.y + c.h);
+            if (dist < -eps) continue;
+            const overlap = if (horizontal) @min(c.y + c.h, r.y + r.h) - @max(c.y, r.y) else @min(c.x + c.w, r.x + r.w) - @max(c.x, r.x);
+            if (overlap <= eps) continue;
+            if (dist < best_dist - eps or (@abs(dist - best_dist) <= eps and overlap > best_overlap)) {
+                best = p.block_id;
+                best_dist = dist;
+                best_overlap = overlap;
+            }
+        }
+        return best;
     }
 
     /// Marks a pane focused here and on the server, such as before acting on it.
@@ -599,6 +702,47 @@ pub const Workspace = struct {
         }
         _ = g.as(gtk.Gesture).setState(.claimed);
         ws.move_origin = .{ x, y };
+        ws.local_ratio = ws.dividers.items[ws.resizing.?].ratio;
+        for (ws.panes.items) |*p| p.drag_start = p.rect;
+    }
+
+    /// Lays the panes out for the ratio under the pointer straight away, from where they were when
+    /// the drag began, without waiting for the server's answer.
+    fn followDivider(ws: *Workspace) void {
+        const i = ws.resizing orelse return;
+        const d = ws.dividers.items[i];
+        const eps = 0.0005;
+        const start = if (d.horizontal) d.rect.x else d.rect.y;
+        const size = if (d.horizontal) d.rect.w else d.rect.h;
+        const old_at = start + size * d.ratio;
+        const new_at = start + size * ws.local_ratio;
+        for (ws.panes.items) |*p| {
+            if (p.floating) continue;
+            const r = p.drag_start;
+            if (r.x < d.rect.x - eps or r.y < d.rect.y - eps or r.x + r.w > d.rect.x + d.rect.w + eps or r.y + r.h > d.rect.y + d.rect.h + eps) continue;
+            const pos = if (d.horizontal) r.x else r.y;
+            const len = if (d.horizontal) r.w else r.h;
+            var np: f64 = 0;
+            var nl: f64 = 0;
+            if (pos + len <= old_at + eps) {
+                const k = (new_at - start) / @max(old_at - start, eps);
+                np = start + (pos - start) * k;
+                nl = len * k;
+            } else {
+                const end = start + size;
+                const k = (end - new_at) / @max(end - old_at, eps);
+                np = new_at + (pos - old_at) * k;
+                nl = len * k;
+            }
+            if (d.horizontal) {
+                p.rect.x = np;
+                p.rect.w = nl;
+            } else {
+                p.rect.y = np;
+                p.rect.h = nl;
+            }
+        }
+        ws.root.queueAllocate();
     }
 
     fn sendDivider(ws: *Workspace, dx: f64, dy: f64, force: bool) void {
@@ -611,11 +755,13 @@ pub const Workspace = struct {
             ((ws.move_origin[0] + dx + gap / 2) / (w + gap) - d.rect.x) / d.rect.w
         else
             ((ws.move_origin[1] + dy + gap / 2) / (h + gap) - d.rect.y) / d.rect.h;
+        ws.local_ratio = std.math.clamp(ratio, 0.05, 0.95);
+        ws.followDivider();
         // Each change makes programs redraw, so send at most every 60 ms while dragging.
         const now = glib.getMonotonicTime();
         if (!force and now - ws.last_resize < 60_000) return;
         ws.last_resize = now;
-        if (ws.session_id) |s| ws.server.resizePane(s, d.horizontal, d.before_id, d.after_id, std.math.clamp(ratio, 0.05, 0.95));
+        if (ws.session_id) |s| ws.server.resizePane(s, d.horizontal, d.before_id, d.after_id, ws.local_ratio);
     }
 
     fn dividerUpdate(_: *gtk.GestureDrag, dx: f64, dy: f64, ws: *Workspace) callconv(.c) void {
@@ -659,7 +805,7 @@ pub const Workspace = struct {
         _ = title.translateCoordinates(ws.root, x, y, &px, &py);
         ws.move_origin = .{ px, py };
         ws.pointer = .{ px, py };
-        ws.float_start = ws.panes.items[i].rect;
+        ws.startLayerDrag(i);
         clicked(ws, ws.panes.items[i].block_id);
     }
 
@@ -671,14 +817,88 @@ pub const Workspace = struct {
         ws.pointer = .{ ws.move_origin[0] + dx, ws.move_origin[1] + dy };
         const p = &ws.panes.items[i];
         if (p.floating) {
-            // A floating card follows the pointer; the server hears where it lands.
-            p.rect.x = std.math.clamp(ws.float_start.x + dx / ws.width(), 0, 1 - p.rect.w);
-            p.rect.y = std.math.clamp(ws.float_start.y + dy / ws.height(), 0, 1 - p.rect.h);
-            ws.root.queueAllocate();
+            // A floating layer follows the pointer, all its panes together; the server hears
+            // where it lands.
+            var b = ws.float_start;
+            b.x = std.math.clamp(b.x + dx / ws.width(), 0, 1 - b.w);
+            b.y = std.math.clamp(b.y + dy / ws.height(), 0, 1 - b.h);
+            ws.setLayerBounds(i, b);
             return;
         }
         ws.updateZone();
-        ws.overlay.queueDraw();
+        ws.showCarry();
+    }
+
+    /// Notes where a pane's floating layer and its panes are as a drag begins.
+    fn startLayerDrag(ws: *Workspace, i: usize) void {
+        const p = ws.panes.items[i];
+        ws.float_start = if (p.bounds.w > 0) p.bounds else p.rect;
+        for (ws.panes.items) |*q| if (std.mem.eql(u8, q.layer_id, p.layer_id)) {
+            q.drag_start = q.rect;
+        };
+    }
+
+    /// Moves or resizes a pane's floating layer, scaling each of its panes with it.
+    fn setLayerBounds(ws: *Workspace, i: usize, b: view.Rect) void {
+        const sb = ws.float_start;
+        const layer = ws.panes.items[i].layer_id;
+        const sx = b.w / @max(sb.w, 0.0001);
+        const sy = b.h / @max(sb.h, 0.0001);
+        for (ws.panes.items) |*q| if (std.mem.eql(u8, q.layer_id, layer)) {
+            const r = q.drag_start;
+            q.rect = .{ .x = b.x + (r.x - sb.x) * sx, .y = b.y + (r.y - sb.y) * sy, .w = r.w * sx, .h = r.h * sy };
+            q.bounds = b;
+        };
+        ws.root.queueAllocate();
+    }
+
+    /// Whether this floating layer is under the pointer being moved or resized.
+    fn draggingLayer(ws: *Workspace, layer_id: []const u8) bool {
+        const m = ws.moving orelse return false;
+        if (m >= ws.panes.items.len) return false;
+        const p = ws.panes.items[m];
+        if (!p.floating or !(ws.float_resizing or ws.move_armed)) return false;
+        return std.mem.eql(u8, p.layer_id, layer_id);
+    }
+
+    /// Shows the carried card under the pointer and where it would land.
+    fn showCarry(ws: *Workspace) void {
+        const carrying = if (ws.moving) |i| ws.move_armed and !ws.panes.items[i].floating else false;
+        ws.ghost.setVisible(@intFromBool(carrying));
+        const shown = carrying and ws.zone_pane != null;
+        if (shown and ws.target.getVisible() == 0) {
+            // It appears where it belongs, then glides between targets.
+            ws.target_cur = ws.targetRect();
+            ws.target_vel = .{ 0, 0, 0, 0 };
+        }
+        ws.target.setVisible(@intFromBool(shown));
+        ws.swap_arrows.setVisible(@intFromBool(shown and ws.zone == .swap));
+        ws.root.queueAllocate();
+        if (shown) ws.startTick();
+    }
+
+    /// Where the carried pane would land, in pixels.
+    fn targetRect(ws: *Workspace) [4]f64 {
+        const t = ws.zone_pane orelse return .{ 0, 0, 0, 0 };
+        const r = ws.pixels(ws.panes.items[t].rect);
+        var x = r[0];
+        var y = r[1];
+        var w = r[2];
+        var h = r[3];
+        switch (ws.zone) {
+            .left => w /= 2,
+            .right => {
+                x += w / 2;
+                w /= 2;
+            },
+            .top => h /= 2,
+            .bottom => {
+                y += h / 2;
+                h /= 2;
+            },
+            else => {},
+        }
+        return .{ x + 4, y + 4, w - 8, h - 8 };
     }
 
     fn moveEnd(ws: *Workspace) void {
@@ -688,12 +908,12 @@ pub const Workspace = struct {
             ws.moving = null;
             ws.zone = .none;
             ws.zone_pane = null;
-            ws.overlay.queueDraw();
+            ws.showCarry();
         }
         if (!ws.move_armed) return;
         const sid = ws.session_id orelse return;
         const p = ws.panes.items[i];
-        if (p.floating) return ws.server.resizeLayer(sid, p.layer_id, p.rect);
+        if (p.floating) return ws.server.resizeLayer(sid, p.layer_id, p.bounds);
         switch (ws.zone) {
             .none => {},
             .swap => if (ws.zone_pane) |t| ws.server.swapBlocks(sid, p.block_id, ws.panes.items[t].block_id),
@@ -759,20 +979,7 @@ pub const Workspace = struct {
         var busy = false;
         for (ws.panes.items, 0..) |*p, i| {
             if (ws.pinned(i)) continue;
-            const target = ws.pixels(p.rect);
-            var still = true;
-            for (0..4) |k| {
-                const d = p.cur[k] - target[k];
-                const v = p.vel[k];
-                const nd = (d + (v + spring * d) * dt) * decay;
-                p.vel[k] = (v - spring * (v + spring * d) * dt) * decay;
-                p.cur[k] = target[k] + nd;
-                if (@abs(nd) > 0.4 or @abs(p.vel[k]) > 4) still = false;
-            }
-            if (still) {
-                p.cur = target;
-                p.vel = .{ 0, 0, 0, 0 };
-            }
+            const still = springStep(&p.cur, &p.vel, ws.pixels(p.rect), dt, decay);
             p.alpha += (1 - p.alpha) * (1 - @exp(-14 * dt));
             if (p.alpha > 0.995) p.alpha = 1;
             if (!still or p.alpha < 1) busy = true;
@@ -789,6 +996,7 @@ pub const Workspace = struct {
             } else i += 1;
         }
         if (ws.leaving.items.len > 0) busy = true;
+        if (ws.target.getVisible() != 0 and !springStep(&ws.target_cur, &ws.target_vel, ws.targetRect(), dt, decay)) busy = true;
         ws.root.queueAllocate();
         if (!busy) {
             ws.tick = 0;
@@ -797,10 +1005,27 @@ pub const Workspace = struct {
         return 1;
     }
 
+    fn springStep(cur: *[4]f64, vel: *[4]f64, target: [4]f64, dt: f64, decay: f64) bool {
+        var still = true;
+        for (0..4) |k| {
+            const d = cur[k] - target[k];
+            const v = vel[k];
+            const nd = (d + (v + spring * d) * dt) * decay;
+            vel[k] = (v - spring * (v + spring * d) * dt) * decay;
+            cur[k] = target[k] + nd;
+            if (@abs(nd) > 0.4 or @abs(vel[k]) > 4) still = false;
+        }
+        if (still) {
+            cur.* = target;
+            vel.* = .{ 0, 0, 0, 0 };
+        }
+        return still;
+    }
+
     /// A card under the pointer, moved or resized directly, follows it without easing.
     fn pinned(ws: *Workspace, i: usize) bool {
-        const m = ws.moving orelse return false;
-        return m == i and (ws.float_resizing or (ws.move_armed and ws.panes.items[i].floating));
+        if (ws.resizing != null) return !ws.panes.items[i].floating;
+        return ws.draggingLayer(ws.panes.items[i].layer_id);
     }
 
     // For the development script: drive the same paths a pointer would.
@@ -811,7 +1036,7 @@ pub const Workspace = struct {
         ws.moving = i;
         ws.move_armed = false;
         ws.move_origin = .{ r[0] + 40, r[1] + 16 };
-        ws.float_start = ws.panes.items[i].rect;
+        ws.startLayerDrag(i);
         ws.moveUpdate(x - ws.move_origin[0], y - ws.move_origin[1]);
     }
 
@@ -844,15 +1069,16 @@ pub const Workspace = struct {
         const i = ws.paneOfWidget(grip) orelse return;
         ws.moving = i;
         ws.float_resizing = true;
-        ws.float_start = ws.panes.items[i].rect;
+        ws.startLayerDrag(i);
     }
 
     fn gripUpdate(ws: *Workspace, dx: f64, dy: f64) void {
         if (!ws.float_resizing) return;
-        const p = &ws.panes.items[ws.moving orelse return];
-        p.rect.w = std.math.clamp(ws.float_start.w + dx / ws.width(), 0.15, 1 - p.rect.x);
-        p.rect.h = std.math.clamp(ws.float_start.h + dy / ws.height(), 0.15, 1 - p.rect.y);
-        ws.root.queueAllocate();
+        const i = ws.moving orelse return;
+        var b = ws.float_start;
+        b.w = std.math.clamp(b.w + dx / ws.width(), 0.15, 1 - b.x);
+        b.h = std.math.clamp(b.h + dy / ws.height(), 0.15, 1 - b.y);
+        ws.setLayerBounds(i, b);
     }
 
     fn gripEnd(ws: *Workspace) void {
@@ -861,7 +1087,7 @@ pub const Workspace = struct {
             ws.moving = null;
         }
         const p = ws.panes.items[ws.moving orelse return];
-        if (ws.session_id) |s| ws.server.resizeLayer(s, p.layer_id, p.rect);
+        if (ws.session_id) |s| ws.server.resizeLayer(s, p.layer_id, p.bounds);
     }
 };
 
@@ -910,16 +1136,17 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         };
         if (p.alpha < 1) moving = true;
         p.frame.setOpacity(p.alpha);
-        allocateAt(p.frame, p.cur);
+        allocateAt(p.frame, p.cur, .{ @round(target[2]), @round(target[3]) });
     }
     for (ws.leaving.items) |l| {
         l.frame.setOpacity(@max(0, l.alpha));
-        allocateAt(l.frame, l.cur);
+        allocateAt(l.frame, l.cur, l.size);
     }
+    if (ws.target.getVisible() != 0) allocateAt(ws.target, ws.target_cur, .{ @round(ws.target_cur[2]), @round(ws.target_cur[3]) });
+    if (ws.ghost.getVisible() != 0) allocateAt(ws.ghost, .{ ws.pointer[0] - 75, ws.pointer[1] - 46, 150, 92 }, .{ 150, 92 });
     ws.snap = false;
     if (moving or ws.leaving.items.len > 0) ws.startTick();
     var all: gtk.Allocation = .{ .f_x = 0, .f_y = 0, .f_width = width, .f_height = height };
-    ws.overlay.sizeAllocate(&all, -1);
     if (ws.empty.getVisible() != 0) ws.empty.sizeAllocate(&all, -1);
     // The tray sits at the bottom left, as wide as its chips.
     var min: c_int = 0;
@@ -932,14 +1159,43 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     ws.tray.as(gtk.Widget).sizeAllocate(&tray, -1);
 }
 
-fn allocateAt(w: *gtk.Widget, r: [4]f64) void {
-    var a: gtk.Allocation = .{
-        .f_x = @intFromFloat(@round(r[0])),
-        .f_y = @intFromFloat(@round(r[1])),
-        .f_width = @intFromFloat(@max(1, @round(r[2]))),
-        .f_height = @intFromFloat(@max(1, @round(r[3]))),
-    };
-    w.sizeAllocate(&a, -1);
+/// Places a card at `r`. While it's on its way somewhere, the card keeps the size it's headed
+/// for and the GPU scales and moves it there, so its terminal isn't drawn again on every frame.
+fn allocateAt(w: *gtk.Widget, r: [4]f64, size: [2]f64) void {
+    const sw = @max(1, size[0]);
+    const sh = @max(1, size[1]);
+    if (@abs(r[2] - sw) < 0.5 and @abs(r[3] - sh) < 0.5) {
+        var a: gtk.Allocation = .{
+            .f_x = @intFromFloat(@round(r[0])),
+            .f_y = @intFromFloat(@round(r[1])),
+            .f_width = @intFromFloat(sw),
+            .f_height = @intFromFloat(sh),
+        };
+        w.sizeAllocate(&a, -1);
+        return;
+    }
+    const t = gsk.Transform.new().translate(&.{ .f_x = @floatCast(r[0]), .f_y = @floatCast(r[1]) }) orelse return;
+    const scaled = t.scale(@floatCast(@max(0.01, r[2] / sw)), @floatCast(@max(0.01, r[3] / sh)));
+    w.allocate(@intFromFloat(sw), @intFromFloat(sh), -1, scaled);
+}
+
+/// Two arrows passing each other, on a drop target that swaps.
+fn drawSwap(area: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, _: ?*anyopaque) callconv(.c) void {
+    var ink: gdk.RGBA = undefined;
+    area.as(gtk.Widget).getColor(&ink);
+    setRgba(cr, ink, 0.9);
+    const cx = @as(f64, @floatFromInt(w)) / 2;
+    const cy = @as(f64, @floatFromInt(h)) / 2;
+    cr.setLineWidth(2);
+    cr.setLineCap(.round);
+    cr.setLineJoin(.round);
+    cr.moveTo(cx - 14, cy - 5);
+    cr.lineTo(cx + 14, cy - 5);
+    cr.lineTo(cx + 8, cy - 11);
+    cr.moveTo(cx + 14, cy + 5);
+    cr.lineTo(cx - 14, cy + 5);
+    cr.lineTo(cx - 8, cy + 11);
+    cr.stroke();
 }
 
 /// A minimized pane's name, as its title row would show it, such as "zsh ~/Work/bundle".
@@ -968,74 +1224,6 @@ fn roundRect(cr: *cairo.Context, x: f64, y: f64, w: f64, h: f64, r: f64) void {
     cr.arc(x + r, y + h - r, r, pi / 2, pi);
     cr.arc(x + r, y + r, r, pi, 3 * pi / 2);
     cr.closePath();
-}
-
-fn drawOverlay(area: *gtk.DrawingArea, cr: *cairo.Context, _: c_int, _: c_int, data: ?*anyopaque) callconv(.c) void {
-    const ws: *Workspace = @ptrCast(@alignCast(data.?));
-    var ink: gdk.RGBA = undefined;
-    area.as(gtk.Widget).getColor(&ink);
-    const accent: gdk.RGBA = .{ .f_red = 0.35, .f_green = 0.62, .f_blue = 1, .f_alpha = 1 };
-
-    // Where the pane would land.
-    if (ws.moving != null and ws.move_armed) if (ws.zone_pane) |t| {
-        const r = ws.pixels(ws.panes.items[t].rect);
-        var x = r[0];
-        var y = r[1];
-        var w = r[2];
-        var h = r[3];
-        switch (ws.zone) {
-            .left => w /= 2,
-            .right => {
-                x += w / 2;
-                w /= 2;
-            },
-            .top => h /= 2,
-            .bottom => {
-                y += h / 2;
-                h /= 2;
-            },
-            else => {},
-        }
-        setRgba(cr, accent, 0.18);
-        roundRect(cr, x + 4, y + 4, w - 8, h - 8, 9);
-        cr.fillPreserve();
-        setRgba(cr, accent, 0.8);
-        cr.setLineWidth(1.5);
-        cr.stroke();
-        if (ws.zone == .swap) {
-            // Two arrows passing each other.
-            const cx = x + w / 2;
-            const cy = y + h / 2;
-            cr.setLineWidth(2);
-            cr.setLineCap(.round);
-            cr.moveTo(cx - 14, cy - 5);
-            cr.lineTo(cx + 14, cy - 5);
-            cr.lineTo(cx + 8, cy - 11);
-            cr.moveTo(cx + 14, cy + 5);
-            cr.lineTo(cx - 14, cy + 5);
-            cr.lineTo(cx - 8, cy + 11);
-            cr.stroke();
-        }
-    };
-
-    // The card being carried, small, under the pointer.
-    if (ws.moving) |i| if (ws.move_armed and !ws.panes.items[i].floating) {
-        const w = 150.0;
-        const h = 92.0;
-        const x = ws.pointer[0] - w / 2;
-        const y = ws.pointer[1] - h / 2;
-        cr.setSourceRgba(0, 0, 0, 0.35);
-        roundRect(cr, x + 2, y + 5, w, h, 10);
-        cr.fill();
-        setRgba(cr, ink, 0.14);
-        roundRect(cr, x, y, w, h, 10);
-        cr.fill();
-        setRgba(cr, accent, 0.9);
-        cr.setLineWidth(1.5);
-        roundRect(cr, x, y, w, h, 10);
-        cr.stroke();
-    };
-
 }
 
 fn drawGrip(area: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, _: ?*anyopaque) callconv(.c) void {

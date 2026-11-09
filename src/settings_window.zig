@@ -9,6 +9,7 @@ const gdk = @import("gdk");
 const cairo = @import("cairo");
 const adw = @import("adw");
 const pango = @import("pango");
+const pangocairo = @import("pangocairo");
 const settings = @import("settings.zig");
 const themes = @import("themes.zig");
 const icons = @import("icons.zig");
@@ -366,17 +367,7 @@ fn imported(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaqu
 fn terminalPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const g = group(p, "Typography", null);
-    const row = adw.ActionRow.new();
-    row.as(adw.PreferencesRow).setTitle("Terminal font");
-    const fb = gtk.FontDialogButton.new(gtk.FontDialog.new());
-    fb.setLevel(.font);
-    fb.setUseFont(1);
-    const desc = pango.FontDescription.fromString((gpa.dupeSentinel(u8, settings.current.font, 0) catch return p.as(gtk.Widget)).ptr);
-    fb.setFontDesc(desc);
-    fb.as(gtk.Widget).setValign(.center);
-    _ = gobject.Object.signals.notify.connect(fb, *Ctx, &fontPicked, ctx, .{ .detail = "font-desc" });
-    row.addSuffix(fb.as(gtk.Widget));
-    g.add(row.as(gtk.Widget));
+    fontRows(ctx, g);
 
     const c = group(p, "Cursor", null);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
@@ -391,11 +382,117 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     return p.as(gtk.Widget);
 }
 
-fn fontPicked(button: *gtk.FontDialogButton, _: *gobject.ParamSpec, ctx: *Ctx) callconv(.c) void {
-    const desc = button.getFontDesc() orelse return;
-    const name = desc.toString();
-    defer glib.free(name);
-    settings.setString(&settings.current.font, std.mem.span(name));
+// The font is picked right on the page: a monospace family, searchable, and a size.
+
+var font_family: ?*adw.ComboRow = null;
+var font_size: ?*adw.SpinRow = null;
+var font_names: std.ArrayList([:0]u8) = .empty;
+var font_preview: ?*gtk.Label = null;
+
+fn fontRows(ctx: *Ctx, g: *adw.PreferencesGroup) void {
+    const current_z = gpa.dupeSentinel(u8, settings.current.font, 0) catch return;
+    defer gpa.free(current_z);
+    const current = pango.FontDescription.fromString(current_z.ptr);
+    defer current.free();
+    const current_family = if (current.getFamily()) |f| std.mem.span(f) else "Monospace";
+    const current_size: f64 = @as(f64, @floatFromInt(current.getSize())) / pango.SCALE;
+
+    // Every monospace family this computer has, in order.
+    for (font_names.items) |n| gpa.free(n);
+    font_names.clearRetainingCapacity();
+    var families: [*]*pango.FontFamily = undefined;
+    var count: c_int = 0;
+    pangocairo.FontMap.getDefault().listFamilies(&families, &count);
+    for (families[0..@intCast(count)]) |f| if (f.isMonospace() != 0) {
+        font_names.append(gpa, gpa.dupeSentinel(u8, std.mem.span(f.getName()), 0) catch continue) catch {};
+    };
+    glib.free(@ptrCast(families));
+    std.mem.sort([:0]u8, font_names.items, {}, struct {
+        fn less(_: void, a: [:0]u8, b: [:0]u8) bool {
+            return std.ascii.lessThanIgnoreCase(a, b);
+        }
+    }.less);
+    const list = gtk.StringList.new(null);
+    var selected: c_uint = 0;
+    var found = false;
+    for (font_names.items, 0..) |n, i| {
+        list.append(n.ptr);
+        if (std.ascii.eqlIgnoreCase(n, current_family)) {
+            selected = @intCast(i);
+            found = true;
+        }
+    }
+    if (!found) {
+        // Keep a family that isn't listed, such as the generic "Monospace".
+        const z = gpa.dupeSentinel(u8, current_family, 0) catch return;
+        list.append(z.ptr);
+        font_names.append(gpa, z) catch {};
+        selected = @intCast(font_names.items.len - 1);
+    }
+
+    const family = adw.ComboRow.new();
+    family.as(adw.PreferencesRow).setTitle("Font");
+    family.setModel(list.as(gio.ListModel));
+    family.setExpression(gtk.PropertyExpression.new(gtk.StringObject.getGObjectType(), null, "string").as(gtk.Expression));
+    family.setEnableSearch(1);
+    family.setSelected(selected);
+    g.add(family.as(gtk.Widget));
+    font_family = family;
+
+    const size = adw.SpinRow.newWithRange(6, 40, 1);
+    size.as(adw.PreferencesRow).setTitle("Size");
+    size.setValue(current_size);
+    g.add(size.as(gtk.Widget));
+    font_size = size;
+
+    const preview = gtk.Label.new("The quick brown fox jumps over the lazy dog  0O 1lI {}[] => !=");
+    preview.setXalign(0);
+    preview.setEllipsize(.end);
+    preview.as(gtk.Widget).addCssClass("font-preview");
+    const preview_row = adw.PreferencesRow.new();
+    preview_row.as(gtk.ListBoxRow).setActivatable(0);
+    preview_row.as(gtk.ListBoxRow).setChild(preview.as(gtk.Widget));
+    g.add(preview_row.as(gtk.Widget));
+    font_preview = preview;
+    showPreview();
+
+    _ = gobject.Object.signals.notify.connect(family, *Ctx, &familyChanged, ctx, .{ .detail = "selected" });
+    _ = gobject.Object.signals.notify.connect(size, *Ctx, &sizeChanged, ctx, .{ .detail = "value" });
+}
+
+fn chosenFont(buf: []u8) ?[:0]const u8 {
+    const family = font_family orelse return null;
+    const size = font_size orelse return null;
+    const i = family.getSelected();
+    if (i >= font_names.items.len) return null;
+    return std.fmt.bufPrintSentinel(buf, "{s} {d}", .{ font_names.items[i], @round(size.getValue()) }, 0) catch null;
+}
+
+fn showPreview() void {
+    const label = font_preview orelse return;
+    var buf: [256]u8 = undefined;
+    const font = chosenFont(&buf) orelse return;
+    const escaped = glib.markupEscapeText(font.ptr, @intCast(font.len));
+    defer glib.free(escaped);
+    var markup: [512]u8 = undefined;
+    const m = std.fmt.bufPrintSentinel(&markup, "<span font=\"{s}\">The quick brown fox jumps over the lazy dog  0O 1lI {{}}[] =&gt; !=</span>", .{std.mem.span(escaped)}, 0) catch return;
+    label.setMarkup(m.ptr);
+}
+
+fn familyChanged(_: *adw.ComboRow, _: *gobject.ParamSpec, ctx: *Ctx) callconv(.c) void {
+    fontChanged(ctx);
+}
+
+fn sizeChanged(_: *adw.SpinRow, _: *gobject.ParamSpec, ctx: *Ctx) callconv(.c) void {
+    fontChanged(ctx);
+}
+
+fn fontChanged(ctx: *Ctx) void {
+    var buf: [256]u8 = undefined;
+    const font = chosenFont(&buf) orelse return;
+    if (std.mem.eql(u8, font, settings.current.font)) return;
+    settings.setString(&settings.current.font, font);
+    showPreview();
     ctx.app.fontChanged();
 }
 

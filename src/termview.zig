@@ -74,6 +74,29 @@ pub fn setKeyMode(name: []const u8) void {
     if (on_mode_changed) |f| f();
 }
 
+/// The keys of a sequence typed so far, such as ctrl+a waiting for the next key.
+var chord_keys: [4][40]u8 = undefined;
+var chord_lens: [4]usize = .{ 0, 0, 0, 0 };
+var chord_len: usize = 0;
+/// Told when a sequence starts or ends, to show what's been typed.
+pub var on_chord_changed: ?*const fn (pending: []const u8) void = null;
+
+fn chordChanged() void {
+    const f = on_chord_changed orelse return;
+    var buf: [180]u8 = undefined;
+    var n: usize = 0;
+    for (0..chord_len) |i| {
+        const k = chord_keys[i][0..chord_lens[i]];
+        if (n > 0) {
+            buf[n] = ' ';
+            n += 1;
+        }
+        @memcpy(buf[n .. n + k.len], k);
+        n += k.len;
+    }
+    f(buf[0..n]);
+}
+
 pub fn keyMode() []const u8 {
     return key_mode[0..key_mode_len];
 }
@@ -95,6 +118,8 @@ pub const TermView = struct {
     sent_cols: u16 = 0,
     sent_rows: u16 = 0,
     size_timer: c_uint = 0,
+    flash_timer: c_uint = 0,
+    drag_idle: c_uint = 0,
     /// Lines of scrolling not yet sent to a program that takes the mouse.
     scroll_rest: f64 = 0,
     /// How far up into history the view is, in pixels, where it's heading, and how fast a
@@ -137,6 +162,8 @@ pub const TermView = struct {
     flash_until: i64 = 0,
     /// Called when this pane is clicked, so the workspace can mark it focused.
     on_focus: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
+    /// Told when this pane's selection reaches the clipboard, to show that it did.
+    on_copied: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
 
     pub fn create(server: *Server, session_id: []const u8, block_id: []const u8) !*TermView {
         const v = try gpa.create(TermView);
@@ -278,6 +305,8 @@ pub const TermView = struct {
         if (v.menu_link) |l| gpa.free(l);
         v.im.as(gobject.Object).unref();
         if (v.size_timer != 0) _ = glib.Source.remove(v.size_timer);
+        if (v.flash_timer != 0) _ = glib.Source.remove(v.flash_timer);
+        if (v.drag_idle != 0) _ = glib.Source.remove(v.drag_idle);
         if (v.scroll_tick != 0) v.widget().removeTickCallback(v.scroll_tick);
         if (v.stream()) |st| st.removeListener(v);
         gpa.free(v.session_id);
@@ -370,15 +399,40 @@ pub const TermView = struct {
     // Input.
 
     fn onKey(_: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: gdk.ModifierType, v: *TermView) callconv(.c) c_int {
-        if (keys.isModifier(keyval)) return 0;
         const bits: u32 = @bitCast(state);
-        const mods = keys.modsFromGdk(bits);
+        return v.handleKey(keyval, keys.modsFromGdk(bits));
+    }
+
+    /// A key press, from the keyboard or the development script.
+    pub fn handleKey(v: *TermView, keyval: c_uint, mods: u4) c_int {
+        if (keys.isModifier(keyval)) return 0;
         // In a Rex key mode, keys run that mode's bindings instead of typing.
         if (key_mode_len > 0) {
             v.modeKey(keyval, mods);
             return 1;
         }
-        // Ctrl+Shift+C and V copy and paste, like other Linux terminals.
+        // Keys bound in the Rex config, alone or in a sequence such as ctrl+a then -.
+        var name_buf: [40]u8 = undefined;
+        if (keys.rexName(&name_buf, keyval, gdk.keyvalToUnicode(keyval), mods)) |name| {
+            if (v.chord(name)) return 1;
+        }
+        // Super+C and V (Command on a Mac) copy and paste. Ctrl+C copies while text is selected
+        // and interrupts otherwise; Ctrl+Shift+C and V work too, like other Linux terminals.
+        if (mods == keys.super and (keyval == 'c' or keyval == 'C')) {
+            v.copySelection(false);
+            return 1;
+        }
+        if (mods == keys.super and (keyval == 'v' or keyval == 'V')) {
+            v.pasteClipboard();
+            return 1;
+        }
+        if (mods == keys.ctrl and (keyval == 'c' or keyval == 'C')) if (v.term()) |t| if (t.selectionText()) |sel| {
+            gpa.free(sel);
+            v.copySelection(false);
+            t.clearSelection();
+            v.widget().queueDraw();
+            return 1;
+        };
         if (mods == keys.ctrl | keys.shift) {
             if (keyval == 'V' or keyval == 'v') {
                 v.pasteClipboard();
@@ -411,6 +465,60 @@ pub const TermView = struct {
         if (v.term()) |t| t.clearSelection();
         v.server.sendKey(v.session_id, v.block_id, key);
         return 1;
+    }
+
+    /// Follows a key through the config's bindings. True when it's taken: a binding ran, or the
+    /// key starts or continues a sequence. A sequence that comes to nothing lets its last key
+    /// through, as Rex does.
+    fn chord(v: *TermView, name: []const u8) bool {
+        const binds = v.server.bindings;
+        if (chord_len > 0 and keys.sameKey(name, "escape")) {
+            chord_len = 0;
+            chordChanged();
+            return true;
+        }
+        var exact: ?*const @import("server.zig").Binding = null;
+        var longer = false;
+        for (binds) |*b| {
+            if (b.keys.len < chord_len + 1) continue;
+            var same = true;
+            for (0..chord_len) |i| if (!keys.sameKey(b.keys[i], chord_keys[i][0..chord_lens[i]])) {
+                same = false;
+                break;
+            };
+            if (!same or !keys.sameKey(b.keys[chord_len], name)) continue;
+            if (b.keys.len == chord_len + 1) exact = b else longer = true;
+        }
+        if (exact) |b| {
+            const was = chord_len;
+            chord_len = 0;
+            if (was > 0) chordChanged();
+            v.runBinding(b);
+            return true;
+        }
+        if (longer and chord_len < chord_keys.len) {
+            const n = @min(name.len, chord_keys[0].len);
+            @memcpy(chord_keys[chord_len][0..n], name[0..n]);
+            chord_lens[chord_len] = n;
+            chord_len += 1;
+            chordChanged();
+            return true;
+        }
+        if (chord_len > 0) {
+            chord_len = 0;
+            chordChanged();
+        }
+        return false;
+    }
+
+    fn runBinding(v: *TermView, b: *const @import("server.zig").Binding) void {
+        if (std.mem.eql(u8, b.action, "client.key.forward")) return;
+        // Lua functions and block actions run on the server; pane and client actions are this
+        // app's, as are the session ones Rex leaves to each app.
+        const local = !b.lua and (std.mem.startsWith(u8, b.action, "pane.") or std.mem.startsWith(u8, b.action, "client.") or std.mem.startsWith(u8, b.action, "session."));
+        if (local) {
+            if (!v.server.performLocal(v.session_id, b.action, b.args)) v.server.notifyMessage("Compy can't do that action yet");
+        } else v.server.runAction(v.session_id, v.block_id, b.action, b.args);
     }
 
     fn modeKey(v: *TermView, keyval: c_uint, mods: u4) void {
@@ -481,11 +589,13 @@ pub const TermView = struct {
         if (!@import("settings.zig").current.visual_bell) return;
         v.flash_until = glib.getMonotonicTime() + 180_000;
         v.widget().queueDraw();
-        _ = glib.timeoutAdd(190, &unflash, v);
+        if (v.flash_timer != 0) _ = glib.Source.remove(v.flash_timer);
+        v.flash_timer = glib.timeoutAdd(190, &unflash, v);
     }
 
     fn unflash(data: ?*anyopaque) callconv(.c) c_int {
         const v: *TermView = @ptrCast(@alignCast(data.?));
+        v.flash_timer = 0;
         v.widget().queueDraw();
         return 0;
     }
@@ -863,11 +973,12 @@ pub const TermView = struct {
         const Later = struct {
             fn run(data: ?*anyopaque) callconv(.c) c_int {
                 const tv: *TermView = @ptrCast(@alignCast(data.?));
+                tv.drag_idle = 0;
                 tv.selecting = false;
                 return 0;
             }
         };
-        _ = glib.idleAdd(&Later.run, v);
+        if (v.drag_idle == 0) v.drag_idle = glib.idleAdd(&Later.run, v);
     }
 
     /// The right-click menu: copy, paste, a link under the pointer, and this pane's layout.
@@ -972,6 +1083,7 @@ pub const TermView = struct {
         defer gpa.free(text);
         const clipboard = if (primary) v.widget().getPrimaryClipboard() else v.widget().getClipboard();
         clipboard.setText(text.ptr);
+        if (!primary and text.len > 0) if (v.on_copied) |cb| cb.f(cb.ctx, v.block_id);
     }
 
     fn pastePrimary(v: *TermView) void {

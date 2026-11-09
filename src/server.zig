@@ -30,6 +30,10 @@ pub const Change = enum { state, sessions, view, message, block, alert, keymap, 
 /// A key bound inside a Rex key mode, such as "resize".
 pub const ModeBinding = struct { mode: []const u8, keys: []const u8, action: []const u8, args: ?[]const u8 };
 
+/// A key, or a sequence such as ctrl+a then -, bound in the person's config. Collecting a
+/// sequence is the client's job: the server hears only the finished one.
+pub const Binding = struct { keys: []const []const u8, action: []const u8, args: ?[]const u8, lua: bool };
+
 pub const ListedHost = struct { label: []const u8, url: []const u8 };
 
 /// An action from the person's Rex config that Compy can run, with the keys bound to it.
@@ -120,6 +124,7 @@ pub const Server = struct {
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
     actions: []Action = &.{},
     mode_bindings: []ModeBinding = &.{},
+    bindings: []Binding = &.{},
     hosts_arena: std.heap.ArenaAllocator = .init(gpa),
     /// The other hosts this server knows, from the last hosts.list.
     listed_hosts: []ListedHost = &.{},
@@ -981,6 +986,16 @@ pub const Server = struct {
         s.act(session_id, "session.set_window_label", .{ .session_id = session_id, .window_id = window_id, .label = label });
     }
 
+    pub fn renameSession(s: *Server, session_id: []const u8, label: []const u8) void {
+        s.act(session_id, "session.set_label", .{ .session_id = session_id, .label = label });
+    }
+
+    /// Has the server read its config file again; every client then fetches its keymap.
+    pub fn reloadConfig(s: *Server) void {
+        if (s.control == null) return;
+        s.call("server.config_reload", no_args, void, {}, acted);
+    }
+
     pub fn closeWindow(s: *Server, session_id: []const u8, window_id: []const u8) void {
         s.act(session_id, "session.close_window", .{ .session_id = session_id, .window_id = window_id });
     }
@@ -1082,6 +1097,27 @@ pub const Server = struct {
             }) catch {};
         }
         s.mode_bindings = modes.items;
+        var binds: std.ArrayList(Binding) = .empty;
+        for (json.array(payload, "bindings")) |b| {
+            if (json.str(b, "mode") != null) continue;
+            const action = json.str(b, "action") orelse continue;
+            var seq: std.ArrayList([]const u8) = .empty;
+            for (json.array(b, "keys")) |k| switch (k) {
+                .string => |t| seq.append(a, a.dupe(u8, t) catch continue) catch {},
+                else => {},
+            };
+            if (seq.items.len == 0) continue;
+            var lua = false;
+            for (json.array(payload, "actions")) |item| if (eql(json.str(item, "name") orelse "", action)) {
+                lua = eql(json.str(item, "kind") orelse "", "lua");
+            };
+            var args: ?[]const u8 = null;
+            if (json.get(b, "args")) |v| if (v != .null) {
+                args = std.json.Stringify.valueAlloc(a, v, .{}) catch null;
+            };
+            binds.append(a, .{ .keys = seq.items, .action = a.dupe(u8, action) catch continue, .args = args, .lua = lua }) catch {};
+        }
+        s.bindings = binds.items;
         if (std.c.getenv("COMPY_DEBUG") != null) log.info("keymap: {d} actions, {d} bindings, {d} in modes", .{ s.actions.len, json.array(payload, "bindings").len, modes.items.len });
         s.notify(.keymap, null);
     }

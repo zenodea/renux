@@ -61,7 +61,8 @@ pub fn modsFromGdk(state: u32) u4 {
     if (state & (1 << 0) != 0) m |= shift;
     if (state & (1 << 2) != 0) m |= ctrl;
     if (state & (1 << 3) != 0) m |= alt;
-    if (state & (1 << 26) != 0) m |= super;
+    // Super, or Command on a Mac, which GTK reports as Meta.
+    if (state & ((1 << 26) | (1 << 28)) != 0) m |= super;
     return m;
 }
 
@@ -256,6 +257,89 @@ pub fn rexName(buf: []u8, keyval: u32, unicode: u32, mods_in: u4) ?[]const u8 {
     const out = std.fmt.bufPrint(&tmp, "{s}+{s}", .{ prefix, base }) catch return null;
     @memcpy(buf[0..out.len], out);
     return buf[0..out.len];
+}
+
+/// A key as Rex names it, taken apart: its modifiers and the key itself, with shifted symbols
+/// and capitals written as shift and the plain key, the way a US keyboard makes them.
+pub const Name = struct {
+    mods: u4,
+    base_buf: [16]u8 = undefined,
+    base_len: usize = 0,
+
+    pub fn base(n: *const Name) []const u8 {
+        return n.base_buf[0..n.base_len];
+    }
+};
+
+const us_shifted = "!@#$%^&*()_+{}|:\"<>?~";
+const us_unshifted = "1234567890-=[]\\;',./`";
+
+pub fn parseName(name: []const u8) ?Name {
+    var n: Name = .{ .mods = 0 };
+    var rest = name;
+    while (std.mem.indexOfScalar(u8, rest, '+')) |i| {
+        // A trailing "+" is the plus key itself.
+        if (i == rest.len - 1 and i > 0 and rest[i - 1] == '+') break;
+        if (i == 0) break;
+        const m = rest[0..i];
+        if (std.mem.eql(u8, m, "shift")) n.mods |= shift else if (std.mem.eql(u8, m, "ctrl") or std.mem.eql(u8, m, "control")) n.mods |= ctrl else if (std.mem.eql(u8, m, "alt") or std.mem.eql(u8, m, "option")) n.mods |= alt else if (std.mem.eql(u8, m, "super") or std.mem.eql(u8, m, "cmd") or std.mem.eql(u8, m, "command")) n.mods |= super else return null;
+        rest = rest[i + 1 ..];
+    }
+    if (rest.len == 0 or rest.len > n.base_buf.len) return null;
+    var b = rest;
+    if (b.len == 1) {
+        var ch = b[0];
+        if (ch >= 'A' and ch <= 'Z') {
+            ch += 32;
+            n.mods |= shift;
+        } else if (std.mem.indexOfScalar(u8, us_shifted, ch)) |k| {
+            ch = us_unshifted[k];
+            n.mods |= shift;
+        }
+        n.base_buf[0] = ch;
+        n.base_len = 1;
+        return n;
+    }
+    if (std.mem.eql(u8, b, "return")) b = "enter";
+    if (std.mem.eql(u8, b, "esc")) b = "escape";
+    for (b, 0..) |ch, i| n.base_buf[i] = std.ascii.toLower(ch);
+    n.base_len = b.len;
+    return n;
+}
+
+/// Whether two Rex key names mean the same key, such as "ctrl+shift+n" and "shift+ctrl+N".
+pub fn sameKey(a: []const u8, b: []const u8) bool {
+    const x = parseName(a) orelse return false;
+    const y = parseName(b) orelse return false;
+    return x.mods == y.mods and std.mem.eql(u8, x.base(), y.base());
+}
+
+/// The key a Rex name such as "ctrl+a" or "shift+left" stands for, as if it were typed.
+pub fn fromName(name: []const u8) ?Key {
+    const n = parseName(name) orelse return null;
+    const b = n.base();
+    const named = [_]struct { []const u8, u32 }{
+        .{ "enter", 0xff0d }, .{ "escape", 0xff1b }, .{ "tab", 0xff09 },  .{ "backspace", 0xff08 },
+        .{ "left", 0xff51 },  .{ "up", 0xff52 },     .{ "right", 0xff53 }, .{ "down", 0xff54 },
+        .{ "home", 0xff50 },  .{ "end", 0xff57 },    .{ "page_up", 0xff55 }, .{ "page_down", 0xff56 },
+        .{ "space", ' ' },
+    };
+    for (named) |e| if (std.mem.eql(u8, e[0], b)) return fromGdk(e[1], if (e[1] == ' ') ' ' else 0, n.mods);
+    if (b.len != 1) return null;
+    var ch: u32 = b[0];
+    if (n.mods & shift != 0) {
+        if (ch >= 'a' and ch <= 'z') ch -= 32 else if (std.mem.indexOfScalar(u8, us_unshifted, b[0])) |k| ch = us_shifted[k];
+    }
+    return fromGdk(ch, ch, n.mods);
+}
+
+test "Rex key names compare by meaning" {
+    try std.testing.expect(sameKey("ctrl+shift+n", "shift+ctrl+n"));
+    try std.testing.expect(sameKey("shift+-", "shift+_"));
+    try std.testing.expect(sameKey("shift+7", "&"));
+    try std.testing.expect(sameKey("shift+n", "N"));
+    try std.testing.expect(!sameKey("ctrl+a", "a"));
+    try std.testing.expect(sameKey("ctrl++", "ctrl+shift+="));
 }
 
 test "keys as Rex config names them" {

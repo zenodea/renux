@@ -24,6 +24,12 @@ const gpa = std.heap.c_allocator;
 
 const css =
     \\window.compy, window.compy .sidebar-pane { background-color: @compy_shell; }
+    \\*, *:focus-visible, *:focus-within { outline: none; outline-width: 0; }
+    \\.carry-ghost { background-color: mix(@view_bg_color, @window_fg_color, 0.1); border: 1.5px solid alpha(@accent_bg_color, 0.9); border-radius: 10px; box-shadow: 0 5px 18px alpha(black, 0.35); }
+    \\.copied-chip { opacity: 0; transform: translateY(-6px) scale(0.92); transition: opacity 180ms ease-out, transform 240ms cubic-bezier(0.2, 0.9, 0.3, 1.2); background-color: @accent_bg_color; color: @accent_fg_color; border-radius: 99px; padding: 3px 11px; font-size: 0.85em; font-weight: 600; box-shadow: 0 3px 12px alpha(black, 0.3); }
+    \\.copied-chip.shown { opacity: 1; transform: none; }
+    \\.font-preview { padding: 12px 14px; }
+    \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
     \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 46px; padding: 0 6px; }
     \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
     \\.compy-sidebar list > row { border-radius: 9px; min-height: 34px; padding: 3px 4px 3px 10px; margin: 1px 0; }
@@ -286,6 +292,7 @@ pub const App = struct {
         layered.addOverlay(a.mode_chip.as(gtk.Widget));
         mode_app = a;
         termview.on_mode_changed = modeChanged;
+        termview.on_chord_changed = chordChanged;
         a.toasts.setChild(layered.as(gtk.Widget));
         a.window.setContent(a.toasts.as(gtk.Widget));
 
@@ -981,6 +988,12 @@ pub const App = struct {
     // runs its own actions and asks the client for these.
 
     fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
+        const done = performInner(ctx, action, args, session_id);
+        if (!done) std.log.warn("not performed: {s}", .{action});
+        return done;
+    }
+
+    fn performInner(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
         const h: *Host = @ptrCast(@alignCast(ctx));
         const a = h.app;
         // A key bound on one host acts on that host's sessions.
@@ -1026,7 +1039,128 @@ pub const App = struct {
             a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
             return true;
         }
+        if (std.mem.eql(u8, action, "client.tab.rename")) {
+            const s = a.server orelse return false;
+            const sid = a.session_id orelse return false;
+            const v = s.sessionView(sid) orelse return false;
+            const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return false;
+            a.renameWindowAction(sid, w.id);
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.config.reload")) {
+            const s = a.server orelse return false;
+            s.reloadConfig();
+            a.toast("Config reloaded");
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.sidebar.activity.toggle")) {
+            a.toast("Compy has no activity sidebar yet");
+            return true;
+        }
+        if (std.mem.eql(u8, action, "session.new")) return a.did(newSession);
+        if (std.mem.eql(u8, action, "session.next")) return a.stepSession(1);
+        if (std.mem.eql(u8, action, "session.previous")) return a.stepSession(-1);
+        if (std.mem.eql(u8, action, "session.rename")) {
+            const sid = a.session_id orelse return false;
+            a.renameSessionAction(sid);
+            return true;
+        }
+        if (std.mem.eql(u8, action, "session.switch")) return a.did(switchSession);
         return false;
+    }
+
+    fn toast(a: *App, text: [:0]const u8) void {
+        a.toasts.addToast(adw.Toast.new(text.ptr));
+    }
+
+    /// The next or previous session on this host, in the sidebar's order.
+    fn stepSession(a: *App, delta: i64) bool {
+        const s = a.server orelse return false;
+        const n: i64 = @intCast(s.sessions.items.len);
+        if (n == 0) return false;
+        var i: i64 = 0;
+        for (s.sessions.items, 0..) |session, k| if (eqlOpt(a.session_id, session.id)) {
+            i = @intCast(k);
+        };
+        a.showSession(s.sessions.items[@intCast(@mod(i + delta, n))].id);
+        return true;
+    }
+
+    fn showSession(a: *App, session_id: []const u8) void {
+        a.auto_picked = false;
+        setSlot(&a.session_id, session_id);
+        setSlot(&a.window_id, null);
+        a.showSelected();
+        a.rebuildSidebar();
+        if (a.workspace) |w| w.grabFocus();
+    }
+
+    /// A list of this host's sessions to jump to, filtered by typing.
+    fn switchSession(a: *App) void {
+        const s = a.server orelse return;
+        const dialog = adw.Dialog.new();
+        dialog.setTitle("Switch Session");
+        dialog.setContentWidth(420);
+        dialog.setContentHeight(360);
+        const list = gtk.ListBox.new();
+        list.as(gtk.Widget).addCssClass("navigation-sidebar");
+        list.setActivateOnSingleClick(1);
+        for (s.sessions.items) |session| {
+            const z = gpa.dupeSentinel(u8, if (session.label.len > 0) session.label else session.id, 0) catch continue;
+            defer gpa.free(z);
+            const label = gtk.Label.new(z.ptr);
+            label.setXalign(0);
+            const row = gtk.ListBoxRow.new();
+            row.setChild(label.as(gtk.Widget));
+            const id = gpa.dupeSentinel(u8, session.id, 0) catch continue;
+            gobject.Object.setDataFull(row.as(gobject.Object), "session", id.ptr, &freeData);
+            list.append(row.as(gtk.Widget));
+            if (eqlOpt(a.session_id, session.id)) list.selectRow(row);
+        }
+        const Picked = struct {
+            fn run(_: *gtk.ListBox, row: *gtk.ListBoxRow, d: *adw.Dialog) callconv(.c) void {
+                const app = mode_app orelse return;
+                const id = gobject.Object.getData(row.as(gobject.Object), "session") orelse return;
+                const sid: [*:0]const u8 = @ptrCast(id);
+                app.showSession(std.mem.span(sid));
+                _ = d.close();
+            }
+        };
+        _ = gtk.ListBox.signals.row_activated.connect(list, *adw.Dialog, &Picked.run, dialog, .{});
+        const scroller = gtk.ScrolledWindow.new();
+        scroller.setChild(list.as(gtk.Widget));
+        scroller.as(gtk.Widget).addCssClass("palette");
+        dialog.setChild(scroller.as(gtk.Widget));
+        dialog.present(a.window.as(gtk.Widget));
+        if (list.getSelectedRow()) |row| _ = row.as(gtk.Widget).grabFocus();
+    }
+
+    fn renameSessionAction(a: *App, session_id: []const u8) void {
+        const s = a.server orelse return;
+        var current: []const u8 = "";
+        for (s.sessions.items) |session| if (std.mem.eql(u8, session.id, session_id)) {
+            current = session.label;
+        };
+        const dialog = adw.AlertDialog.new("Rename session", null);
+        const entry = gtk.Entry.new();
+        const z = gpa.dupeSentinel(u8, current, 0) catch return;
+        defer gpa.free(z);
+        entry.as(gtk.Editable).setText(z.ptr);
+        entry.setActivatesDefault(1);
+        dialog.setExtraChild(entry.as(gtk.Widget));
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("rename", "Rename");
+        dialog.setResponseAppearance("rename", .suggested);
+        dialog.setDefaultResponse("rename");
+        const ctx = gpa.create(RenameCtx) catch return;
+        ctx.* = .{
+            .app = a,
+            .entry = entry,
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .window_id = gpa.dupe(u8, "") catch return,
+        };
+        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &renamed, ctx, .{});
+        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
     }
 
     /// Rex's pane actions, which each app performs itself.
@@ -1049,6 +1183,24 @@ pub const App = struct {
             return a.resizeFocused(dir, amount);
         }
         if (eql(u8, name, "balance")) return a.balance();
+        if (eql(u8, name, "focus")) {
+            const ws = a.workspace orelse return false;
+            const next_pane = ws.neighbor(J.str(args, "direction") orelse return false) orelse return true;
+            ws.focus(next_pane);
+            ws.grabFocus();
+            return true;
+        }
+        if (eql(u8, name, "send_key")) {
+            // A key the config passes through, such as the prefix itself pressed twice.
+            const ws = a.workspace orelse return false;
+            const s = a.server orelse return false;
+            const sid = a.session_id orelse return false;
+            const block = ws.focusedBlock() orelse return false;
+            const key = @import("keys.zig").fromName(J.str(args, "key") orelse return false) orelse return false;
+            // Alone, the key has no binding of its own, so the server hands it to the block.
+            s.sendKey(sid, block, key);
+            return true;
+        }
         return false;
     }
 
@@ -1386,7 +1538,9 @@ pub const App = struct {
         }
         if (!std.mem.eql(u8, std.mem.span(response), "rename")) return;
         const label = std.mem.trim(u8, std.mem.span(ctx.entry.as(gtk.Editable).getText()), " ");
-        if (ctx.app.server) |s| s.renameWindow(ctx.session_id, ctx.window_id, label);
+        const s = ctx.app.server orelse return;
+        // No window means the session itself is renamed.
+        if (ctx.window_id.len == 0) s.renameSession(ctx.session_id, label) else s.renameWindow(ctx.session_id, ctx.window_id, label);
     }
 
     // Find.
@@ -1578,6 +1732,24 @@ fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
 }
 
 var mode_app: ?*App = null;
+
+/// Shows the start of a key sequence, such as "ctrl+a …", until it's finished.
+fn chordChanged(pending: []const u8) void {
+    const a = mode_app orelse return;
+    if (pending.len == 0) {
+        modeChanged();
+        return;
+    }
+    var buf: [200]u8 = undefined;
+    const text = std.fmt.bufPrintSentinel(&buf, "{s} …", .{pending}, 0) catch return;
+    a.mode_chip.setText(text.ptr);
+    a.mode_chip.as(gtk.Widget).setVisible(1);
+}
+
+fn freeData(data: ?*anyopaque) callconv(.c) void {
+    const p: [*:0]u8 = @ptrCast(data orelse return);
+    gpa.free(std.mem.span(p));
+}
 
 fn modeChanged() void {
     const a = mode_app orelse return;
@@ -1787,6 +1959,30 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             const x = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             const y = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateCarry(tv.block_id, x, y);
+        } else if (std.mem.eql(u8, cmd, "key")) {
+            // Presses like "ctrl+a", "shift+-" or "left", one after another.
+            var keys_it = std.mem.tokenizeScalar(u8, rest, ' ');
+            while (keys_it.next()) |press| {
+                var mods: u4 = 0;
+                var parts = std.mem.splitScalar(u8, press, '+');
+                var last: []const u8 = "";
+                while (parts.next()) |part| {
+                    if (parts.peek() == null or part.len == 0) {
+                        last = if (part.len == 0) "+" else part;
+                        break;
+                    }
+                    const K = @import("keys.zig");
+                    if (std.mem.eql(u8, part, "ctrl")) mods |= K.ctrl else if (std.mem.eql(u8, part, "shift")) mods |= K.shift else if (std.mem.eql(u8, part, "alt")) mods |= K.alt else if (std.mem.eql(u8, part, "super")) mods |= K.super;
+                }
+                const named = [_]struct { []const u8, c_uint }{ .{ "left", 0xff51 }, .{ "up", 0xff52 }, .{ "right", 0xff53 }, .{ "down", 0xff54 }, .{ "enter", 0xff0d }, .{ "escape", 0xff1b }, .{ "tab", 0xff09 } };
+                var keyval: c_uint = if (last.len == 1) last[0] else 0;
+                for (named) |n| if (std.mem.eql(u8, n[0], last)) {
+                    keyval = n[1];
+                };
+                if (keyval == 0) continue;
+                const target = (a.workspace orelse ws).focusedView() orelse tv;
+                _ = target.handleKey(keyval, mods);
+            }
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
         } else if (std.mem.eql(u8, cmd, "divider")) {
