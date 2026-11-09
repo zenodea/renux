@@ -1,5 +1,5 @@
-//! A terminal pane: draws a block's frame with Pango and Cairo, and sends typing, clicks and
-//! scrolling to the server. It finds its stream by block id each time, since the server may end
+//! A terminal pane: draws a block's frame through GTK's snapshot, row by row, and sends typing,
+//! clicks and scrolling to the server. It finds its stream by block id each time, since the server may end
 //! the stream (when the block closes) while the pane still exists.
 const std = @import("std");
 const glib = @import("glib");
@@ -10,6 +10,7 @@ const gdk = @import("gdk");
 const cairo = @import("cairo");
 const pango = @import("pango");
 const pangocairo = @import("pangocairo");
+const gsk = @import("gsk");
 const keys = @import("keys.zig");
 const term = @import("term.zig");
 const term_mod = term;
@@ -31,7 +32,17 @@ pub const Font = struct {
     bold_italic: *pango.FontDescription,
 
     pub fn init(name: [:0]const u8) Font {
-        return fromDesc(pango.FontDescription.fromString(name.ptr));
+        const desc = pango.FontDescription.fromString(name.ptr);
+        // Nerd Font icons fall back to the symbols that come with Compy, unless the font has them.
+        const fonts = @import("fonts.zig");
+        if (fonts.registered) if (desc.getFamily()) |fam| {
+            const family = std.mem.span(fam);
+            if (std.mem.indexOf(u8, family, "Nerd") == null) {
+                var buf: [256]u8 = undefined;
+                if (std.fmt.bufPrintSentinel(&buf, "{s},{s}", .{ family, fonts.symbols_family }, 0)) |both| desc.setFamily(both.ptr) else |_| {}
+            }
+        };
+        return fromDesc(desc);
     }
 
     /// The same font at `scale` times its size, for a zoomed pane.
@@ -61,6 +72,55 @@ pub const Font = struct {
 };
 
 pub var font: ?Font = null;
+
+/// The terminal's own widget. It draws through GTK's snapshot, so text goes to the GPU's glyph
+/// cache, and each row's drawing is kept until that row changes.
+const Canvas = extern struct {
+    parent_instance: Parent,
+    view: ?*TermView,
+
+    pub const Parent = gtk.Widget;
+    const Self = @This();
+
+    pub const getGObjectType = gobject.ext.defineClass(Self, .{
+        .name = "CompyTerminal",
+        .classInit = &Class.init,
+    });
+
+    pub fn new() *Self {
+        return gobject.ext.newInstance(Self, .{});
+    }
+
+    pub fn as(self: *Self, comptime T: type) *T {
+        return gobject.ext.as(T, self);
+    }
+
+    fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
+        if (self.view) |v| v.snapshotTerm(sn);
+    }
+
+    fn sizeAllocate(self: *Self, width: c_int, height: c_int, _: c_int) callconv(.c) void {
+        if (self.view) |v| v.resized(width, height);
+    }
+
+    pub const Class = extern struct {
+        parent_class: Parent.Class,
+
+        pub const Instance = Self;
+
+        fn init(class: *Class) callconv(.c) void {
+            gtk.Widget.virtual_methods.snapshot.implement(class, &snapshot);
+            gtk.Widget.virtual_methods.size_allocate.implement(class, &sizeAllocate);
+        }
+
+        pub fn as(class: *Class, comptime T: type) *T {
+            return gobject.ext.as(T, class);
+        }
+    };
+};
+
+/// One row's drawing, kept while the row's contents stay the same.
+const RowCache = struct { hash: u64 = 0, node: ?*gsk.RenderNode = null };
 /// The Rex key mode the client is in, such as "resize", or empty. Keys go to its bindings.
 pub var key_mode: [32]u8 = undefined;
 pub var key_mode_len: usize = 0;
@@ -106,7 +166,10 @@ var zooms: std.StringHashMapUnmanaged(f64) = .empty;
 pub var blink_on = true;
 
 pub const TermView = struct {
-    area: *gtk.DrawingArea,
+    canvas: *Canvas,
+    /// Row drawings by position in the view; the last slot is the partly shown row above it.
+    rows_cache: std.ArrayList(RowCache) = .empty,
+    layout: ?*pango.Layout = null,
     server: *Server,
     session_id: []u8,
     block_id: []u8,
@@ -167,20 +230,19 @@ pub const TermView = struct {
 
     pub fn create(server: *Server, session_id: []const u8, block_id: []const u8) !*TermView {
         const v = try gpa.create(TermView);
-        const area = gtk.DrawingArea.new();
+        const canvas = Canvas.new();
         v.* = .{
-            .area = area,
+            .canvas = canvas,
             .server = server,
             .session_id = try gpa.dupe(u8, session_id),
             .block_id = try gpa.dupe(u8, block_id),
         };
-        const w = area.as(gtk.Widget);
+        const w = canvas.as(gtk.Widget);
+        canvas.view = v;
         w.setFocusable(1);
         w.setHexpand(1);
         w.setVexpand(1);
         w.setCursorFromName("text");
-        area.setDrawFunc(&draw, v, null);
-        _ = gtk.DrawingArea.signals.resize.connect(area, *TermView, &onResize, v, .{});
         _ = gtk.Widget.signals.destroy.connect(w, *TermView, &onDestroy, v, .{});
 
         const key = gtk.EventControllerKey.new();
@@ -230,7 +292,7 @@ pub const TermView = struct {
     }
 
     pub fn widget(v: *TermView) *gtk.Widget {
-        return v.area.as(gtk.Widget);
+        return v.canvas.as(gtk.Widget);
     }
 
     fn stream(v: *TermView) ?*Stream {
@@ -308,6 +370,10 @@ pub const TermView = struct {
         if (v.flash_timer != 0) _ = glib.Source.remove(v.flash_timer);
         if (v.drag_idle != 0) _ = glib.Source.remove(v.drag_idle);
         if (v.scroll_tick != 0) v.widget().removeTickCallback(v.scroll_tick);
+        v.canvas.view = null;
+        v.dropRows();
+        v.rows_cache.deinit(gpa);
+        if (v.layout) |l| l.as(gobject.Object).unref();
         if (v.stream()) |st| st.removeListener(v);
         gpa.free(v.session_id);
         gpa.free(v.block_id);
@@ -355,13 +421,13 @@ pub const TermView = struct {
         v.want_cols = 0;
         v.want_rows = 0;
         const w = v.widget();
-        onResize(v.area, w.getWidth(), w.getHeight(), v);
+        v.resized(w.getWidth(), w.getHeight());
         w.queueDraw();
     }
 
     // Size.
 
-    fn onResize(_: *gtk.DrawingArea, width: c_int, height: c_int, v: *TermView) callconv(.c) void {
+    fn resized(v: *TermView, width: c_int, height: c_int) void {
         const cols: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(width)) - 2 * pad) / v.cell_w)));
         const rows: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(height)) - 2 * pad) / v.cell_h)));
         if (cols == v.want_cols and rows == v.want_rows) return;
@@ -404,6 +470,42 @@ pub const TermView = struct {
     }
 
     /// A key press, from the keyboard or the development script.
+    /// Development: draws this pane offscreen at twice its size, as on a Retina screen, and
+    /// reports the average time per frame.
+    pub fn bench(v: *TermView) void {
+        const w = v.widget().getWidth();
+        const h = v.widget().getHeight();
+        v.dropRows();
+        const first = glib.getMonotonicTime();
+        {
+            const sn = gtk.Snapshot.new();
+            v.snapshotTerm(sn);
+            if (sn.freeToNode()) |n| n.unref();
+        }
+        const cold = glib.getMonotonicTime() - first;
+        const started = glib.getMonotonicTime();
+        for (0..50) |_| {
+            const sn = gtk.Snapshot.new();
+            v.snapshotTerm(sn);
+            if (sn.freeToNode()) |n| n.unref();
+        }
+        std.log.info("bench: {d}x{d} pane, {d} us for a new screen, {d} us per unchanged frame", .{ w, h, cold, @divTrunc(glib.getMonotonicTime() - started, 50) });
+    }
+
+    fn snapshotTerm(v: *TermView, sn: *gtk.Snapshot) void {
+        snapshotTermImpl(v, sn);
+    }
+
+    /// Forgets every row's drawing, such as when the font changes.
+    pub fn dropRows(v: *TermView) void {
+        for (v.rows_cache.items) |e| if (e.node) |n| n.unref();
+        v.rows_cache.clearRetainingCapacity();
+    }
+
+    pub fn enablePerfLog() void {
+        perf_log = std.c.getenv("COMPY_PERF") != null;
+    }
+
     pub fn handleKey(v: *TermView, keyval: c_uint, mods: u4) c_int {
         if (keys.isModifier(keyval)) return 0;
         // In a Rex key mode, keys run that mode's bindings instead of typing.
@@ -1119,12 +1221,166 @@ fn setColor(cr: *cairo.Context, color: u32, alpha: f64) void {
     cr.setSourceRgba(r / 255, g / 255, b / 255, alpha);
 }
 
-fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, data: ?*anyopaque) callconv(.c) void {
-    const v: *TermView = @ptrCast(@alignCast(data.?));
-    const w: f64 = @floatFromInt(width);
-    const h: f64 = @floatFromInt(height);
-    const st = v.stream() orelse return drawEmpty(cr, w, h, "Closed");
-    const t = st.term orelse return drawEmpty(cr, w, h, switch (st.state) {
+
+fn rgba(color: u32, alpha: f64) gdk.RGBA {
+    return .{
+        .f_red = @floatCast(@as(f64, @floatFromInt((color >> 16) & 0xff)) / 255),
+        .f_green = @floatCast(@as(f64, @floatFromInt((color >> 8) & 0xff)) / 255),
+        .f_blue = @floatCast(@as(f64, @floatFromInt(color & 0xff)) / 255),
+        .f_alpha = @floatCast(alpha),
+    };
+}
+
+fn fillRect(sn: *gtk.Snapshot, color: u32, alpha: f64, x: f64, y: f64, w: f64, h: f64) void {
+    const c = rgba(color, alpha);
+    sn.appendColor(&c, &.{ .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
+}
+
+/// Places a layout with its baseline at `baseline`. Fallback fonts have other ascents, so
+/// placing by the top would put their glyphs at the wrong height.
+fn layoutOnBaseline(sn: *gtk.Snapshot, layout: *pango.Layout, color: gdk.RGBA, x: f64, baseline: f64) void {
+    const own = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
+    sn.save();
+    sn.translate(&.{ .f_x = @floatCast(x), .f_y = @floatCast(baseline - own) });
+    sn.appendLayout(layout, &color);
+    sn.restore();
+}
+
+var perf_total: i64 = 0;
+var perf_count: i64 = 0;
+var perf_log = false;
+
+const TermDraw = struct {
+    /// The view's own layout, made from the widget's Pango context, the one the cell size was
+    /// measured with, so runs of text advance exactly one cell per character.
+    fn layoutOf(v: *TermView) *pango.Layout {
+        if (v.layout) |l| return l;
+        const l = v.widget().createPangoLayout(null);
+        v.layout = l;
+        return l;
+    }
+};
+
+fn snapshotEmpty(v: *TermView, sn: *gtk.Snapshot, w: f64, h: f64, message: [:0]const u8) void {
+    fillRect(sn, 0x1a1a1f, 1, 0, 0, w, h);
+    const f = font orelse return;
+    const layout = TermDraw.layoutOf(v);
+    layout.setFontDescription(f.regular);
+    layout.setText(message.ptr, @intCast(message.len));
+    var lw: c_int = 0;
+    var lh: c_int = 0;
+    layout.getPixelSize(&lw, &lh);
+    sn.save();
+    sn.translate(&.{ .f_x = @floatCast((w - @as(f64, @floatFromInt(lw))) / 2), .f_y = @floatCast((h - @as(f64, @floatFromInt(lh))) / 2) });
+    sn.appendLayout(layout, &rgba(0xffffff, 0.45));
+    sn.restore();
+}
+
+/// A fingerprint of everything that decides how a row looks.
+fn rowHash(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    const prefs = &@import("settings.zig").current;
+    hasher.update(std.mem.asBytes(&[_]u64{ @intFromPtr(f_font.regular), @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast) }));
+    var x: usize = 0;
+    while (x < f.cols) : (x += 1) {
+        const cl = f.cell(x, y);
+        hasher.update(std.mem.asBytes(&[_]u32{ cl.cp, cl.fg, cl.bg, @as(u16, @bitCast(cl.flags)) }));
+        if (cl.extra_len > 1) for (f.grapheme(cl)) |cp| hasher.update(std.mem.asBytes(&cp));
+    }
+    return hasher.final();
+}
+
+/// The drawing of one row, from the cache when the row hasn't changed.
+fn rowNode(v: *TermView, slot: usize, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
+    while (v.rows_cache.items.len <= slot) v.rows_cache.append(gpa, .{}) catch return null;
+    const entry = &v.rows_cache.items[slot];
+    const hash = rowHash(v, f, y, f_font);
+    if (entry.hash == hash and entry.hash != 0) return entry.node;
+    if (entry.node) |n| n.unref();
+    entry.* = .{ .hash = hash, .node = buildRow(v, f, y, f_font) };
+    return entry.node;
+}
+
+fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
+    const sn = gtk.Snapshot.new();
+    const layout = TermDraw.layoutOf(v);
+    // Backgrounds first, so wide glyphs can overhang into the next cell.
+    var x: usize = 0;
+    while (x < f.cols) : (x += 1) {
+        const cl = f.cell(x, y);
+        const colors = cellColors(f, cl);
+        if (colors.bg == f.bg) continue;
+        const span: f64 = if (cl.flags.wide) 2 else 1;
+        fillRect(sn, colors.bg, 1, pad + @as(f64, @floatFromInt(x)) * v.cell_w, 0, v.cell_w * span + 0.5, v.cell_h);
+    }
+    // Then text, in runs of one style. Anything outside ASCII is placed on its own cell, since
+    // fallback fonts don't keep to the grid.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    x = 0;
+    while (x < f.cols) {
+        const cl = f.cell(x, y);
+        if (cl.cp == 0 or cl.cp == ' ' or cl.flags.spacer or cl.flags.invisible) {
+            x += 1;
+            continue;
+        }
+        if (boxdraw.handles(cl.cp)) {
+            const left = pad + @as(f64, @floatFromInt(x)) * v.cell_w;
+            const cr = sn.appendCairo(&.{ .f_origin = .{ .f_x = @floatCast(left - 1), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(v.cell_w + 2), .f_height = @floatCast(v.cell_h) } });
+            setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
+            boxdraw.draw(cr, cl.cp, left, 0, v.cell_w, v.cell_h);
+            cr.destroy();
+            x += 1;
+            continue;
+        }
+        const start = x;
+        const colors = cellColors(f, cl);
+        text.clearRetainingCapacity();
+        while (x < f.cols) {
+            const n = f.cell(x, y);
+            if (x > start) {
+                if (n.cp >= 0x80 or n.cp == 0 or n.flags.spacer or boxdraw.handles(n.cp) or !sameStyle(cl, n) or cellColors(f, n).fg != colors.fg) break;
+            }
+            appendCell(&text, f, n);
+            x += if (n.flags.wide) 2 else 1;
+            if (n.cp >= 0x80) break;
+        }
+        const left = pad + @as(f64, @floatFromInt(start)) * v.cell_w;
+        layout.setFontDescription(f_font.pick(cl.flags));
+        text.append(gpa, 0) catch break;
+        layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
+        const alpha: f64 = if (cl.flags.faint) 0.6 else 1;
+        layoutOnBaseline(sn, layout, rgba(colors.fg, alpha), left, v.baseline);
+        const run_w = @as(f64, @floatFromInt(x - start)) * v.cell_w;
+        if (cl.flags.underline or cl.flags.link) fillRect(sn, colors.fg, alpha, left, v.baseline + 1.5, run_w, 1);
+        if (cl.flags.strike) fillRect(sn, colors.fg, alpha, left, v.cell_h / 2, run_w, 1);
+    }
+    return sn.freeToNode();
+}
+
+fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
+    const n = node orelse return;
+    sn.save();
+    sn.translate(&.{ .f_x = 0, .f_y = @floatCast(top) });
+    sn.appendNode(n);
+    sn.restore();
+}
+
+pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
+    const started = glib.getMonotonicTime();
+    defer if (perf_log) {
+        perf_total += glib.getMonotonicTime() - started;
+        perf_count += 1;
+        if (perf_count == 60) {
+            std.log.info("draw: {d} us on average", .{@divTrunc(perf_total, 60)});
+            perf_total = 0;
+            perf_count = 0;
+        }
+    };
+    const w: f64 = @floatFromInt(v.widget().getWidth());
+    const h: f64 = @floatFromInt(v.widget().getHeight());
+    const st = v.stream() orelse return snapshotEmpty(v, sn, w, h, "Closed");
+    const t = st.term orelse return snapshotEmpty(v, sn, w, h, switch (st.state) {
         .closed => "This pane has closed",
         else => "Connecting…",
     });
@@ -1132,17 +1388,9 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
 
-    setColor(cr, f.bg, 1);
-    cr.rectangle(0, 0, w, h);
-    cr.fill();
-
-    // The widget's own Pango context, the one the cell size was measured with, so runs of text
-    // advance exactly one cell per character.
-    const layout = v.widget().createPangoLayout(null);
-    defer layout.as(gobject.Object).unref();
-
-    var text: std.ArrayList(u8) = .empty;
-    defer text.deinit(gpa);
+    fillRect(sn, f.bg, 1, 0, 0, w, h);
+    sn.pushClip(&.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
+    defer sn.pop();
 
     // Smooth scrolling: the view sits a fraction of a row lower than the viewport while partway
     // into history, and the row above the viewport fills the gap at the top.
@@ -1160,7 +1408,7 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
     if (frac > 0.01 and rows_up < max_up) {
         t.scroll(-1);
         _ = t.render(true);
-        drawRow(v, cr, t, &t.frame, layout, &text, f_font, 0, pad + frac - v.cell_h);
+        placeRow(sn, rowNode(v, t.frame.rows, &t.frame, 0, f_font), pad + frac - v.cell_h);
         t.scroll(1);
         _ = t.render(true);
     }
@@ -1168,7 +1416,22 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
     while (y < f.rows) : (y += 1) {
         const top = pad + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
         if (top > h) break;
-        drawRow(v, cr, t, f, layout, &text, f_font, y, top);
+        placeRow(sn, rowNode(v, y, f, y, f_font), top);
+    }
+
+    // Search matches, over the text.
+    if (t.finding()) {
+        var found: [128]term.Match = undefined;
+        const n = t.matches(&found);
+        for (found[0..n]) |m| {
+            var row = m.y0;
+            while (row <= m.y1 and row < f.rows) : (row += 1) {
+                const from: usize = if (m.y0 == row) m.x0 else 0;
+                const to: usize = if (m.y1 == row) m.x1 else f.cols -| 1;
+                const top = pad + frac + @as(f64, @floatFromInt(row)) * v.cell_h;
+                fillRect(sn, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.45 else 0.25, pad + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
+            }
+        }
     }
 
     // Input methods place their candidate popup by the cursor.
@@ -1187,7 +1450,6 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
         const cx = pad + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w;
         const cy = pad + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
         const color = if (f.cursor_color != 0) f.cursor_color else f.fg;
-        setColor(cr, color, 1);
         const focused = v.widget().hasFocus() != 0;
         const prefs = &@import("settings.zig").current;
         const style: c_int = switch (prefs.cursor_style) {
@@ -1202,30 +1464,25 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
         if (blinks and !blink_on) {
             // The hidden half of a blink.
         } else if (!focused or style == 3) {
-            cr.setLineWidth(1);
-            cr.rectangle(cx + 0.5, cy + 0.5, cw - 1, v.cell_h - 1);
-            cr.stroke();
+            fillRect(sn, color, 1, cx, cy, cw, 1);
+            fillRect(sn, color, 1, cx, cy + v.cell_h - 1, cw, 1);
+            fillRect(sn, color, 1, cx, cy, 1, v.cell_h);
+            fillRect(sn, color, 1, cx + cw - 1, cy, 1, v.cell_h);
         } else switch (style) {
-            0 => {
-                cr.rectangle(cx, cy, 2, v.cell_h);
-                cr.fill();
-            },
-            2 => {
-                cr.rectangle(cx, cy + v.cell_h - 2, cw, 2);
-                cr.fill();
-            },
+            0 => fillRect(sn, color, 1, cx, cy, 2, v.cell_h),
+            2 => fillRect(sn, color, 1, cx, cy + v.cell_h - 2, cw, 2),
             else => {
-                cr.rectangle(cx, cy, cw, v.cell_h);
-                cr.fill();
+                fillRect(sn, color, 1, cx, cy, cw, v.cell_h);
                 // The character under a block cursor, in the background color.
                 if (under.cp != 0 and under.cp != ' ') {
-                    text.clearRetainingCapacity();
+                    var text: std.ArrayList(u8) = .empty;
+                    defer text.deinit(gpa);
                     appendCell(&text, f, under);
                     text.append(gpa, 0) catch return;
+                    const layout = TermDraw.layoutOf(v);
                     layout.setFontDescription(f_font.pick(under.flags));
                     layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
-                    setColor(cr, f.bg, 1);
-                    showOnBaseline(cr, layout, cx, cy + v.baseline);
+                    layoutOnBaseline(sn, layout, rgba(f.bg, 1), cx, cy + v.baseline);
                 }
             },
         }
@@ -1233,91 +1490,14 @@ fn draw(_: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, da
 
     // The bell's flash, fading over its last moments.
     const flash_left = v.flash_until - glib.getMonotonicTime();
-    if (flash_left > 0) {
-        setColor(cr, f.fg, 0.14 * @as(f64, @floatFromInt(flash_left)) / 180_000);
-        cr.rectangle(0, 0, w, h);
-        cr.fill();
-    }
+    if (flash_left > 0) fillRect(sn, f.fg, 0.14 * @as(f64, @floatFromInt(flash_left)) / 180_000, 0, 0, w, h);
 
     // A thin scroll position marker while looking back through history.
     if (f.scroll_total > f.scroll_len and f.scroll_offset + f.scroll_len < f.scroll_total) {
         const total: f64 = @floatFromInt(f.scroll_total);
         const bar_h = @max(24, h * @as(f64, @floatFromInt(f.scroll_len)) / total);
         const bar_y = (h - bar_h) * @as(f64, @floatFromInt(f.scroll_offset)) / @max(1, total - @as(f64, @floatFromInt(f.scroll_len)));
-        setColor(cr, f.fg, 0.35);
-        cr.rectangle(w - 5, bar_y, 3, bar_h);
-        cr.fill();
-    }
-}
-
-/// Draws one row of the frame with its top at `top`: backgrounds, search matches, then text.
-fn drawRow(v: *TermView, cr: *cairo.Context, t: *term.Term, f: *const term.Frame, layout: *pango.Layout, text: *std.ArrayList(u8), f_font: Font, y: usize, top: f64) void {
-    // Backgrounds first, so wide glyphs can overhang into the next cell.
-    var x: usize = 0;
-    while (x < f.cols) : (x += 1) {
-        const cl = f.cell(x, y);
-        const colors = cellColors(f, cl);
-        if (colors.bg == f.bg) continue;
-        const span: f64 = if (cl.flags.wide) 2 else 1;
-        setColor(cr, colors.bg, 1);
-        cr.rectangle(pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w * span + 0.5, v.cell_h);
-        cr.fill();
-    }
-    // Search matches, under the text.
-    if (t.finding()) {
-        var found: [128]term.Match = undefined;
-        const n = t.matches(&found);
-        for (found[0..n]) |m| {
-            if (m.y0 > y or m.y1 < y) continue;
-            const from: usize = if (m.y0 == y) m.x0 else 0;
-            const to: usize = if (m.y1 == y) m.x1 else f.cols -| 1;
-            setColor(cr, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.75 else 0.35);
-            cr.rectangle(pad + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
-            cr.fill();
-        }
-    }
-    // Then text, in runs of one style. Anything outside ASCII is placed on its own cell,
-    // since fallback fonts don't keep to the grid.
-    x = 0;
-    while (x < f.cols) {
-        const cl = f.cell(x, y);
-        if (cl.cp == 0 or cl.cp == ' ' or cl.flags.spacer or cl.flags.invisible) {
-            x += 1;
-            continue;
-        }
-        if (boxdraw.handles(cl.cp)) {
-            setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
-            boxdraw.draw(cr, cl.cp, pad + @as(f64, @floatFromInt(x)) * v.cell_w, top, v.cell_w, v.cell_h);
-            x += 1;
-            continue;
-        }
-        const start = x;
-        const colors = cellColors(f, cl);
-        text.clearRetainingCapacity();
-        while (x < f.cols) {
-            const n = f.cell(x, y);
-            if (x > start) {
-                if (n.cp >= 0x80 or n.cp == 0 or n.flags.spacer or boxdraw.handles(n.cp) or !sameStyle(cl, n) or cellColors(f, n).fg != colors.fg) break;
-            }
-            appendCell(text, f, n);
-            x += if (n.flags.wide) 2 else 1;
-            if (n.cp >= 0x80) break;
-        }
-        const left = pad + @as(f64, @floatFromInt(start)) * v.cell_w;
-        layout.setFontDescription(f_font.pick(cl.flags));
-        text.append(gpa, 0) catch break;
-        layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
-        setColor(cr, colors.fg, if (cl.flags.faint) 0.6 else 1);
-        showOnBaseline(cr, layout, left, top + v.baseline);
-        const run_w = @as(f64, @floatFromInt(x - start)) * v.cell_w;
-        if (cl.flags.underline or cl.flags.link) {
-            cr.rectangle(left, top + v.baseline + 1.5, run_w, 1);
-            cr.fill();
-        }
-        if (cl.flags.strike) {
-            cr.rectangle(left, top + v.cell_h / 2, run_w, 1);
-            cr.fill();
-        }
+        fillRect(sn, f.fg, 0.35, w - 5, bar_y, 3, bar_h);
     }
 }
 

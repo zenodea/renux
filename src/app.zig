@@ -30,7 +30,7 @@ const css =
     \\.copied-chip.shown { opacity: 1; transform: none; }
     \\.font-preview { padding: 12px 14px; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
-    \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 46px; padding: 0 6px; }
+    \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
     \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
     \\.compy-sidebar list > row { border-radius: 9px; min-height: 34px; padding: 3px 4px 3px 10px; margin: 1px 0; }
     \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
@@ -51,15 +51,23 @@ const css =
     \\.filter-pill { border-radius: 99px; min-height: 30px; padding: 0 8px; }
     \\.filter-pill.filtered { padding: 0 14px 0 9px; background-color: alpha(@window_fg_color, 0.08); }
     \\.window-card.alone { margin-left: 8px; }
-    \\.content .workspace { margin: 8px 8px 8px 0; }
-    \\.content.alone .workspace { margin: 4px 8px 8px 8px; }
-    \\window.no-headers .content.alone .workspace { margin-top: 46px; }
-    \\window.tight .content.alone .workspace { margin: 4px 0 0 0; }
-    \\.window-corner { min-height: 46px; padding: 0 6px 0 12px; }
+    \\.content .workspace { margin: 6px 8px 8px 0; }
+    \\.content.alone .workspace { margin: 6px 8px 8px 8px; }
+    \\window.no-headers .content.alone .workspace { margin-top: 52px; }
+    \\window.tight .content.alone .workspace { margin: 7px 0 0 0; }
+    \\.window-corner { min-height: 52px; padding: 0 6px 0 12px; }
     \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; }
     \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
     \\.pane-card.floating { box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.pane-card.floating.focused { box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 8px 28px alpha(black, 0.45); }
+    \\.layer-card { background-color: @compy_stroke_subtle; border: 1px solid @compy_stroke_subtle; border-radius: 11px; box-shadow: 0 8px 28px alpha(black, 0.45); }
+    \\.layer-card.focused { border-color: alpha(@accent_bg_color, 0.85); }
+    \\.pane-card.joined, .pane-card.joined.floating, .pane-card.joined.focused, .pane-card.joined.floating.focused { border: none; border-radius: 0; box-shadow: none; }
+    \\.pane-card.joined.c-tl { border-top-left-radius: 10px; }
+    \\.pane-card.joined.c-tr { border-top-right-radius: 10px; }
+    \\.pane-card.joined.c-bl { border-bottom-left-radius: 10px; }
+    \\.pane-card.joined.c-br { border-bottom-right-radius: 10px; }
+    \\.pane-card.joined.focused .pane-title .title { color: @accent_color; }
     \\.pane-title { min-height: 38px; padding: 0 6px 0 12px; }
     \\.pane-tools > * { margin-left: 2px; }
     \\.pane-title .title { font-weight: 500; font-size: 0.95em; }
@@ -75,7 +83,7 @@ const css =
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
     \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
-    \\window.tight .content .workspace { margin: 0; }
+    \\window.tight .content .workspace { margin: 7px 0 0 0; }
     \\window.tight .pane-card { border-radius: 0; border: none; box-shadow: none; }
     \\window.tight .workspace { background-color: @compy_stroke_subtle; }
     \\window.tight .pane-card.focused .pane-title .title { color: @accent_color; }
@@ -108,6 +116,8 @@ pub const App = struct {
     split: *adw.OverlaySplitView = undefined,
     card: *gtk.Widget = undefined,
     corner: *gtk.Widget = undefined,
+    corner_tick: c_uint = 0,
+    corner_until: i64 = 0,
     stack: *gtk.Stack = undefined,
     status: *adw.StatusPage = undefined,
     retry_button: *gtk.Button = undefined,
@@ -293,6 +303,7 @@ pub const App = struct {
         mode_app = a;
         termview.on_mode_changed = modeChanged;
         termview.on_chord_changed = chordChanged;
+        termview.TermView.enablePerfLog();
         a.toasts.setChild(layered.as(gtk.Widget));
         a.window.setContent(a.toasts.as(gtk.Widget));
 
@@ -353,13 +364,19 @@ pub const App = struct {
 
     /// Tells the panes how much of their top-left the corner covers.
     fn cornerChanged(a: *App) void {
-        const W = @import("workspace.zig");
-        var min: c_int = 0;
-        var nat: c_int = 0;
-        a.corner.measure(.horizontal, -1, &min, &nat, null, null);
-        // Less the workspace's margin and the title's own padding.
-        W.corner_room = if (a.split.getShowSidebar() != 0) 0 else @max(0, nat - 14);
-        for (a.hosts.items) |h| h.workspace.cornerChanged();
+        @import("workspace.zig").corner_right = @floatFromInt(a.corner.getWidth());
+        if (a.workspace) |ws| ws.cornerChanged();
+        // The sidebar slides in or out over a few frames; the title follows it on each one.
+        a.corner_until = glib.getMonotonicTime() + 600_000;
+        if (a.corner_tick == 0) a.corner_tick = a.window.as(gtk.Widget).addTickCallback(&cornerTick, a, null);
+    }
+
+    fn cornerTick(_: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        if (a.workspace) |ws| ws.cornerChanged();
+        if (glib.getMonotonicTime() < a.corner_until) return 1;
+        a.corner_tick = 0;
+        return 0;
     }
 
     fn connectPage(a: *App) *gtk.Widget {
@@ -1832,7 +1849,6 @@ fn appMenu() *gio.MenuModel {
     const other = gio.Menu.new();
     other.append("Commands…", "app.palette");
     other.append("Find…", "app.find");
-    other.append("Tight layout", "app.tight");
     other.append("New window", "app.new-window");
     other.append("New session", "app.new-session");
     other.append("Settings…", "app.settings");
@@ -1983,6 +1999,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
                 const target = (a.workspace orelse ws).focusedView() orelse tv;
                 _ = target.handleKey(keyval, mods);
             }
+        } else if (std.mem.eql(u8, cmd, "bench")) {
+            tv.bench();
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
         } else if (std.mem.eql(u8, cmd, "divider")) {

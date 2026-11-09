@@ -50,6 +50,11 @@ pub fn build(b: *std.Build) void {
     b.installFile("data/dev.compy.linux.svg", "share/icons/hicolor/scalable/apps/dev.compy.linux.svg");
     b.installFile("data/dev.compy.linux.png", "share/icons/hicolor/512x512/apps/dev.compy.linux.png");
     b.installFile("data/dev.compy.linux.desktop", "share/applications/dev.compy.linux.desktop");
+    // Nerd Font symbols, so icons in prompts show with any font.
+    b.installFile("data/fonts/SymbolsNerdFontMono-Regular.ttf", "share/compy/fonts/SymbolsNerdFontMono-Regular.ttf");
+    b.installFile("data/fonts/SymbolsNerdFont-LICENSE.txt", "share/compy/fonts/SymbolsNerdFont-LICENSE.txt");
+    // Fontconfig takes the bundled font on Linux.
+    if (target.result.os.tag != .macos) mod.linkSystemLibrary("fontconfig", .{});
 
 
     // On a Mac (only used for development) Zig's linker names a library once for every binding
@@ -61,6 +66,9 @@ pub fn build(b: *std.Build) void {
         // For setting the Dock icon through the Objective-C runtime.
         mod.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
         mod.linkFramework("AppKit", .{});
+        // For registering the bundled font with Core Text.
+        mod.linkFramework("CoreText", .{});
+        mod.linkFramework("CoreFoundation", .{});
         // One pkg-config call, so a library shared by several packages appears once.
         const flags = b.run(&.{ "pkg-config", "--libs", "libadwaita-1", "gtk4", "pangocairo", "librsvg-2.0" });
         var it = std.mem.tokenizeAny(u8, flags, " \n");

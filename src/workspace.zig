@@ -27,9 +27,9 @@ pub var gap: f64 = 8;
 pub var tight = false;
 pub var show_headers = true;
 
-/// How far the window's corner (its buttons and the sidebar toggle) reaches into the top-left
-/// pane while the sidebar is hidden; that pane's title starts after it.
-pub var corner_room: f64 = 0;
+/// Where the window's corner (its buttons and the sidebar toggle) ends, in window pixels. A
+/// pane title under it starts after it, which is the case while the sidebar is hidden.
+pub var corner_right: f64 = 0;
 
 pub fn isTightNow() bool {
     return tight;
@@ -61,6 +61,8 @@ const Pane = struct {
     bounds: view.Rect = .{},
     /// Where the pane was when a drag began.
     drag_start: view.Rect = .{},
+    /// One of several panes in a floating layer, drawn joined as one card.
+    joined: bool = false,
     seen: bool = false,
     /// Where the card is drawn now, in pixels, and how fast that is moving toward `rect`.
     cur: [4]f64 = .{ 0, 0, 0, 0 },
@@ -69,6 +71,8 @@ const Pane = struct {
     /// Not placed yet: it starts slightly small and clear, then grows in.
     fresh: bool = true,
 };
+
+const Backdrop = struct { layer_id: []u8, widget: *gtk.Widget };
 
 /// A card whose pane went away, fading out where it was.
 const Leaving = struct { frame: *gtk.Widget, cur: [4]f64, size: [2]f64, alpha: f64, block_id: []u8 };
@@ -119,6 +123,9 @@ pub const Workspace = struct {
     /// The ratio under the pointer while a divider is dragged; the panes follow it here at once.
     local_ratio: f64 = 0,
     float_resizing: bool = false,
+    /// The card behind each floating layer of several panes, which joins them.
+    backdrops: std.ArrayList(Backdrop) = .empty,
+
     // Animation.
     leaving: std.ArrayList(Leaving) = .empty,
     tick: c_uint = 0,
@@ -261,6 +268,7 @@ pub const Workspace = struct {
         if (ws.resizing != null) ws.followDivider();
         ws.tray.as(gtk.Widget).unparent();
         ws.tray.as(gtk.Widget).setParent(ws.root);
+        ws.joinLayers();
         ws.markFocus();
         ws.cornerChanged();
         ws.root.queueAllocate();
@@ -270,7 +278,15 @@ pub const Workspace = struct {
     pub fn cornerChanged(ws: *Workspace) void {
         for (ws.panes.items) |p| {
             const top_left = !p.floating and p.rect.x < 0.001 and p.rect.y < 0.001;
-            p.title_row.setMarginStart(if (top_left) @intFromFloat(corner_room) else 0);
+            var room: f64 = 0;
+            if (top_left) if (p.frame.getRoot()) |root| {
+                var x: f64 = 0;
+                var y: f64 = 0;
+                // The title starts 13 pixels in: the card's border and the title's padding.
+                if (p.frame.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) != 0) room = @max(0, corner_right + 6 - (x + 13));
+            };
+            const want: c_int = @intFromFloat(@round(room));
+            if (p.title_row.getMarginStart() != want) p.title_row.setMarginStart(want);
         }
     }
 
@@ -279,6 +295,11 @@ pub const Workspace = struct {
         ws.panes.clearRetainingCapacity();
         for (ws.leaving.items) |l| ws.gone(l);
         ws.leaving.clearRetainingCapacity();
+        for (ws.backdrops.items) |bd| {
+            bd.widget.unparent();
+            gpa.free(bd.layer_id);
+        }
+        ws.backdrops.clearRetainingCapacity();
         ws.clearDividers();
         ws.clearTray();
     }
@@ -306,7 +327,7 @@ pub const Workspace = struct {
         p.frame.setCanTarget(0);
         gpa.free(p.layer_id);
         // The terminal stays until the card has faded, so it fades with its text.
-        const r = ws.pixels(p.rect);
+        const r = ws.paneRect(&p);
         ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id }) catch {
             p.frame.unparent();
             ws.server.releaseTerminal(p.block_id);
@@ -559,6 +580,15 @@ pub const Workspace = struct {
             const on = if (ws.focused) |f| std.mem.eql(u8, f, p.block_id) else false;
             if (on) p.frame.addCssClass("focused") else p.frame.removeCssClass("focused");
         }
+        for (ws.backdrops.items) |bd| {
+            var on = false;
+            for (ws.panes.items) |p| if (std.mem.eql(u8, p.layer_id, bd.layer_id)) {
+                if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) {
+                    on = true;
+                };
+            };
+            if (on) bd.widget.addCssClass("focused") else bd.widget.removeCssClass("focused");
+        }
     }
 
     pub fn paneOf(ws: *Workspace, block_id: []const u8) ?*Pane {
@@ -662,11 +692,101 @@ pub const Workspace = struct {
     }
 
     fn pixels(ws: *Workspace, r: view.Rect) [4]f64 {
+        return ws.pixelsGap(r, gap);
+    }
+
+    fn pixelsGap(ws: *Workspace, r: view.Rect, g: f64) [4]f64 {
         const w = ws.width();
         const h = ws.height();
-        const x0 = r.x * (w + gap);
-        const y0 = r.y * (h + gap);
-        return .{ x0, y0, (r.x + r.w) * (w + gap) - gap - x0, (r.y + r.h) * (h + gap) - gap - y0 };
+        const x0 = r.x * (w + g);
+        const y0 = r.y * (h + g);
+        return .{ x0, y0, (r.x + r.w) * (w + g) - g - x0, (r.y + r.h) * (h + g) - g - y0 };
+    }
+
+    /// Where a pane's card goes: joined panes keep one line between them.
+    fn paneRect(ws: *Workspace, p: *const Pane) [4]f64 {
+        return ws.pixelsGap(p.rect, if (p.joined) 1 else gap);
+    }
+
+    /// Marks the panes of each floating layer of several as joined, with rounded corners only
+    /// where the layer's are, and puts one card behind them.
+    fn joinLayers(ws: *Workspace) void {
+        var keep: std.ArrayList([]const u8) = .empty;
+        defer keep.deinit(gpa);
+        for (ws.panes.items) |*p| {
+            var n: usize = 0;
+            if (p.floating) for (ws.panes.items) |q| {
+                if (q.floating and std.mem.eql(u8, q.layer_id, p.layer_id)) n += 1;
+            };
+            p.joined = n > 1;
+            const b = p.bounds;
+            const eps = 0.002;
+            const l = @abs(p.rect.x - b.x) < eps;
+            const t = @abs(p.rect.y - b.y) < eps;
+            const r = @abs(p.rect.x + p.rect.w - (b.x + b.w)) < eps;
+            const bt = @abs(p.rect.y + p.rect.h - (b.y + b.h)) < eps;
+            inline for (.{ .{ "joined", p.joined }, .{ "c-tl", p.joined and l and t }, .{ "c-tr", p.joined and r and t }, .{ "c-bl", p.joined and l and bt }, .{ "c-br", p.joined and r and bt } }) |e| {
+                if (e[1]) p.frame.addCssClass(e[0]) else p.frame.removeCssClass(e[0]);
+            }
+            // One resize corner for the whole layer.
+            p.grip.setVisible(@intFromBool(p.floating and (!p.joined or (r and bt))));
+            if (p.joined) {
+                var seen = false;
+                for (keep.items) |k| if (std.mem.eql(u8, k, p.layer_id)) {
+                    seen = true;
+                };
+                if (!seen) keep.append(gpa, p.layer_id) catch {};
+            }
+        }
+        // Drop the cards of layers that are gone or down to one pane, then add the new ones.
+        var i: usize = 0;
+        while (i < ws.backdrops.items.len) {
+            const bd = ws.backdrops.items[i];
+            var wanted = false;
+            for (keep.items) |k| if (std.mem.eql(u8, k, bd.layer_id)) {
+                wanted = true;
+            };
+            if (wanted) {
+                i += 1;
+                continue;
+            }
+            bd.widget.unparent();
+            gpa.free(bd.layer_id);
+            _ = ws.backdrops.orderedRemove(i);
+        }
+        for (keep.items) |k| {
+            var have = false;
+            for (ws.backdrops.items) |bd| if (std.mem.eql(u8, bd.layer_id, k)) {
+                have = true;
+            };
+            if (have) continue;
+            const card = gtk.Box.new(.horizontal, 0);
+            card.as(gtk.Widget).addCssClass("layer-card");
+            card.as(gtk.Widget).setCanTarget(0);
+            card.as(gtk.Widget).setParent(ws.root);
+            ws.backdrops.append(gpa, .{ .layer_id = gpa.dupe(u8, k) catch continue, .widget = card.as(gtk.Widget) }) catch {};
+        }
+        // Each card sits just under its layer's first pane.
+        for (ws.backdrops.items) |bd| {
+            var child = ws.root.getFirstChild();
+            while (child) |c| : (child = c.getNextSibling()) {
+                if (c == bd.widget) continue;
+                const is_layer = for (ws.panes.items) |p| {
+                    if (p.frame == c) break std.mem.eql(u8, p.layer_id, bd.layer_id);
+                } else false;
+                if (is_layer) {
+                    bd.widget.insertBefore(ws.root, c);
+                    break;
+                }
+            }
+            var focused = false;
+            for (ws.panes.items) |p| if (std.mem.eql(u8, p.layer_id, bd.layer_id)) {
+                if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) {
+                    focused = true;
+                };
+            };
+            if (focused) bd.widget.addCssClass("focused") else bd.widget.removeCssClass("focused");
+        }
     }
 
     // Dividers.
@@ -979,7 +1099,7 @@ pub const Workspace = struct {
         var busy = false;
         for (ws.panes.items, 0..) |*p, i| {
             if (ws.pinned(i)) continue;
-            const still = springStep(&p.cur, &p.vel, ws.pixels(p.rect), dt, decay);
+            const still = springStep(&p.cur, &p.vel, ws.paneRect(p), dt, decay);
             p.alpha += (1 - p.alpha) * (1 - @exp(-14 * dt));
             if (p.alpha > 0.995) p.alpha = 1;
             if (!still or p.alpha < 1) busy = true;
@@ -1113,7 +1233,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     ws.last_size = size;
     var moving = false;
     for (ws.panes.items, 0..) |*p, i| {
-        const target = ws.pixels(p.rect);
+        const target = ws.paneRect(p);
         if (p.fresh) {
             p.fresh = false;
             if (ws.snap or resized) {
@@ -1141,6 +1261,26 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     for (ws.leaving.items) |l| {
         l.frame.setOpacity(@max(0, l.alpha));
         allocateAt(l.frame, l.cur, l.size);
+    }
+    // A joined layer's card wraps its panes where they are drawn now, a pixel outside them.
+    for (ws.backdrops.items) |bd| {
+        var lo = [2]f64{ std.math.inf(f64), std.math.inf(f64) };
+        var hi = [2]f64{ -std.math.inf(f64), -std.math.inf(f64) };
+        var alpha: f64 = 0;
+        for (ws.panes.items) |p| if (std.mem.eql(u8, p.layer_id, bd.layer_id)) {
+            lo = .{ @min(lo[0], p.cur[0]), @min(lo[1], p.cur[1]) };
+            hi = .{ @max(hi[0], p.cur[0] + p.cur[2]), @max(hi[1], p.cur[1] + p.cur[3]) };
+            alpha = @max(alpha, p.alpha);
+        };
+        if (lo[0] > hi[0]) continue;
+        bd.widget.setOpacity(alpha);
+        var a: gtk.Allocation = .{
+            .f_x = @intFromFloat(@round(lo[0] - 1)),
+            .f_y = @intFromFloat(@round(lo[1] - 1)),
+            .f_width = @intFromFloat(@max(1, @round(hi[0] - lo[0] + 2))),
+            .f_height = @intFromFloat(@max(1, @round(hi[1] - lo[1] + 2))),
+        };
+        bd.widget.sizeAllocate(&a, -1);
     }
     if (ws.target.getVisible() != 0) allocateAt(ws.target, ws.target_cur, .{ @round(ws.target_cur[2]), @round(ws.target_cur[3]) });
     if (ws.ghost.getVisible() != 0) allocateAt(ws.ghost, .{ ws.pointer[0] - 75, ws.pointer[1] - 46, 150, 92 }, .{ 150, 92 });

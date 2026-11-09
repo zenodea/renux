@@ -403,7 +403,7 @@ fn fontRows(ctx: *Ctx, g: *adw.PreferencesGroup) void {
     var families: [*]*pango.FontFamily = undefined;
     var count: c_int = 0;
     pangocairo.FontMap.getDefault().listFamilies(&families, &count);
-    for (families[0..@intCast(count)]) |f| if (f.isMonospace() != 0) {
+    for (families[0..@intCast(count)]) |f| if (f.isMonospace() != 0 or looksMonospace(std.mem.span(f.getName()))) {
         font_names.append(gpa, gpa.dupeSentinel(u8, std.mem.span(f.getName()), 0) catch continue) catch {};
     };
     glib.free(@ptrCast(families));
@@ -458,6 +458,15 @@ fn fontRows(ctx: *Ctx, g: *adw.PreferencesGroup) void {
 
     _ = gobject.Object.signals.notify.connect(family, *Ctx, &familyChanged, ctx, .{ .detail = "selected" });
     _ = gobject.Object.signals.notify.connect(size, *Ctx, &sizeChanged, ctx, .{ .detail = "value" });
+}
+
+/// Some fixed-width families, Nerd Fonts among them, don't say they're monospace; their names do.
+fn looksMonospace(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "Symbols Nerd") or std.mem.indexOf(u8, name, "Propo") != null) return false;
+    for ([_][]const u8{ "Mono", "Nerd Font", "Code", "Term", "Console", "Courier", "Fixed" }) |hint| {
+        if (std.mem.indexOf(u8, name, hint) != null) return true;
+    }
+    return false;
 }
 
 fn chosenFont(buf: []u8) ?[:0]const u8 {

@@ -6,6 +6,8 @@ pub var io: std.Io = undefined;
 
 pub fn main(init: std.process.Init) !void {
     io = init.io;
+    // Before GTK starts, which is when Pango first lists the fonts.
+    @import("fonts.zig").registerBundled();
     const app = try App.create();
     std.process.exit(@intCast(app.run()));
 }
