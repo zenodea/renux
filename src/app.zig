@@ -2,6 +2,7 @@
 //! right, and a connect page until a server is set.
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const glib = @import("glib");
 const gobject = @import("gobject");
 const gio = @import("gio");
@@ -500,7 +501,8 @@ pub const App = struct {
         } else a.watchAppearance();
         @import("workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
-        installShotHook(a);
+        // The development hooks (screenshots, the test script) are only in `-Ddev` builds.
+        if (build_options.dev) installShotHook(a);
 
         // $COMPY_SERVER, for testing, names hosts to use without saving them, separated by commas.
         if (std.c.getenv("COMPY_SERVER")) |env| {
@@ -512,14 +514,15 @@ pub const App = struct {
         if (a.hosts.items.len == 0) a.stack.setVisibleChildName("connect");
         // When driven by tests, show the window without taking the keyboard from what the person
         // is using; otherwise their typing lands in Compy.
-        if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
+        const dev_shot = build_options.dev and std.c.getenv("COMPY_SHOT") != null;
+        if (dev_shot) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
         // `compy --toggle` finds this process by its ID and signals it.
-        if (std.c.getenv("COMPY_SHOT") == null) {
+        if (!dev_shot) {
             @import("main.zig").claimToggle();
             _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
         }
-        if (std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
-        if (!settings.current.welcomed and std.c.getenv("COMPY_SHOT") == null) @import("manage.zig").openWelcome(a);
+        if (build_options.dev and std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
+        if (!settings.current.welcomed and !dev_shot) @import("manage.zig").openWelcome(a);
         a.applyLook();
         _ = gobject.Object.signals.notify.connect(win, *App, &activeChanged, a, .{ .detail = "is-active" });
     }
@@ -2015,7 +2018,7 @@ pub const App = struct {
             return true;
         }
         if (is(action, "client.version.copy")) {
-            a.window.as(gtk.Widget).getClipboard().setText("Compy for Linux");
+            a.window.as(gtk.Widget).getClipboard().setText("Compy for Linux " ++ build_options.version);
             a.toast("Version copied");
             return true;
         }

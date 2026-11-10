@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.compy.linux</id>
+  <name>Compy</name>
+  <summary>A native client for Rex, the terminal multiplexer</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <developer id="dev.compy">
+    <name>Compy</name>
+  </developer>
+  <description>
+    <p>
+      Compy shows the sessions, tabs and panes of your Rex servers in a native window, with live
+      terminals, floating panes, key bindings from your Rex config and the status of the programs
+      and agents running in each pane.
+    </p>
+    <ul>
+      <li>Several hosts side by side, found over Tailscale or added by address</li>
+      <li>Splits, floating layers, tabs and a command palette, driven by Rex's own actions</li>
+      <li>An activity panel and notifications for agents that need you</li>
+      <li>Themes that follow the host or the system, and your own custom themes</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dev.compy.linux.desktop</launchable>
+  <provides>
+    <binary>compy</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-10"/>
+  </releases>
+</component>

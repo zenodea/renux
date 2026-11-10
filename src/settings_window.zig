@@ -75,7 +75,7 @@ pub fn open(app: *App) void {
     split.setMinSidebarWidth(200);
     d.setChild(split.as(gtk.Widget));
     // Development: COMPY_SETTINGS_PAGE opens on a page by its number.
-    const first: c_int = if (std.c.getenv("COMPY_SETTINGS_PAGE")) |n| std.fmt.parseInt(c_int, std.mem.span(n), 10) catch 0 else 0;
+    const first: c_int = if (!@import("build_options").dev) 0 else if (std.c.getenv("COMPY_SETTINGS_PAGE")) |n| std.fmt.parseInt(c_int, std.mem.span(n), 10) catch 0 else 0;
     ctx.list.selectRow(ctx.list.getRowAtIndex(first));
     d.present(app.window.as(gtk.Widget));
 }

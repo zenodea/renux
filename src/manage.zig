@@ -112,7 +112,7 @@ pub fn setupAgents(a: *App) void {
 pub fn openDiagnostics(a: *App) void {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
-    text.appendSlice(gpa, "Compy for Linux\n") catch return;
+    text.appendSlice(gpa, "Compy for Linux " ++ @import("build_options").version ++ "\n") catch return;
     text.print(gpa, "GTK {d}.{d}.{d}, libadwaita {d}.{d}.{d}\n", .{ gtk.getMajorVersion(), gtk.getMinorVersion(), gtk.getMicroVersion(), adw.getMajorVersion(), adw.getMinorVersion(), adw.getMicroVersion() }) catch return;
     for (a.hosts.items) |h| {
         const s = h.server;

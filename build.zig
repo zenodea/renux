@@ -11,6 +11,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // The version, from build.zig.zon, and whether the development hooks are built in:
+    // `-Ddev` adds the test script, screenshots and the frame log, which releases leave out.
+    const dev = b.option(bool, "dev", "Build in the development hooks (COMPY_SCRIPT, COMPY_SHOT, COMPY_PERF)") orelse false;
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    options.addOption(bool, "dev", dev);
+    mod.addOptions("build_options", options);
+
     const gobject = b.dependency("gobject", .{ .target = target, .optimize = optimize });
     inline for (.{
         .{ "adw", "adw1" },
@@ -51,12 +59,14 @@ pub fn build(b: *std.Build) void {
     b.installFile("data/dev.compy.linux.svg", "share/icons/hicolor/scalable/apps/dev.compy.linux.svg");
     b.installFile("data/dev.compy.linux.png", "share/icons/hicolor/512x512/apps/dev.compy.linux.png");
     b.installFile("data/dev.compy.linux.desktop", "share/applications/dev.compy.linux.desktop");
+    // What software centers show, and the license.
+    b.installFile("data/dev.compy.linux.metainfo.xml", "share/metainfo/dev.compy.linux.metainfo.xml");
+    b.installFile("../LICENSE", "share/licenses/compy/LICENSE");
     // Nerd Font symbols, so icons in prompts show with any font.
     b.installFile("data/fonts/SymbolsNerdFontMono-Regular.ttf", "share/compy/fonts/SymbolsNerdFontMono-Regular.ttf");
     b.installFile("data/fonts/SymbolsNerdFont-LICENSE.txt", "share/compy/fonts/SymbolsNerdFont-LICENSE.txt");
     // Fontconfig takes the bundled font on Linux.
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("fontconfig", .{});
-
 
     // On a Mac (only used for development) Zig's linker names a library once for every binding
     // module that links it, and dyld refuses such a binary. So there the binding modules link

@@ -62,10 +62,17 @@ pub fn main(init: std.process.Init) !void {
     io = init.io;
     // `compy --toggle`, for a desktop shortcut: shows or hides the running Compy.
     var args = init.minimal.args.iterate();
-    while (args.next()) |arg| if (std.mem.eql(u8, arg, "--toggle")) {
-        if (toggleTarget()) |pid| if (std.c.kill(pid, std.posix.SIG.USR1) == 0) return;
-        break;
-    };
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--version")) {
+            const text = "compy " ++ @import("build_options").version ++ "\n";
+            _ = std.c.write(1, text.ptr, text.len);
+            return;
+        }
+        if (std.mem.eql(u8, arg, "--toggle")) {
+            if (toggleTarget()) |pid| if (std.c.kill(pid, std.posix.SIG.USR1) == 0) return;
+            break;
+        }
+    }
     // Before GTK starts, which is when Pango first lists the fonts.
     @import("fonts.zig").registerBundled();
     if (@import("builtin").os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();

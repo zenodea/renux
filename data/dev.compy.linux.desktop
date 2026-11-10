@@ -7,3 +7,5 @@ Icon=dev.compy.linux
 Terminal=false
 Categories=Development;System;TerminalEmulator;
 StartupWMClass=dev.compy.linux
+StartupNotify=true
+Keywords=terminal;rex;multiplexer;shell;ssh;agent;
