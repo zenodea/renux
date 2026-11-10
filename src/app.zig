@@ -208,7 +208,8 @@ pub const App = struct {
 
     pub fn create() !*App {
         const a = try gpa.create(App);
-        a.* = .{ .app = adw.Application.new("dev.compy.linux", .{}) };
+        // Each window is its own process, so a second launch opens a second window.
+        a.* = .{ .app = adw.Application.new("dev.compy.linux", .{ .non_unique = true }) };
         _ = gio.Application.signals.activate.connect(a.app, *App, &activate, a, .{});
         return a;
     }
@@ -750,6 +751,21 @@ pub const App = struct {
     /// Picks a session and window to show when none is picked or the picked one went away.
     fn ensureSelection(a: *App) void {
         const s = a.server orelse return;
+        // A window opened for one tab shows it as soon as its session is known.
+        if (std.c.getenv("COMPY_OPEN")) |env| if (!open_done) {
+            var parts = std.mem.splitScalar(u8, std.mem.span(env), '\t');
+            const url = parts.next() orelse "";
+            const sid = parts.next() orelse "";
+            const wid = parts.next() orelse "";
+            if (std.mem.eql(u8, std.mem.trimEnd(u8, url, "/"), s.url)) if (s.sessionView(sid)) |v| if (v.window(wid) != null) {
+                open_done = true;
+                a.auto_picked = false;
+                setSlot(&a.session_id, sid);
+                setSlot(&a.window_id, wid);
+                a.showSelected();
+                return;
+            };
+        };
         if (a.session_id) |sel| {
             var found = false;
             for (s.sessions.items) |session| if (std.mem.eql(u8, session.id, sel)) {
@@ -1443,8 +1459,19 @@ pub const App = struct {
             a.window.as(gtk.Window).minimize();
             return true;
         }
-        if (is(action, "client.window.new")) {
-            a.toast("Compy uses one window; ctrl+a c opens a new tab in it");
+        if (is(action, "client.window.new")) return a.openAppWindow(null);
+        if (is(action, "client.tab.move_to_new_window")) {
+            const w = a.shownWindow() orelse return false;
+            const sid = a.session_id orelse return false;
+            if (!a.openAppWindow(.{ sid, w.id })) return false;
+            // This window moves on, so the tab shows in the new one only: to another tab of the
+            // session, or another session when it has just this one.
+            const v = (a.server orelse return true).sessionView(sid) orelse return true;
+            if (v.windows.len > 1) {
+                _ = a.stepWindow(1);
+            } else if ((a.server orelse return true).sessions.items.len > 1) {
+                _ = a.stepSession(1);
+            }
             return true;
         }
         if (is(action, "client.settings") or is(action, "client.theme.change") or is(action, "client.shortcuts.edit") or is(action, "client.theme.import")) return a.did(openSettings);
@@ -1605,6 +1632,15 @@ pub const App = struct {
         if (eql(u8, name, "minimize_all_floating")) return a.minimizeAllFloating();
         if (eql(u8, name, "new_floating")) return a.newFloatingPane();
         if (eql(u8, name, "rename")) return a.renamePaneAction();
+        if (eql(u8, name, "move_to_new_tab")) {
+            const t = a.target() orelse return false;
+            t[0].moveToNewWindow(t[1], t[2]);
+            return true;
+        }
+        if (eql(u8, name, "move_to_tab")) {
+            const index = J.int(args, "index") orelse return a.pickTabFor();
+            return a.moveFocusedToTab(index - 1);
+        }
         if (eql(u8, name, "go_to")) {
             @import("goto.zig").openAnything(a);
             return true;
@@ -1745,6 +1781,72 @@ pub const App = struct {
         const tv = ws.focusedView() orelse return false;
         const rows = @as(f64, @floatFromInt(tv.widget().getHeight())) / @max(1, tv.cell_h);
         tv.scrollBy(if (up) -rows / 3 else rows / 3);
+        return true;
+    }
+
+    /// Moves the focused pane beside the first tiled pane of another tab in its session.
+    fn moveFocusedToTab(a: *App, index: i64) bool {
+        const t = a.target() orelse return false;
+        const v = t[0].sessionView(t[1]) orelse return false;
+        if (index < 0 or index >= v.windows.len) return false;
+        const w = v.windows[@intCast(index)];
+        const layer = w.tiled() orelse return false;
+        for (layer.blocks) |b| if (!std.mem.eql(u8, b.id, t[2])) {
+            t[0].moveBlock(t[1], t[2], b.id, true, false);
+            return true;
+        };
+        a.toast("That tab has no tiled pane to move beside");
+        return true;
+    }
+
+    /// Asks which tab to move the focused pane to.
+    fn pickTabFor(a: *App) bool {
+        const t = a.target() orelse return false;
+        const h = a.current orelse return false;
+        const v = t[0].sessionView(t[1]) orelse return false;
+        const dialog = adw.AlertDialog.new("Move pane to tab", null);
+        dialog.addResponse("cancel", "Cancel");
+        var buf: [256]u8 = undefined;
+        var idbuf: [8]u8 = undefined;
+        for (v.windows, 0..) |*w, i| {
+            const title = rowTitle(h, &buf, w, v);
+            const id = std.fmt.bufPrintSentinel(&idbuf, "{d}", .{i}, 0) catch continue;
+            dialog.addResponse(id.ptr, title.ptr);
+        }
+        const Done = struct {
+            fn run(_: *adw.AlertDialog, response: [*:0]const u8, app: *App) callconv(.c) void {
+                const i = std.fmt.parseInt(i64, std.mem.span(response), 10) catch return;
+                _ = app.moveFocusedToTab(i);
+            }
+        };
+        _ = adw.AlertDialog.signals.response.connect(dialog, *App, &Done.run, a, .{});
+        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+        return true;
+    }
+
+    /// Opens another Compy window, a process of its own, optionally showing one tab.
+    fn openAppWindow(a: *App, show: ?struct { []const u8, []const u8 }) bool {
+        var exe: [4096]u8 = undefined;
+        const n = std.process.executablePath(@import("main.zig").io, &exe) catch return false;
+        if (n >= exe.len) return false;
+        exe[n] = 0;
+        var env = glib.getEnviron();
+        if (show) |sw| {
+            const h = a.current orelse return false;
+            const open = std.fmt.allocPrintSentinel(gpa, "{s}\t{s}\t{s}", .{ h.server.url, sw[0], sw[1] }, 0) catch return false;
+            defer gpa.free(open);
+            env = glib.environSetenv(env, "COMPY_OPEN", open.ptr, 1);
+        } else env = glib.environUnsetenv(env, "COMPY_OPEN");
+        defer glib.strfreev(@ptrCast(env));
+        var argv = [_:null]?[*:0]u8{@ptrCast(&exe)};
+        var err: ?*glib.Error = null;
+        if (glib.spawnAsync(null, &argv, env, .{}, null, null, null, &err) == 0) {
+            if (err) |e| {
+                std.log.warn("couldn't open a window: {s}", .{e.f_message orelse ""});
+                e.free();
+            }
+            return false;
+        }
         return true;
     }
 
@@ -2420,6 +2522,8 @@ fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
 }
 
 var mode_app: ?*App = null;
+/// Whether $COMPY_OPEN's tab has been shown.
+var open_done = false;
 /// The font size Compy started with, which client.font.reset goes back to.
 var start_font_size: c_int = 0;
 

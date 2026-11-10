@@ -827,6 +827,37 @@ pub const Server = struct {
         c.fire("client.key", .{ .session_id = session_id, .block_id = block_id, .key = key });
     }
 
+    const Moving = struct {
+        session_id: []u8,
+        block_id: []u8,
+        fn deinit(m: *Moving) void {
+            gpa.free(m.session_id);
+            gpa.free(m.block_id);
+        }
+    };
+
+    /// Moves a pane into a new window of its session. Rex can only place a pane beside another,
+    /// so the new window starts with a shell that goes once the pane is in.
+    pub fn moveToNewWindow(s: *Server, session_id: []const u8, block_id: []const u8) void {
+        s.call("session.new_window", .{ .session_id = session_id, .layout = shell_layout, .focus = true }, Moving, .{
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .block_id = gpa.dupe(u8, block_id) catch return,
+        }, movedWindowMade);
+    }
+
+    fn movedWindowMade(s: *Server, m: *Moving, r: Result) void {
+        switch (r) {
+            .ok => |payload| {
+                const ids = json.array(payload, "block_ids");
+                if (ids.len == 0 or ids[0] != .string) return;
+                const temp = ids[0].string;
+                s.moveBlock(m.session_id, m.block_id, temp, true, false);
+                s.closeBlock(m.session_id, temp);
+            },
+            .err => |e| s.showMessage(e.message),
+        }
+    }
+
     /// Folders (and files, if asked) in a directory as the terminal's shell sees it.
     pub const DirList = struct {
         ctx: *anyopaque,
