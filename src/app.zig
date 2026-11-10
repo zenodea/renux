@@ -468,11 +468,14 @@ pub const App = struct {
         _ = gtk.GestureDrag.signals.drag_end.connect(handle_drag, *App, &sidebarDragEnd, a, .{});
         _ = gtk.Gesture.signals.cancel.connect(handle_drag, *App, &sidebarDragCancel, a, .{});
         handle.as(gtk.Widget).addController(handle_drag.as(gtk.EventController));
-        side_overlay.addOverlay(handle.as(gtk.Widget));
+        // Dragging the sidebar's edge is switched off for now: it didn't feel right yet. The
+        // sidebar keeps its standard width, and everything that fits it to a width stays for
+        // when the drag comes back.
+        if (sidebar_resizable) side_overlay.addOverlay(handle.as(gtk.Widget));
         split.setSidebar(side_overlay.as(gtk.Widget));
         a.side_root = side_overlay.as(gtk.Widget);
         split.setContent(card.as(gtk.Widget));
-        a.setSidebarWidth(settings.current.sidebar_width);
+        a.setSidebarWidth(if (sidebar_resizable) settings.current.sidebar_width else sidebar_standard);
         _ = gobject.Object.signals.notify.connect(split, *App, &sidebarShown, a, .{ .detail = "show-sidebar" });
 
         a.toasts = adw.ToastOverlay.new();
@@ -630,6 +633,10 @@ pub const App = struct {
             a.rebuildSidebar();
         }
     }
+
+    /// Whether the sidebar's edge can be dragged, and the width it has while it can't.
+    const sidebar_resizable = false;
+    const sidebar_standard: f64 = 250;
 
     fn refitSidebar(data: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(data.?));
@@ -1469,7 +1476,7 @@ pub const App = struct {
                 line.append(more.as(gtk.Widget));
                 const row = gtk.ListBoxRow.new();
                 row.setChild(line.as(gtk.Widget));
-                @import("hovercard.zig").attach(row.as(gtk.Widget), item, h.server, session.id, w.id);
+                @import("hovercard.zig").attach(row.as(gtk.Widget), item, more, h.server, session.id, w.id);
                 a.sidebar.append(row.as(gtk.Widget));
                 a.rows.appendAssumeCapacity(.{ .host = h, .session_id = session_id, .window_id = window_id, .label = item, .line = line, .tile = tile });
                 a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = item, .line = line, .tile = tile, .tile_for = tileFor(w) });

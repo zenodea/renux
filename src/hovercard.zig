@@ -22,20 +22,24 @@ const Ctx = struct {
     row: *gtk.Widget,
     /// The row's own name for the window, which heads the card. It lives as long as the row.
     title: *gtk.Label,
+    /// The row's "•••" menu, which the card keeps out of the way of.
+    menu: *gtk.MenuButton,
     server: *Server,
     session_id: []u8,
     window_id: []u8,
 };
 
 /// Makes `row` show the card for one window of a session while the pointer rests on it.
-pub fn attach(row: *gtk.Widget, title: *gtk.Label, server: *Server, session_id: []const u8, window_id: []const u8) void {
+pub fn attach(row: *gtk.Widget, title: *gtk.Label, menu: *gtk.MenuButton, server: *Server, session_id: []const u8, window_id: []const u8) void {
     const ctx = gpa.create(Ctx) catch return;
     const sid = gpa.dupe(u8, session_id) catch return gpa.destroy(ctx);
     const wid = gpa.dupe(u8, window_id) catch {
         gpa.free(sid);
         return gpa.destroy(ctx);
     };
-    ctx.* = .{ .row = row, .title = title, .server = server, .session_id = sid, .window_id = wid };
+    ctx.* = .{ .row = row, .title = title, .menu = menu, .server = server, .session_id = sid, .window_id = wid };
+    // The row's menu and the card never show together: opening the menu puts the card away.
+    _ = @import("gobject").Object.signals.notify.connect(menu, *Ctx, &menuToggled, ctx, .{ .detail = "active" });
     const motion = gtk.EventControllerMotion.new();
     _ = gtk.EventControllerMotion.signals.enter.connect(motion, *Ctx, &entered, ctx, .{});
     _ = gtk.EventControllerMotion.signals.leave.connect(motion, *Ctx, &left, ctx, .{});
@@ -61,6 +65,12 @@ fn entered(_: *gtk.EventControllerMotion, _: f64, _: f64, ctx: *Ctx) callconv(.c
     cancel();
     waiting = ctx;
     timer = glib.timeoutAdd(delay_ms, &fire, null);
+}
+
+fn menuToggled(_: *gtk.MenuButton, _: *@import("gobject").ParamSpec, ctx: *Ctx) callconv(.c) void {
+    if (ctx.menu.getActive() == 0) return;
+    if (waiting == ctx) cancel();
+    hide(ctx.row);
 }
 
 fn left(_: *gtk.EventControllerMotion, ctx: *Ctx) callconv(.c) void {
@@ -99,6 +109,7 @@ fn fire(_: ?*anyopaque) callconv(.c) c_int {
 
 fn show(ctx: *Ctx) void {
     if (!ctx.server.isLive()) return;
+    if (ctx.menu.getActive() != 0) return;
     const v = ctx.server.sessionView(ctx.session_id) orelse return;
     const w = v.window(ctx.window_id) orelse return;
     const c = card orelse blk: {
