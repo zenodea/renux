@@ -50,6 +50,9 @@ const Pane = struct {
     term: *TermView,
     grip: *gtk.Widget,
     title_row: *gtk.Widget,
+    /// The title row's Float or dock and Minimize buttons, greyed while they can do nothing.
+    float_button: ?*gtk.Widget = null,
+    minimize_button: ?*gtk.Widget = null,
     /// "Copied", shown for a moment after the pane's selection reaches the clipboard.
     copied: *gtk.Widget,
     copied_timer: c_uint = 0,
@@ -280,6 +283,7 @@ pub const Workspace = struct {
         if (ws.resizing != null) ws.followDivider();
         ws.joinLayers();
         ws.markFocus();
+        ws.markTools();
         ws.cornerChanged();
         ws.root.queueAllocate();
     }
@@ -542,6 +546,8 @@ pub const Workspace = struct {
         row.append(label.as(gtk.Widget));
         const tools = gtk.Box.new(.horizontal, 0);
         tools.as(gtk.Widget).addCssClass("pane-tools");
+        var float_button: ?*gtk.Widget = null;
+        var minimize_button: ?*gtk.Widget = null;
         const target = gpa.dupeSentinel(u8, block_id, 0) catch return;
         defer gpa.free(target);
         inline for (.{
@@ -555,6 +561,8 @@ pub const Workspace = struct {
             const button = icons.button(b[0], b[1], b[2]);
             button.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(target.ptr));
             tools.append(button.as(gtk.Widget));
+            if (b[0] == icons.Kind.float) float_button = button.as(gtk.Widget);
+            if (b[0] == icons.Kind.minimize) minimize_button = button.as(gtk.Widget);
         }
         row.append(tools.as(gtk.Widget));
         const PaneDrag = struct {
@@ -656,6 +664,8 @@ pub const Workspace = struct {
             .term = tv,
             .grip = gw,
             .title_row = row.as(gtk.Widget),
+            .float_button = float_button,
+            .minimize_button = minimize_button,
             .copied = cw,
             .rect = rect,
             .floating = floating,
@@ -742,6 +752,47 @@ pub const Workspace = struct {
         for (ws.backdrops.items) |bd| {
             const on = if (layer) |l| std.mem.eql(u8, l, bd.layer_id) else false;
             if (on) bd.widget.addCssClass("focused") else bd.widget.removeCssClass("focused");
+        }
+    }
+
+    /// How many panes sit in the window's tiles, floating ones aside.
+    pub fn tiledCount(ws: *Workspace) usize {
+        var n: usize = 0;
+        for (ws.panes.items) |p| {
+            if (!p.floating) n += 1;
+        }
+        return n;
+    }
+
+    /// Whether a tiled pane may float (or float on its way to the tray). The window's last
+    /// tiled pane stays: Rex can only put a floating pane back beside a tiled one, so floating
+    /// the last would leave nothing to dock to, and it can't be minimized either.
+    pub fn canFloat(ws: *Workspace, p: *const Pane) bool {
+        return !p.floating and ws.tiledCount() > 1;
+    }
+
+    /// Whether a floating pane's layer may go to the tray: Rex keeps the window's last visible
+    /// panes on screen, so a layer holding all of them stays.
+    pub fn canMinimize(ws: *Workspace, p: *const Pane) bool {
+        if (!p.floating) return ws.canFloat(p);
+        for (ws.panes.items) |other| {
+            if (!std.mem.eql(u8, other.layer_id, p.layer_id)) return true;
+        }
+        return false;
+    }
+
+    /// Greys the title buttons that can do nothing for their pane right now, and names what
+    /// the float button will do.
+    fn markTools(ws: *Workspace) void {
+        const tiled = ws.tiledCount();
+        for (ws.panes.items) |*p| {
+            if (p.float_button) |b| {
+                // A floating pane always has somewhere to go: beside a tiled one, or, with
+                // none, between filling the window and floating in it.
+                b.setSensitive(@intFromBool(p.floating or ws.canFloat(p)));
+                b.setTooltipText(if (!p.floating) (if (tiled > 1) "Float" else "The window's last tiled pane stays in place") else if (tiled > 0) "Dock" else "Fill the window or float");
+            }
+            if (p.minimize_button) |b| b.setSensitive(@intFromBool(ws.canMinimize(p)));
         }
     }
 

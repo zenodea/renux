@@ -2687,18 +2687,27 @@ pub const App = struct {
         t[0].zoomBlock(t[1], t[2], w.zoomed_block_id == null);
     }
 
+    /// Where a pane goes when it floats: the middle of the window.
+    const float_bounds: view.Rect = .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 };
+
     /// Floats a tiled pane in the middle of the window, or puts a floating one back in the tiles.
     fn floatPane(a: *App) void {
         const t = a.target() orelse return;
         const ws = a.workspace orelse return;
         const p = ws.paneOf(t[2]) orelse return;
-        if (!p.floating) return t[0].floatBlock(t[1], t[2], .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
+        if (!p.floating) {
+            // The window's last tiled pane stays where it is; see `Workspace.canFloat`.
+            if (ws.canFloat(p)) t[0].floatBlock(t[1], t[2], float_bounds);
+            return;
+        }
         // Back beside a tiled pane, at the right of the layout.
         for (ws.panes.items) |other| if (!other.floating) {
             return t[0].moveBlock(t[1], t[2], other.block_id, true, false);
         };
-        // Rex can only dock beside a tiled pane, so with none the layer fills the window instead.
-        t[0].resizeLayer(t[1], p.layer_id, .{ .x = 0, .y = 0, .w = 1, .h = 1 });
+        // Rex can only dock beside a tiled pane. With none left (the tiled ones closed), the
+        // layer fills the window instead, and the same button floats it again.
+        const filling = p.bounds.x < 0.01 and p.bounds.y < 0.01 and p.bounds.w > 0.99 and p.bounds.h > 0.99;
+        t[0].resizeLayer(t[1], p.layer_id, if (filling) float_bounds else .{ .x = 0, .y = 0, .w = 1, .h = 1 });
     }
 
     /// Minimizes a pane to the tray. A tiled pane floats first, then goes once the server says so.
@@ -2706,9 +2715,11 @@ pub const App = struct {
         const t = a.target() orelse return;
         const ws = a.workspace orelse return;
         const p = ws.paneOf(t[2]) orelse return;
+        // Rex keeps a window's last visible panes on screen.
+        if (!ws.canMinimize(p)) return;
         if (p.floating) return t[0].setLayerMinimized(t[1], p.layer_id, true);
         setSlot(&a.minimize_next, t[2]);
-        t[0].floatBlock(t[1], t[2], .{ .x = 0.2, .y = 0.15, .w = 0.6, .h = 0.65 });
+        t[0].floatBlock(t[1], t[2], float_bounds);
     }
 
     /// Finishes a minimize that had to float the pane first.
