@@ -105,6 +105,11 @@ pub const Activity = struct {
         if (!act.shown()) act.toggle() else act.rebuild();
     }
 
+    /// A host is gone: its rows go at once, since each holds a pointer to it.
+    pub fn hostRemoved(act: *Activity) void {
+        act.rebuild();
+    }
+
     /// Something a program reports changed; the panel catches up on the next idle moment.
     pub fn changed(act: *Activity) void {
         if (!act.shown() or act.rebuild_source != 0) return;
@@ -216,14 +221,10 @@ pub const Activity = struct {
         const text = gtk.Box.new(.vertical, 1);
         text.as(gtk.Widget).setHexpand(1);
         var tbuf: [256]u8 = undefined;
-        var fbuf: [256]u8 = undefined;
+        var zbuf: [257]u8 = undefined;
         // The app that reported, such as claude, says more than the shell it runs in.
-        const prog = (if (info.has_status) info.status_app else null) orelse info.program orelse "shell";
-        const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
-        const title = if (info.folder) |f|
-            std.fmt.bufPrintSentinel(&tbuf, "{s} {s}", .{ name, programs.shortFolder(&fbuf, f) }, 0) catch "program"
-        else
-            std.fmt.bufPrintSentinel(&tbuf, "{s}", .{name}, 0) catch "program";
+        const prog = (if (info.has_status) info.status_app else null) orelse info.program;
+        const title = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{programs.displayTitle(&tbuf, prog, info.folder)}, 0) catch "program";
         const top = gtk.Label.new(title.ptr);
         top.setXalign(0);
         top.setEllipsize(.end);
@@ -279,6 +280,8 @@ pub const Activity = struct {
     fn rowActivated(_: *gtk.ListBox, row: *gtk.ListBoxRow, act: *Activity) callconv(.c) void {
         const data = gobject.Object.getData(row.as(gobject.Object), "target") orelse return;
         const t: *Target = @ptrCast(@alignCast(data));
+        // Only a host that is still here; a row can outlive its host by a moment.
+        if (std.mem.indexOfScalar(*app_mod.Host, act.app.hosts.items, t.host) == null) return;
         act.app.jumpTo(t.host, t.session_id, t.window_id, t.block_id);
     }
 

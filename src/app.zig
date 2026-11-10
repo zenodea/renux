@@ -614,8 +614,19 @@ pub const App = struct {
             break;
         };
         if (a.filter == h) a.filter = null;
-        h.workspace.clear();
-        a.stack.remove(h.workspace.root);
+        // Nothing may still point at the host once it is freed: the activity panel's rows and
+        // any open palette, Go to Anything or folder browser let go of it first.
+        a.activity.hostRemoved();
+        @import("palette.zig").serverGone(h.server);
+        @import("goto.zig").hostRemoved(h.server);
+        // The workspace goes while its widget and the server are still there, since freeing it
+        // releases its terminals; the widget leaves the stack after.
+        // Calls still out fail as the server goes; none of them may reach the freed workspace.
+        h.server.observer = null;
+        h.server.performer = null;
+        const root = h.workspace.root;
+        h.workspace.destroy();
+        a.stack.remove(root);
         h.server.destroy();
         if (a.current == h) {
             a.current = null;
