@@ -651,12 +651,7 @@ pub const App = struct {
     }
 
     fn connectClicked(entry: *gtk.Entry, a: *App) callconv(.c) void {
-        const raw = std.mem.trim(u8, std.mem.span(entry.as(gtk.Editable).getText()), " ");
-        if (raw.len == 0) return;
-        const url = if (std.mem.indexOf(u8, raw, "://") == null)
-            std.fmt.allocPrint(gpa, "http://{s}", .{raw}) catch return
-        else
-            gpa.dupe(u8, raw) catch return;
+        const url = normalizeUrl(std.mem.span(entry.as(gtk.Editable).getText())) orelse return;
         defer gpa.free(url);
         settings.addHost(settings.labelFor(url), url);
         if (a.addHost(settings.labelFor(url), url)) |h| a.selectHost(h);
@@ -969,8 +964,8 @@ pub const App = struct {
         const s = a.server orelse return;
         const ws = a.workspace orelse return;
         const sid = a.session_id orelse return;
-        const v = s.sessionView(sid) orelse return;
-        const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow();
+        if (s.sessionView(sid) == null) return;
+        const w = a.shownWindow();
         ws.show(sid, w);
         a.selectSidebarRow();
         a.rebuildTabs();
@@ -1056,7 +1051,7 @@ pub const App = struct {
         strip.setVisible(1);
         const host = h.?;
         const session_view = v.?;
-        const shown = (if (a.window_id) |wid| session_view.window(wid) else null) orelse session_view.activeWindow();
+        const shown = a.shownWindow();
         // The strip as a whole: the host and session its buttons name, and how wide tabs are.
         const tabs_key = hashParts(&.{ host.page, sid.?, if (settings.current.tab_fill) "fill" else "fixed" });
         var same = tabs_key == a.tabs_key and a.tab_marks.items.len == session_view.windows.len;
@@ -1132,7 +1127,7 @@ pub const App = struct {
         for (w.layers) |l| for (l.blocks) |b| {
             const info = h.server.blockInfo(b.id) orelse continue;
             const prog = (if (info.has_status) info.status_app else null) orelse info.program orelse continue;
-            const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
+            const name = programName(prog);
             const sep: []const u8 = if (n > 0) " · " else "";
             if (n + sep.len + name.len + 1 >= buf.len) break;
             @memcpy(buf[n .. n + sep.len], sep);
@@ -1522,12 +1517,7 @@ pub const App = struct {
     fn hostAdded(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *AddHostCtx) callconv(.c) void {
         defer gpa.destroy(ctx);
         if (!std.mem.eql(u8, std.mem.span(response), "add")) return;
-        const raw = std.mem.trim(u8, std.mem.span(ctx.url.as(gtk.Editable).getText()), " ");
-        if (raw.len == 0) return;
-        const url = if (std.mem.indexOf(u8, raw, "://") == null)
-            std.fmt.allocPrint(gpa, "http://{s}", .{raw}) catch return
-        else
-            gpa.dupe(u8, raw) catch return;
+        const url = normalizeUrl(std.mem.span(ctx.url.as(gtk.Editable).getText())) orelse return;
         defer gpa.free(url);
         const typed = std.mem.trim(u8, std.mem.span(ctx.name.as(gtk.Editable).getText()), " ");
         const label = if (typed.len > 0) typed else settings.labelFor(url);
@@ -1546,7 +1536,7 @@ pub const App = struct {
         const s = h.server;
         if (w.focused_block_id) |fb| if (s.blockInfo(fb)) |info| if (info.program) |prog| {
             var fbuf: [256]u8 = undefined;
-            const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
+            const name = programName(prog);
             if (info.folder) |f| return std.fmt.bufPrintSentinel(buf, "{s} {s}", .{ name, @import("programs.zig").shortFolder(&fbuf, f) }, 0) catch "Window";
             return std.fmt.bufPrintSentinel(buf, "{s}", .{name}, 0) catch "Window";
         };
@@ -1623,11 +1613,9 @@ pub const App = struct {
 
     /// The sidebar row of the shown window, or of its session when tabs hold the windows.
     fn shownRow(a: *App) ?*gtk.ListBoxRow {
-        const s = a.server orelse return null;
         const here = a.current orelse return null;
         const sid = a.session_id orelse return null;
-        const v = s.sessionView(sid) orelse return null;
-        const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return null;
+        const shown = a.shownWindow() orelse return null;
         for (a.rows.items, 0..) |r, i| if (r) |row| {
             const matches = if (row.window_id.len == 0) true else std.mem.eql(u8, row.window_id, shown.id);
             if (row.host == here and std.mem.eql(u8, row.session_id, sid) and matches) return a.sidebar.getRowAtIndex(@intCast(i));
@@ -1894,10 +1882,8 @@ pub const App = struct {
             return true;
         }
         if (std.mem.eql(u8, action, "client.tab.rename")) {
-            const s = a.server orelse return false;
             const sid = a.session_id orelse return false;
-            const v = s.sessionView(sid) orelse return false;
-            const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return false;
+            const w = a.shownWindow() orelse return false;
             a.renameWindowAction(sid, w.id);
             return true;
         }
@@ -2509,8 +2495,7 @@ pub const App = struct {
     fn balance(a: *App) bool {
         const s = a.server orelse return false;
         const sid = a.session_id orelse return false;
-        const v = s.sessionView(sid) orelse return false;
-        const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return false;
+        const w = a.shownWindow() orelse return false;
         const root = (w.tiled() orelse return false).layout orelse return false;
         balanceNode(s, sid, root);
         return true;
@@ -3598,6 +3583,20 @@ fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0
         return std.fmt.bufPrintSentinel(buf, "Window {d}", .{i + 1}, 0) catch "Window";
     };
     return "Window";
+}
+
+/// A program as rows and tabs name it: "-zsh" and "node/server.js" are "zsh" and "node".
+fn programName(program: []const u8) []const u8 {
+    return std.mem.trimStart(u8, program[0 .. std.mem.indexOfScalar(u8, program, '/') orelse program.len], "-");
+}
+
+/// A typed server address as a URL, with http:// when it names no scheme, or null when nothing
+/// was typed. The caller frees it.
+fn normalizeUrl(typed: []const u8) ?[]u8 {
+    const raw = std.mem.trim(u8, typed, " ");
+    if (raw.len == 0) return null;
+    if (std.mem.indexOf(u8, raw, "://") == null) return std.fmt.allocPrint(gpa, "http://{s}", .{raw}) catch null;
+    return gpa.dupe(u8, raw) catch null;
 }
 
 fn eqlOpt(a: ?[]const u8, b: []const u8) bool {
