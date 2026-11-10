@@ -35,6 +35,13 @@ const css =
     \\.copied-chip { opacity: 0; transform: translateY(-6px) scale(0.92); transition: opacity 180ms ease-out, transform 240ms cubic-bezier(0.2, 0.9, 0.3, 1.2); background-color: @accent_bg_color; color: @accent_fg_color; border-radius: 99px; padding: 3px 11px; font-size: 0.85em; font-weight: 600; box-shadow: 0 3px 12px alpha(black, 0.3); }
     \\.copied-chip.shown { opacity: 1; transform: none; }
     \\.font-preview { padding: 12px 14px; }
+    \\.hover-card > contents { padding: 12px 14px; border-radius: 13px; min-width: 250px; }
+    \\.hover-title { font-weight: 700; }
+    \\.hover-name { font-weight: 500; }
+    \\.hover-dim { color: @compy_secondary; font-size: 0.9em; }
+    \\.hover-chip { font-size: 0.8em; font-weight: 600; padding: 1px 8px; border-radius: 7px; background-color: alpha(@window_fg_color, 0.1); color: @compy_secondary; }
+    \\.hover-chip.blocked { color: @warning_color; }
+    \\.hover-chip.failed { color: @error_color; }
     \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
@@ -1436,6 +1443,7 @@ pub const App = struct {
                 line.append(more.as(gtk.Widget));
                 const row = gtk.ListBoxRow.new();
                 row.setChild(line.as(gtk.Widget));
+                @import("hovercard.zig").attach(row.as(gtk.Widget), item, h.server, session.id, w.id);
                 a.sidebar.append(row.as(gtk.Widget));
                 a.rows.appendAssumeCapacity(.{ .host = h, .session_id = session_id, .window_id = window_id, .label = item, .line = line, .tile = tile });
                 a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = item, .line = line, .tile = tile, .tile_for = tileFor(w) });
@@ -1667,15 +1675,20 @@ pub const App = struct {
         if (active and shown) return;
         const text = gpa.dupeSentinel(u8, s.alert_text.items, 0) catch return;
         defer gpa.free(text);
-        const n = gio.Notification.new("Compy");
-        n.setBody(text.ptr);
-        var tbuf: [512]u8 = undefined;
-        const where = std.fmt.bufPrintSentinel(&tbuf, "{s} {s} {s}", .{ h.page, s.alert_session.items, s.alert_block.items }, 0) catch return;
-        n.setDefaultActionAndTargetValue("app.show-block", glib.Variant.newString(where.ptr));
-        var ibuf: [128]u8 = undefined;
-        const id = std.fmt.bufPrintSentinel(&ibuf, "block-{s}", .{s.alert_block.items}, 0) catch return;
-        a.app.as(gio.Application).sendNotification(id.ptr, n);
-        n.as(gobject.Object).unref();
+        // GLib's notifications go over the desktop's message bus, which a Mac doesn't have:
+        // there the call only logs errors and shows nothing, so the Mac build keeps to the
+        // sound, the Dock badge and the activity panel.
+        if (builtin.os.tag != .macos) {
+            const n = gio.Notification.new("Compy");
+            defer n.as(gobject.Object).unref();
+            n.setBody(text.ptr);
+            var tbuf: [512]u8 = undefined;
+            const where = std.fmt.bufPrintSentinel(&tbuf, "{s} {s} {s}", .{ h.page, s.alert_session.items, s.alert_block.items }, 0) catch return;
+            n.setDefaultActionAndTargetValue("app.show-block", glib.Variant.newString(where.ptr));
+            var ibuf: [128]u8 = undefined;
+            const id = std.fmt.bufPrintSentinel(&ibuf, "block-{s}", .{s.alert_block.items}, 0) catch return;
+            a.app.as(gio.Application).sendNotification(id.ptr, n);
+        }
         if (st.sound) gdk.Display.getDefault().?.beep();
     }
 
@@ -3756,6 +3769,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "sidebar")) {
             if (a.split.getSidebar()) |sb| std.log.info("sidebar was {d} wide (asked {d:.0}, min {d:.0}, max {d:.0}, room {d}, header {d})", .{ sb.getWidth(), a.split.getMaxSidebarWidth(), a.split.getMinSidebarWidth(), a.split.getMaxSidebarWidth(), a.header_room.getWidth(), a.side_header.getWidth() });
             a.setSidebarWidth(std.fmt.parseFloat(f64, it.next() orelse "250") catch 250);
+        } else if (std.mem.eql(u8, cmd, "hovercard")) {
+            @import("hovercard.zig").showLast();
         } else if (std.mem.eql(u8, cmd, "line")) {
             ws.simulateLine();
         } else if (std.mem.eql(u8, cmd, "divider")) {
@@ -3930,5 +3945,19 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
     const texture = renderer.renderTexture(node, null);
     defer texture.as(gobject.Object).unref();
     _ = texture.saveToPng(path);
+    // A hover card is a window of its own, so it gets a picture of its own beside the first.
+    if (@import("hovercard.zig").visibleCard()) |cw| {
+        const cp = gtk.WidgetPaintable.new(cw);
+        defer cp.as(gobject.Object).unref();
+        const cs = gtk.Snapshot.new();
+        cp.as(gdk.Paintable).snapshot(cs.as(gdk.Snapshot), @floatFromInt(cw.getWidth()), @floatFromInt(cw.getHeight()));
+        if (cs.freeToNode()) |cn| {
+            defer cn.unref();
+            const ct = renderer.renderTexture(cn, null);
+            defer ct.as(gobject.Object).unref();
+            var pbuf: [1024]u8 = undefined;
+            if (std.fmt.bufPrintSentinel(&pbuf, "{s}.card.png", .{std.mem.span(path)}, 0)) |card_path| _ = ct.saveToPng(card_path.ptr) else |_| {}
+        }
+    }
     return 1;
 }
