@@ -54,7 +54,6 @@ const css =
     \\.board-column-head { padding: 0 6px 2px 4px; }
     \\.board-column-title { font-weight: 700; }
     \\.board-count { color: @compy_secondary; font-size: 0.9em; }
-    \\.board-idle-mark { min-width: 28px; min-height: 28px; margin: 1px; border-radius: 99px; background-color: alpha(@window_fg_color, 0.16); }
     \\.board-empty { color: @compy_secondary; font-size: 0.9em; margin-top: 18px; }
     \\.board-card { background-color: @view_bg_color; border-radius: 11px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @compy_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.05); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
@@ -113,6 +112,7 @@ const css =
     \\.pane-card.focused .pane-tools, .pane-card:hover .pane-tools { opacity: 1; }
     \\.icon-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; opacity: 0.5; }
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
+    \\.icon-button:checked { opacity: 1; background-color: alpha(@window_fg_color, 0.12); }
     \\.find-bar { margin: 6px 12px 14px 12px; padding: 4px 5px 4px 6px; min-width: 230px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
     \\.find-bar entry { background: none; box-shadow: none; outline: none; border: none; min-height: 28px; padding-left: 6px; }
     \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
@@ -279,6 +279,7 @@ pub const App = struct {
     /// Session rows show only their menu, which then holds what their other buttons did.
     narrow_rows: bool = false,
     board: *@import("../ui/board.zig").Board = undefined,
+    board_button: *gtk.ToggleButton = undefined,
     config_timer: c_uint = 0,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
@@ -432,7 +433,16 @@ pub const App = struct {
         a.filter_menu = gio.Menu.new();
         a.filter_button.setMenuModel(a.filter_menu.as(gio.MenuModel));
         footer.append(a.filter_button.as(gtk.Widget));
-        footer.append(icons.button(.board, "Agent board", "app.board").as(gtk.Widget));
+        // A button that stays lit while the board is open: pressed again, or with another
+        // pane picked in the sidebar, it goes out and the panes are back.
+        a.board_button = gtk.ToggleButton.new();
+        a.board_button.as(gtk.Button).setChild(icons.image(.board, 16));
+        a.board_button.as(gtk.Widget).setTooltipText("Agent board");
+        a.board_button.as(gtk.Widget).addCssClass("icon-button");
+        a.board_button.as(gtk.Widget).addCssClass("flat");
+        a.board_button.as(gtk.Widget).setValign(.center);
+        _ = gtk.ToggleButton.signals.toggled.connect(a.board_button, *App, &boardToggled, a, .{});
+        footer.append(a.board_button.as(gtk.Widget));
         const spacer = gtk.Box.new(.horizontal, 0);
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
@@ -736,8 +746,16 @@ pub const App = struct {
 
     /// Shows the agent board over the panes, or goes back to them.
     pub fn showBoard(a: *App, on: bool) void {
+        if (on == a.board.shown()) return;
         a.board.show(on);
+        // The button shows which it is; setting it runs `boardToggled`, which finds nothing
+        // left to do.
+        a.board_button.setActive(@intFromBool(on));
         if (!on) if (a.workspace) |ws| ws.grabFocus();
+    }
+
+    fn boardToggled(button: *gtk.ToggleButton, a: *App) callconv(.c) void {
+        a.showBoard(button.getActive() != 0);
     }
 
     fn fullscreenChanged(_: *gtk.Window, _: *gobject.ParamSpec, _: ?*anyopaque) callconv(.c) void {
@@ -1390,6 +1408,7 @@ pub const App = struct {
     }
 
     fn showWindowAction(a: *App, session_id: []const u8, window_id: []const u8) void {
+        a.showBoard(false);
         const s = a.server orelse return;
         a.auto_picked = false;
         setSlot(&a.session_id, session_id);
@@ -2095,6 +2114,8 @@ pub const App = struct {
 
     fn rowActivated(_: *gtk.ListBox, row: *gtk.ListBoxRow, a: *App) callconv(.c) void {
         if (a.rebuilding) return;
+        // Picking a pane in the sidebar leaves the board for it.
+        a.showBoard(false);
         const index: usize = @intCast(row.getIndex());
         if (index >= a.rows.items.len) return;
         const r = a.rows.items[index] orelse return;
@@ -2332,6 +2353,8 @@ pub const App = struct {
 
     /// The next or previous session on this host, in the sidebar's order.
     fn stepSession(a: *App, delta: i64) bool {
+        // Going to another tab or session leaves the board for it.
+        a.showBoard(false);
         const s = a.server orelse return false;
         const n: i64 = @intCast(s.sessions.items.len);
         if (n == 0) return false;
@@ -2818,6 +2841,8 @@ pub const App = struct {
     }
 
     fn stepWindow(a: *App, delta: i64) bool {
+        // Going to another tab or session leaves the board for it.
+        a.showBoard(false);
         const s = a.server orelse return false;
         const v = s.sessionView(a.session_id orelse return false) orelse return false;
         const w = a.shownWindow() orelse return false;

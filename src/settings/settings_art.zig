@@ -20,7 +20,7 @@ pub const Art = enum(usize) { scheme_auto, scheme_light, scheme_dark, tabs_left,
 /// A live sample of how the terminal draws something.
 pub const Sample = enum(usize) { typography, cursor, selection };
 
-pub const Status = enum(usize) { working, blocked, failed, done };
+pub const Status = enum(usize) { working, blocked, failed, done, idle };
 
 /// The terminal's colors as they are now: the theme picked in Compy, or a plain dark or light
 /// set with the window when each host's own theme is followed.
@@ -335,6 +335,7 @@ fn drawStatus(_: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, dat
         .blocked => 0xf59e0b,
         .failed => 0xef4444,
         .done => 0x22c55e,
+        .idle => 0x8a8f98,
     }, 1);
     cr.arc(cx, cy, r, 0, 2 * std.math.pi);
     cr.fill();
@@ -359,6 +360,14 @@ fn drawStatus(_: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, dat
             cr.lineTo(cx, cy + r * 0.1);
             cr.stroke();
             cr.arc(cx, cy + r * 0.5, 1.4, 0, 2 * std.math.pi);
+            cr.fill();
+        },
+        .idle => {
+            // A crescent moon: a disc with a bite out of it, in the mark's own color.
+            cr.arc(cx - r * 0.06, cy + r * 0.04, r * 0.5, 0, 2 * std.math.pi);
+            cr.fill();
+            rgb(cr, 0x8a8f98, 1);
+            cr.arc(cx + r * 0.2, cy - r * 0.16, r * 0.42, 0, 2 * std.math.pi);
             cr.fill();
         },
         .done => {

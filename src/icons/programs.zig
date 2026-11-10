@@ -35,6 +35,25 @@ const slugs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "clang", "cplusplus" },        .{ "java", "openjdk" },        .{ "fish", "fishshell" },
 });
 
+/// Coding agents by the names their programs go by, for telling an agent's pane from a shell's.
+const agents = std.StaticStringMap(void).initComptime(.{
+    .{"claude"},   .{"claude-code"}, .{"codex"},  .{"codex-cli"}, .{"opencode"},     .{"pi"},
+    .{"gemini"},   .{"cursor-agent"}, .{"amp"},   .{"aider"},     .{"copilot"},      .{"goose"},
+    .{"crush"},    .{"droid"},        .{"qwen"},  .{"cline"},     .{"kiro"},
+});
+
+/// Whether what a block runs (given as `name/script`) is a coding agent.
+pub fn isAgent(process: ?[]const u8) bool {
+    const p = process orelse return false;
+    var buf: [64]u8 = undefined;
+    var parts = std.mem.splitScalar(u8, p, '/');
+    const name = std.mem.trimStart(u8, parts.first(), "-");
+    if (agents.has(lower(&buf, name))) return true;
+    const script = parts.next() orelse return false;
+    const base = if (std.mem.lastIndexOfScalar(u8, script, '.')) |dot| script[0..dot] else script;
+    return agents.has(lower(&buf, base));
+}
+
 /// The icon for what a block runs: its own status report wins, then its script, then its process
 /// (given as `name/script`).
 pub fn iconFor(status_app: ?[]const u8, process: ?[]const u8) ?*const table.Icon {
@@ -166,6 +185,11 @@ test "program names map to icons" {
     try std.testing.expectEqualStrings("lazygit", iconFor(null, "lazygit").?.slug);
     try std.testing.expectEqualStrings("ssh", iconFor(null, "mosh").?.slug);
     try std.testing.expect(iconFor(null, "weird-thing") == null);
+    try std.testing.expect(isAgent("node/claude.js"));
+    try std.testing.expect(isAgent("codex"));
+    try std.testing.expect(!isAgent("-zsh"));
+    try std.testing.expect(!isAgent("nvim"));
+    try std.testing.expect(!isAgent(null));
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("~/compy", shortFolder(&buf, "file://mac.local/Users/someone/compy"));
     try std.testing.expectEqualStrings("~", shortFolder(&buf, "/home/someone"));

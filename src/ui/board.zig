@@ -16,7 +16,7 @@ const gpa = std.heap.c_allocator;
 
 const Column = enum(usize) { idle, running, attention, done };
 const column_names = [_][:0]const u8{ "Idle", "Running", "Attention", "Done" };
-const column_empty = [_][:0]const u8{ "No idle panes", "Nothing is running", "Nothing needs you", "Nothing has finished" };
+const column_empty = [_][:0]const u8{ "No idle agents", "Nothing is running", "Nothing needs you", "Nothing has finished" };
 
 const Card = struct {
     board: *Board,
@@ -84,7 +84,7 @@ pub const Board = struct {
             const top = gtk.Box.new(.horizontal, 8);
             top.as(gtk.Widget).addCssClass("board-column-head");
             top.append(switch (col) {
-                .idle => idleMark(),
+                .idle => art.status(.idle),
                 .running => art.status(.working),
                 .attention => art.status(.blocked),
                 .done => art.status(.done),
@@ -116,14 +116,6 @@ pub const Board = struct {
         page.append(columns.as(gtk.Widget));
         b.revealer.setChild(page.as(gtk.Widget));
         return b;
-    }
-
-    /// A plain grey mark for the Idle column, the size of the colored ones beside it.
-    fn idleMark() *gtk.Widget {
-        const dot = gtk.Box.new(.horizontal, 0);
-        dot.as(gtk.Widget).addCssClass("board-idle-mark");
-        dot.as(gtk.Widget).setValign(.center);
-        return dot.as(gtk.Widget);
     }
 
     pub fn widget(b: *Board) *gtk.Widget {
@@ -191,6 +183,10 @@ pub const Board = struct {
                 const v = s.sessionView(session.id) orelse continue;
                 for (v.windows) |w| for (w.layers) |l| for (l.blocks) |blk| {
                     if (!blk.isTerminal()) continue;
+                    // Only agents are on the board: a pane that reports a status, or runs a
+                    // program known to be one. Plain shells and editors stay off it.
+                    const info = s.blockInfo(blk.id) orelse continue;
+                    if (!info.has_status and !programs.isAgent(info.program)) continue;
                     const c = b.cardFor(h, session.id, w.id, blk.id) orelse continue;
                     c.seen = true;
                     b.fill(c, if (session.label.len > 0) session.label else "session");
