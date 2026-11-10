@@ -327,21 +327,11 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
 
     // This computer's Tailscale, which Rex servers often use to let it in.
     const tsg = group(p, "Tailscale", "Read from this computer. Rex's own Tailscale settings live in the Rex app on the server's machine.");
-    var ts = @import("tailscale.zig").read();
-    defer ts.deinit();
     const ts_row = adw.ActionRow.new();
-    if (ts.running) {
-        var tb: [256]u8 = undefined;
-        const title = std.fmt.bufPrintSentinel(&tb, "Signed in{s}{s}", .{ if (ts.login != null) " as " else "", ts.login orelse "" }, 0) catch "Signed in";
-        ts_row.as(adw.PreferencesRow).setTitle(title.ptr);
-        var sb: [256]u8 = undefined;
-        const sub = std.fmt.bufPrintSentinel(&sb, "{s}{s}{d} Rex host{s} on the tailnet", .{ ts.tailnet orelse "", if (ts.tailnet != null) " · " else "", ts.rex_hosts.items.len, if (ts.rex_hosts.items.len == 1) "" else "s" }, 0) catch "";
-        ts_row.setSubtitle(sub.ptr);
-    } else {
-        ts_row.as(adw.PreferencesRow).setTitle("Not on Tailscale");
-        const why = gpa.dupeSentinel(u8, ts.problem orelse "Tailscale isn't connected", 0) catch "";
-        ts_row.setSubtitle(why.ptr);
-    }
+    ts_row.as(adw.PreferencesRow).setTitle("Checking Tailscale…");
+    // Asked without waiting; the row is kept until the answer has been written on it.
+    _ = ts_row.as(gobject.Object).ref();
+    @import("tailscale.zig").read(ts_row, &tailscaleRead);
     tsg.add(ts_row.as(gtk.Widget));
 
     const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. It applies on the next connection.");
@@ -353,6 +343,24 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     _ = adw.EntryRow.signals.apply.connect(label, *Ctx, &labelApplied, ctx, .{});
     info.add(label.as(gtk.Widget));
     return p.as(gtk.Widget);
+}
+
+fn tailscaleRead(data: ?*anyopaque, ts: *@import("tailscale.zig").Status) void {
+    const ts_row: *adw.ActionRow = @ptrCast(@alignCast(data.?));
+    defer ts_row.as(gobject.Object).unref();
+    if (ts.running) {
+        var tb: [256]u8 = undefined;
+        const title = std.fmt.bufPrintSentinel(&tb, "Signed in{s}{s}", .{ if (ts.login != null) " as " else "", ts.login orelse "" }, 0) catch "Signed in";
+        ts_row.as(adw.PreferencesRow).setTitle(title.ptr);
+        var sb: [256]u8 = undefined;
+        const sub = std.fmt.bufPrintSentinel(&sb, "{s}{s}{d} Rex host{s} on the tailnet", .{ ts.tailnet orelse "", if (ts.tailnet != null) " · " else "", ts.rex_hosts.items.len, if (ts.rex_hosts.items.len == 1) "" else "s" }, 0) catch "";
+        ts_row.setSubtitle(sub.ptr);
+    } else {
+        ts_row.as(adw.PreferencesRow).setTitle("Not on Tailscale");
+        var wb: [256]u8 = undefined;
+        const why = std.fmt.bufPrintSentinel(&wb, "{s}", .{ts.problem orelse "Tailscale isn't connected"}, 0) catch "";
+        ts_row.setSubtitle(why.ptr);
+    }
 }
 
 fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {

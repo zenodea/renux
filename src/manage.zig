@@ -8,21 +8,31 @@ const gobject = @import("gobject");
 const app_mod = @import("app.zig");
 const settings = @import("settings.zig");
 const icons = @import("icons.zig");
+const proc = @import("proc.zig");
 
 const gpa = std.heap.c_allocator;
 const App = app_mod.App;
 
-/// Runs a rex command and returns what it printed, or null when rex isn't installed.
-fn rexOutput(args: []const u8) ?[]u8 {
-    const cmd = std.fmt.allocPrintSentinel(gpa, "rex --autostart=false {s}", .{args}, 0) catch return null;
-    defer gpa.free(cmd);
-    var out: [*:0]u8 = undefined;
-    var errs: [*:0]u8 = undefined;
-    var code: c_int = 0;
-    if (glib.spawnCommandLineSync(cmd.ptr, &out, &errs, &code, null) == 0) return null;
-    defer glib.free(errs);
-    defer glib.free(out);
-    return gpa.dupe(u8, std.mem.trim(u8, std.mem.span(out), " \n")) catch null;
+/// Writes the first line a rex command prints as a row's subtitle, when it answers. The row is
+/// kept until then, so it is safe if Settings has closed meanwhile.
+fn showOutput(row: *adw.ActionRow, argv: []const [:0]const u8, comptime fallback: [:0]const u8) void {
+    const H = struct {
+        fn answered(data: ?*anyopaque, output: ?[]const u8) void {
+            const r: *adw.ActionRow = @ptrCast(@alignCast(data.?));
+            defer r.as(gobject.Object).unref();
+            const text = std.mem.trim(u8, output orelse "", " \n\r\t");
+            const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+            const z = gpa.dupeSentinel(u8, if (line.len > 0) line else fallback, 0) catch return;
+            defer gpa.free(z);
+            r.setSubtitle(z.ptr);
+        }
+    };
+    _ = row.as(gobject.Object).ref();
+    if (!proc.run(argv, row, &H.answered)) H.answered(row, null);
+}
+
+fn showServerStatus(row: *adw.ActionRow) void {
+    showOutput(row, &.{ "rex", "--autostart=false", "server", "status" }, "Unknown");
 }
 
 fn rexInstalled() bool {
@@ -46,21 +56,28 @@ pub fn localServerGroup(p: *adw.PreferencesPage, a: *App) void {
     g.setDescription("Starts and stops the server on this computer only.");
     const row = adw.ActionRow.new();
     row.as(adw.PreferencesRow).setTitle("Status");
-    const status = rexOutput("server status") orelse gpa.dupe(u8, "Unknown") catch return;
-    defer gpa.free(status);
-    const first_line = status[0 .. std.mem.indexOfScalar(u8, status, '\n') orelse status.len];
-    const z = gpa.dupeSentinel(u8, first_line, 0) catch return;
-    defer gpa.free(z);
-    row.setSubtitle(z.ptr);
+    row.setSubtitle("Checking…");
     row.setSubtitleLines(2);
-    inline for (.{ .{ "Start", "server start" }, .{ "Stop", "server stop" } }) |b| {
+    showServerStatus(row);
+    inline for (.{ .{ "Start", "start", "Starting the Rex server" }, .{ "Stop", "stop", "Stopping the Rex server" } }) |b| {
         const button = gtk.Button.newWithLabel(b[0]);
         button.as(gtk.Widget).setValign(.center);
         button.as(gtk.Widget).addCssClass("flat");
         const H = struct {
-            fn run(_: *gtk.Button, app: *App) callconv(.c) void {
-                _ = glib.spawnCommandLineAsync("rex " ++ b[1], null);
-                app.toastText(b[0] ++ "ing the Rex server");
+            fn run(btn: *gtk.Button, app: *App) callconv(.c) void {
+                if (!proc.start(&.{ "rex", "server", b[1] })) return app.toastText("Couldn't run rex");
+                app.toastText(b[2]);
+                // The row this button sits in shows the status; read it again once the server
+                // has had a moment to start or stop.
+                const status_row = btn.as(gtk.Widget).getAncestor(adw.ActionRow.getGObjectType()) orelse return;
+                _ = status_row.as(gobject.Object).ref();
+                _ = glib.timeoutAdd(1500, &reread, status_row);
+            }
+            fn reread(data: ?*anyopaque) callconv(.c) c_int {
+                const status_row: *adw.ActionRow = @ptrCast(@alignCast(data.?));
+                showServerStatus(status_row);
+                status_row.as(gobject.Object).unref();
+                return 0;
             }
         };
         _ = gtk.Button.signals.clicked.connect(button, *App, &H.run, a, .{});
@@ -70,11 +87,8 @@ pub fn localServerGroup(p: *adw.PreferencesPage, a: *App) void {
 
     const agents = adw.ActionRow.new();
     agents.as(adw.PreferencesRow).setTitle("Agents");
-    const skill = rexOutput("skill status") orelse gpa.dupe(u8, "") catch return;
-    defer gpa.free(skill);
-    const sz = gpa.dupeSentinel(u8, if (skill.len > 0) skill[0 .. std.mem.indexOfScalar(u8, skill, '\n') orelse skill.len] else "Let coding agents such as Claude Code use Rex", 0) catch return;
-    defer gpa.free(sz);
-    agents.setSubtitle(sz.ptr);
+    agents.setSubtitle("Let coding agents such as Claude Code use Rex");
+    showOutput(agents, &.{ "rex", "--autostart=false", "skill", "status" }, "Let coding agents such as Claude Code use Rex");
     const setup = gtk.Button.newWithLabel("Set Up");
     setup.as(gtk.Widget).setValign(.center);
     setup.as(gtk.Widget).addCssClass("flat");
@@ -104,6 +118,7 @@ pub fn openDiagnostics(a: *App) void {
         const s = h.server;
         text.print(gpa, "\nHost {s}\n  address: {s}\n  state: {s}\n", .{ h.label, s.url, @tagName(s.state) }) catch return;
         if (s.rex_version) |v| text.print(gpa, "  Rex: {s}\n", .{v}) catch return;
+        if (s.api_revision != 0) text.print(gpa, "  API revision: {d} (Compy speaks {d})\n", .{ s.api_revision, @import("control.zig").api_revision }) catch return;
         if (s.state == .offline) text.print(gpa, "  reason: {s}\n", .{s.reason.items}) catch return;
         var windows: usize = 0;
         var panes: usize = 0;

@@ -3,6 +3,7 @@
 const std = @import("std");
 const glib = @import("glib");
 const json = @import("json.zig");
+const proc = @import("proc.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -28,29 +29,39 @@ pub const Status = struct {
 };
 
 /// Where the tailscale command lives: on the path, or inside the Mac app.
-const commands = [_][:0]const u8{
-    "tailscale status --json",
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale status --json",
+const commands = [_][]const [:0]const u8{
+    &.{ "tailscale", "status", "--json" },
+    &.{ "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json" },
 };
 
-/// Reads the status now. It runs a local command that answers in a moment.
-pub fn read() Status {
-    for (commands) |cmd| {
-        var out: [*:0]u8 = undefined;
-        var errs: [*:0]u8 = undefined;
-        var code: c_int = 0;
-        var err: ?*glib.Error = null;
-        if (glib.spawnCommandLineSync(cmd.ptr, &out, &errs, &code, &err) == 0) {
-            if (err) |e| e.free();
-            continue;
-        }
-        defer glib.free(out);
-        defer glib.free(errs);
-        const text = std.mem.span(out);
-        if (text.len == 0) return .{ .problem = "Tailscale isn't running on this computer" };
-        return parse(text);
-    }
-    return .{ .problem = "Tailscale isn't installed on this computer" };
+/// Hears the status once. It lives only for the call.
+pub const Done = *const fn (ctx: ?*anyopaque, status: *Status) void;
+
+const Reading = struct { ctx: ?*anyopaque, done: Done };
+
+/// Reads the status without holding up the window: a Tailscale that is stopped or stuck can
+/// take seconds to answer. `done` is called once, at once if Tailscale isn't installed.
+pub fn read(ctx: ?*anyopaque, done: Done) void {
+    var st: Status = .{ .problem = "Tailscale isn't installed on this computer" };
+    defer st.deinit();
+    const reading = gpa.create(Reading) catch return done(ctx, &st);
+    reading.* = .{ .ctx = ctx, .done = done };
+    for (commands) |argv| if (proc.run(argv, reading, &answered)) return;
+    gpa.destroy(reading);
+    done(ctx, &st);
+}
+
+fn answered(data: ?*anyopaque, output: ?[]const u8) void {
+    const reading: *Reading = @ptrCast(@alignCast(data.?));
+    defer gpa.destroy(reading);
+    var st: Status = if (output) |text| fromOutput(text) else .{ .problem = "Tailscale didn't answer on this computer" };
+    defer st.deinit();
+    reading.done(reading.ctx, &st);
+}
+
+fn fromOutput(text: []const u8) Status {
+    if (std.mem.trim(u8, text, " \n\r\t").len == 0) return .{ .problem = "Tailscale isn't running on this computer" };
+    return parse(text);
 }
 
 pub fn parse(text: []const u8) Status {
@@ -112,4 +123,11 @@ test "tailscale status finds Rex nodes and the account" {
     try std.testing.expectEqualStrings("https://desk-rex.tail0000.ts.net", st.rex_hosts.items[0].url);
     try std.testing.expect(looksLikeAddress("https://desk-rex.tail0000.ts.net"));
     try std.testing.expect(!looksLikeAddress("hello there"));
+}
+
+test "an empty answer means Tailscale isn't running" {
+    var st = fromOutput(" \n");
+    defer st.deinit();
+    try std.testing.expect(!st.running);
+    try std.testing.expectEqualStrings("Tailscale isn't running on this computer", st.problem.?);
 }

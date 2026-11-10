@@ -1019,28 +1019,12 @@ pub const App = struct {
         name.setActivatesDefault(1);
         box.append(url.as(gtk.Widget));
         box.append(name.as(gtk.Widget));
-        var ts = @import("tailscale.zig").read();
-        defer ts.deinit();
-        var offered: usize = 0;
-        for (ts.rex_hosts.items) |peer| {
-            if (a.hasHostUrl(peer.url)) continue;
-            if (offered == 0) {
-                const heading = gtk.Label.new("On your tailnet");
-                heading.setXalign(0);
-                heading.as(gtk.Widget).addCssClass("dim-label");
-                heading.as(gtk.Widget).setMarginTop(8);
-                box.append(heading.as(gtk.Widget));
-            }
-            offered += 1;
-            var buf: [256]u8 = undefined;
-            const text = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ peer.name, if (peer.online) "" else " (offline)" }, 0) catch continue;
-            const b = gtk.Button.newWithLabel(text.ptr);
-            b.as(gtk.Widget).addCssClass("flat");
-            const pick = gpa.create(TailnetPick) catch continue;
-            pick.* = .{ .entry = url, .name = name, .url = gpa.dupeSentinel(u8, peer.url, 0) catch continue, .label = gpa.dupeSentinel(u8, peer.name, 0) catch continue };
-            _ = gtk.Button.signals.clicked.connect(b, *TailnetPick, &tailnetPicked, pick, .{});
-            box.append(b.as(gtk.Widget));
-        }
+        // Asked without waiting: the list fills in when Tailscale answers.
+        if (gpa.create(TailnetList)) |list| {
+            list.* = .{ .app = a, .box = box, .url = url, .name = name };
+            inline for (.{ box, url, name }) |w| _ = w.as(gobject.Object).ref();
+            @import("tailscale.zig").read(list, &tailnetRead);
+        } else |_| {}
         // An address copied from Rex's Pair screen is likely what's wanted.
         a.window.as(gtk.Widget).getClipboard().readTextAsync(null, &clipboardForUrl, url);
         dialog.setExtraChild(box.as(gtk.Widget));
@@ -1055,6 +1039,37 @@ pub const App = struct {
     }
 
     const AddHostCtx = struct { app: *App, url: *gtk.Entry, name: *gtk.Entry };
+
+    /// The Add Host dialog's fields, kept alive until Tailscale has answered.
+    const TailnetList = struct { app: *App, box: *gtk.Box, url: *gtk.Entry, name: *gtk.Entry };
+
+    fn tailnetRead(data: ?*anyopaque, ts: *@import("tailscale.zig").Status) void {
+        const list: *TailnetList = @ptrCast(@alignCast(data.?));
+        defer {
+            inline for (.{ list.box, list.url, list.name }) |w| w.as(gobject.Object).unref();
+            gpa.destroy(list);
+        }
+        var offered: usize = 0;
+        for (ts.rex_hosts.items) |peer| {
+            if (list.app.hasHostUrl(peer.url)) continue;
+            if (offered == 0) {
+                const heading = gtk.Label.new("On your tailnet");
+                heading.setXalign(0);
+                heading.as(gtk.Widget).addCssClass("dim-label");
+                heading.as(gtk.Widget).setMarginTop(8);
+                list.box.append(heading.as(gtk.Widget));
+            }
+            offered += 1;
+            var buf: [256]u8 = undefined;
+            const text = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ peer.name, if (peer.online) "" else " (offline)" }, 0) catch continue;
+            const b = gtk.Button.newWithLabel(text.ptr);
+            b.as(gtk.Widget).addCssClass("flat");
+            const pick = gpa.create(TailnetPick) catch continue;
+            pick.* = .{ .entry = list.url, .name = list.name, .url = gpa.dupeSentinel(u8, peer.url, 0) catch continue, .label = gpa.dupeSentinel(u8, peer.name, 0) catch continue };
+            _ = gtk.Button.signals.clicked.connect(b, *TailnetPick, &tailnetPicked, pick, .{});
+            list.box.append(b.as(gtk.Widget));
+        }
+    }
 
     const TailnetPick = struct { entry: *gtk.Entry, name: *gtk.Entry, url: [:0]u8, label: [:0]u8 };
 
