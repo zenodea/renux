@@ -54,6 +54,10 @@ const Pane = struct {
     /// The title row's Float or dock and Minimize buttons, greyed while they can do nothing.
     float_button: ?*gtk.Widget = null,
     find: ?*@import("findbar.zig").FindBar = null,
+    /// Back from the tray: the chip's look over the card, fading as the card grows from the
+    /// chip's size (`face_w` wide) to its own.
+    face: ?*gtk.Widget = null,
+    face_w: f64 = 0,
     minimize_button: ?*gtk.Widget = null,
     /// "Copied", shown for a moment after the pane's selection reaches the clipboard.
     copied: *gtk.Widget,
@@ -90,8 +94,15 @@ const Leaving = struct {
     size: [2]f64,
     alpha: f64,
     block_id: []u8,
-    /// Set for a card going to the tray: the layer whose chip it shrinks into.
+    /// Set for a card going to the tray: the layer whose chip it becomes. The chip stays
+    /// unseen until the card has shrunk onto it, so there is only ever one thing on screen.
     to_layer: ?[]u8 = null,
+    vel: [4]f64 = .{ 0, 0, 0, 0 },
+    /// The chip's look laid over the card, showing through more the smaller the card gets,
+    /// so the card already reads as the chip by the time it is chip sized.
+    face: ?*gtk.Widget = null,
+    /// How wide the card was when it set off.
+    from_w: f64 = 0,
 };
 
 /// Where a chip was when its layer came back from the tray, for its card to grow out of.
@@ -494,6 +505,28 @@ pub const Workspace = struct {
         }
     }
 
+    /// A chip's look to lay over a card: the same icon, name and shape as the chip in the tray.
+    fn chipFace(ws: *Workspace, block_id: []const u8, opacity: f64) *gtk.Widget {
+        const face = gtk.Box.new(.horizontal, 6);
+        const w = face.as(gtk.Widget);
+        w.addCssClass("tray-chip");
+        w.addCssClass("chip-face");
+        w.setCanTarget(0);
+        face.append(blockicon.create(ws.server, block_id, 14));
+        var buf: [256]u8 = undefined;
+        const label = gtk.Label.new(chipTitle(ws.server, block_id, &buf).ptr);
+        label.setEllipsize(.middle);
+        label.setXalign(0);
+        face.append(label.as(gtk.Widget));
+        w.setOpacity(opacity);
+        return w;
+    }
+
+    /// A card has become its chip: the chip shows from here on.
+    fn showChip(ws: *Workspace, layer_id: []const u8) void {
+        for (ws.minimized.items) |m| if (std.mem.eql(u8, m.layer_id, layer_id)) m.button.setOpacity(1);
+    }
+
     fn refreshChip(ws: *Workspace, m: Minimized) void {
         var buf: [256]u8 = undefined;
         const title = chipTitle(ws.server, m.block_id, &buf);
@@ -511,9 +544,21 @@ pub const Workspace = struct {
         var to_layer: ?[]u8 = null;
         for (ws.minimized.items) |m| if (std.mem.eql(u8, m.layer_id, p.layer_id)) {
             to_layer = gpa.dupe(u8, m.layer_id) catch null;
+            if (to_layer != null) m.button.setOpacity(0);
         };
-        if (to_layer != null) p.term.freeze();
-        ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id, .to_layer = to_layer }) catch {
+        if (to_layer != null) {
+            p.term.freeze();
+            // The title's buttons go, so the shrinking card shows its icon and name as the
+            // chip it is turning into does.
+            if (p.float_button) |b| if (b.getParent()) |tools| tools.setVisible(0);
+        }
+        var face: ?*gtk.Widget = p.face;
+        if (to_layer != null and face == null) {
+            face = ws.chipFace(p.block_id, 0);
+            @as(*gtk.Overlay, @ptrCast(p.frame)).addOverlay(face.?);
+            p.frame.addCssClass("to-tray");
+        }
+        ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id, .to_layer = to_layer, .face = face, .from_w = p.cur[2] }) catch {
             if (to_layer) |t| gpa.free(t);
             p.frame.unparent();
             ws.server.parkTerminal(p.block_id);
@@ -525,7 +570,11 @@ pub const Workspace = struct {
 
     /// A faded card goes for good, and its terminal too unless the pane came back meanwhile.
     fn gone(ws: *Workspace, l: Leaving) void {
-        if (l.to_layer) |t| gpa.free(t);
+        if (l.to_layer) |t| {
+            // However the card went, its chip must not stay hidden.
+            ws.showChip(t);
+            gpa.free(t);
+        }
         l.frame.unparent();
         if (ws.paneOf(l.block_id) == null) ws.server.parkTerminal(l.block_id);
         gpa.free(l.block_id);
@@ -752,6 +801,10 @@ pub const Workspace = struct {
         defer gpa.free(target);
         button.as(gtk.Actionable).setActionName("app.restore-layer");
         button.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(target.ptr));
+        // A chip whose card is still on its way stays unseen until the card lands on it.
+        for (ws.leaving.items) |l| if (l.to_layer) |t| {
+            if (std.mem.eql(u8, t, layer_id)) button.as(gtk.Widget).setOpacity(0);
+        };
         ws.tray.append(button.as(gtk.Widget));
         ws.minimized.append(gpa, .{
             .layer_id = gpa.dupe(u8, layer_id) catch return,
@@ -1539,11 +1592,12 @@ pub const Workspace = struct {
         while (i < ws.leaving.items.len) {
             const l = &ws.leaving.items[i];
             if (l.to_layer) |layer| {
-                // To the tray: the card glides and shrinks into its chip, fading as it lands.
-                const to = ws.chipRect(layer);
-                const k = 1 - @exp(-16 * dt);
-                for (0..4) |c| l.cur[c] += (to[c] - l.cur[c]) * k;
-                l.alpha -= dt / 0.26;
+                // To the tray: the card itself becomes the chip, moving with the same spring
+                // as every other card. Once it has settled onto the chip's place the chip
+                // takes over, and the card is done.
+                const still = springStep(&l.cur, &l.vel, ws.chipRect(layer), dt, decay);
+                l.alpha = if (still) 0 else 1;
+                if (still) ws.showChip(layer);
             } else {
                 l.alpha -= dt / 0.16;
                 // Shrinks a little toward its middle as it fades.
@@ -1691,9 +1745,14 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
                 p.cur = target;
                 p.alpha = 1;
             } else if (ws.restoredFrom(p.layer_id)) |from| {
-                // Back from the tray: the card grows out of where its chip was.
+                // Back from the tray: the chip is gone and the card grows from its place, as
+                // if the chip itself opened up.
                 p.cur = from;
-                p.alpha = 0.2;
+                p.alpha = 1;
+                p.face = ws.chipFace(p.block_id, 1);
+                p.face_w = from[2];
+                @as(*gtk.Overlay, @ptrCast(p.frame)).addOverlay(p.face.?);
+                p.frame.addCssClass("to-tray");
             } else {
                 // A new card grows in from a little smaller than its place.
                 const inset_x = target[2] * 0.04;
@@ -1711,15 +1770,26 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         };
         if (p.alpha < 1) moving = true;
         p.frame.setOpacity(p.alpha);
+        if (p.face) |face| {
+            // Growing out of the tray: the chip's look gives way to the pane's own.
+            const shown = faceShown(p.cur[2], target[2], p.face_w);
+            face.setOpacity(shown);
+            if (shown <= 0) {
+                @as(*gtk.Overlay, @ptrCast(p.frame)).removeOverlay(face);
+                p.frame.removeCssClass("to-tray");
+                p.face = null;
+            }
+        }
         Workspace.cornerRoom(p, origin, p.cur);
         allocateAt(p.frame, p.cur);
     }
     for (ws.leaving.items) |l| {
-        // Eased so the card stays solid for most of its trip and fades as it arrives.
-        l.frame.setOpacity(if (l.to_layer != null) @min(1, @max(0, l.alpha) * 1.8) else @max(0, l.alpha));
-        if (l.to_layer != null) {
+        l.frame.setOpacity(@max(0, l.alpha));
+        if (l.to_layer) |layer| {
+            // The chip's look comes through as the card nears the chip's size.
+            if (l.face) |face| face.setOpacity(faceShown(l.cur[2], l.from_w, ws.chipRect(layer)[2]));
             // Its terminal is frozen, so the card can take the shrinking size itself.
-            allocateAt(l.frame, .{ l.cur[0], l.cur[1], @max(24, l.cur[2]), @max(16, l.cur[3]) });
+            allocateAt(l.frame, .{ l.cur[0], l.cur[1], @max(8, l.cur[2]), @max(8, l.cur[3]) });
             continue;
         }
         // A leaving card keeps its size, so its terminal never asks the server for a new one.
@@ -1782,6 +1852,15 @@ fn allocateAt(w: *gtk.Widget, r: [4]f64) void {
     // Moving by fractions of a pixel keeps slow glides smooth on HiDPI screens.
     const t = gsk.Transform.new().translate(&.{ .f_x = @floatCast(r[0]), .f_y = @floatCast(r[1]) }) orelse return;
     w.allocate(cw, ch, -1, t);
+}
+
+/// How much of the chip's look shows on a card `width` wide, between its full width and the
+/// chip's: none for the first part of the trip, all of it a little before the chip's size.
+fn faceShown(width: f64, full: f64, chip: f64) f64 {
+    if (full <= chip + 1) return 1;
+    const gone = std.math.clamp((full - width) / (full - chip), 0, 1);
+    const t = std.math.clamp((gone - 0.35) / 0.5, 0, 1);
+    return t * t * (3 - 2 * t);
 }
 
 /// Two arrows passing each other, on a drop target that swaps.

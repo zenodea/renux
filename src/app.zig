@@ -95,6 +95,8 @@ const css =
     \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
+    \\.chip-face { box-shadow: none; border-radius: 10px; }
+    \\.pane-card.to-tray, .pane-card.to-tray.focused { border-color: transparent; box-shadow: none; transition: border-color 160ms ease-out, box-shadow 160ms ease-out; }
     \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
     \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
     \\window.tight .content .workspace { margin: 7px 0 0 0; }
