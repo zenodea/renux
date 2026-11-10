@@ -458,7 +458,7 @@ pub const Workspace = struct {
         const r = ws.paneRect(&p);
         ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id }) catch {
             p.frame.unparent();
-            ws.server.releaseTerminal(p.block_id);
+            ws.server.parkTerminal(p.block_id);
             gpa.free(p.block_id);
             return;
         };
@@ -468,14 +468,14 @@ pub const Workspace = struct {
     /// A faded card goes for good, and its terminal too unless the pane came back meanwhile.
     fn gone(ws: *Workspace, l: Leaving) void {
         l.frame.unparent();
-        if (ws.paneOf(l.block_id) == null) ws.server.releaseTerminal(l.block_id);
+        if (ws.paneOf(l.block_id) == null) ws.server.parkTerminal(l.block_id);
         gpa.free(l.block_id);
     }
 
     fn drop(ws: *Workspace, p: Pane) void {
         if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         p.frame.unparent();
-        ws.server.releaseTerminal(p.block_id);
+        ws.server.parkTerminal(p.block_id);
         gpa.free(p.block_id);
         gpa.free(p.layer_id);
     }

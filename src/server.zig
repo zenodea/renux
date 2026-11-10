@@ -40,6 +40,9 @@ pub const ListedHost = struct { label: []const u8, url: []const u8 };
 /// Every server there is, for `Server.isLive`. Main thread only.
 var live: std.ArrayList(*const Server) = .empty;
 
+/// How many off-screen terminals a server keeps live; each holds its scrollback and a connection.
+const max_parked = 24;
+
 pub const Action = struct {
     name: []const u8,
     title: []const u8,
@@ -145,6 +148,8 @@ pub const Server = struct {
     listed_hosts: []ListedHost = &.{},
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
     performer: ?Performer = null,
+    /// Terminals kept live though their panes are off screen, oldest first. See `parkTerminal`.
+    parked: std.ArrayList(*Stream) = .empty,
 
     pub fn create(url: []const u8, client_label: []const u8) !*Server {
         const s = try gpa.create(Server);
@@ -179,6 +184,7 @@ pub const Server = struct {
         var it = s.streams.valueIterator();
         while (it.next()) |st| st.*.destroy();
         s.streams.deinit(gpa);
+        s.parked.deinit(gpa);
         var vit = s.views.valueIterator();
         while (vit.next()) |v| v.*.destroy();
         s.views.deinit(gpa);
@@ -697,6 +703,17 @@ pub const Server = struct {
             if (eql(session.id, id)) {
                 _ = s.sessions.orderedRemove(i);
                 s.dropView(id);
+                // Its terminals kept off screen go with it.
+                var k: usize = 0;
+                while (k < s.parked.items.len) {
+                    const st = s.parked.items[k];
+                    if (!eql(st.session_id, id)) {
+                        k += 1;
+                        continue;
+                    }
+                    _ = s.parked.orderedRemove(k);
+                    if (s.streams.fetchRemove(st.block_id)) |e| e.value.destroy();
+                }
                 if (s.attached.fetchRemove(id)) |e| gpa.free(e.key);
                 gpa.free(session.id);
                 gpa.free(session.label);
@@ -797,7 +814,10 @@ pub const Server = struct {
 
     /// The live terminal for a block, connecting its stream on first use.
     pub fn terminal(s: *Server, session_id: []const u8, block_id: []const u8) ?*Stream {
-        if (s.streams.get(block_id)) |st| return st;
+        if (s.streams.get(block_id)) |st| {
+            s.unpark(st);
+            return st;
+        }
         const st = Stream.create(s, session_id, block_id) catch return null;
         s.streams.put(gpa, st.block_id, st) catch {
             st.destroy();
@@ -806,9 +826,46 @@ pub const Server = struct {
         return st;
     }
 
-    /// Stops streaming a block that's no longer on screen.
+    /// Stops streaming a block for good: it closed, or too many others are kept.
     pub fn releaseTerminal(s: *Server, block_id: []const u8) void {
-        if (s.streams.fetchRemove(block_id)) |e| e.value.destroy();
+        const e = s.streams.fetchRemove(block_id) orelse return;
+        s.unpark(e.value);
+        e.value.destroy();
+    }
+
+    /// Keeps a block's terminal live after its pane left the screen, so coming back to its tab
+    /// or session shows it at once instead of an empty pane while it connects and reads the
+    /// screen again. Only the most recently left are kept; the oldest goes when there are more.
+    pub fn parkTerminal(s: *Server, block_id: []const u8) void {
+        const st = s.streams.get(block_id) orelse return;
+        // Nothing comes back to a session that ended.
+        if (!s.hasSession(st.session_id)) return s.releaseTerminal(block_id);
+        s.unpark(st);
+        s.parked.append(gpa, st) catch return s.releaseTerminal(block_id);
+        if (s.parked.items.len > max_parked) {
+            const oldest = s.parked.orderedRemove(0);
+            if (s.streams.fetchRemove(oldest.block_id)) |e| e.value.destroy();
+        }
+    }
+
+    /// Connects the terminals of a session's other tabs ahead of time and keeps them, so the
+    /// first switch to a tab shows its panes at once too. A dozen at most, nearest tabs first.
+    pub fn readyTerminals(s: *Server, session_id: []const u8, shown_window: ?[]const u8) void {
+        const v = s.sessionView(session_id) orelse return;
+        var room: usize = max_parked / 2;
+        for (v.windows) |w| {
+            if (shown_window) |id| if (eql(w.id, id)) continue;
+            for (w.layers) |l| for (l.blocks) |b| {
+                if (!b.isTerminal() or s.streams.contains(b.id)) continue;
+                if (room == 0) return;
+                room -= 1;
+                if (s.terminal(session_id, b.id) != null) s.parkTerminal(b.id);
+            };
+        }
+    }
+
+    fn unpark(s: *Server, st: *Stream) void {
+        if (std.mem.indexOfScalar(*Stream, s.parked.items, st)) |i| _ = s.parked.orderedRemove(i);
     }
 
     const TicketFor = struct {
