@@ -383,7 +383,8 @@ pub const App = struct {
         a.header_room = header_room.as(gtk.Widget);
         side_header.packStart(header_room.as(gtk.Widget));
         a.side_header = side_header.as(gtk.Widget);
-        a.head_more = menuButton(appMenu(), "More").as(gtk.Widget);
+        // A cog that opens Settings; what the old menu here listed has its own button or key.
+        a.head_more = icons.button(.gear, "Settings", "app.settings").as(gtk.Widget);
         side_header.packEnd(a.head_more);
         a.head_search = icons.button(.search, "Commands", "app.palette").as(gtk.Widget);
         side_header.packEnd(a.head_search);
@@ -414,7 +415,7 @@ pub const App = struct {
         a.foot_host = icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget);
         footer.append(a.foot_host);
         // The header's menu moves down here when the sidebar is too narrow to hold it up there.
-        a.foot_more = menuButton(appMenu(), "More").as(gtk.Widget);
+        a.foot_more = icons.button(.gear, "Settings", "app.settings").as(gtk.Widget);
         a.foot_more.setVisible(0);
         footer.append(a.foot_more);
         const side = adw.ToolbarView.new();
@@ -3692,25 +3693,6 @@ fn balanceNode(s: *Server, sid: []const u8, n: *const view.Node) void {
             balanceNode(s, sid, sp.after);
         },
     }
-}
-
-fn appMenu() *gio.MenuModel {
-    const menu = gio.Menu.new();
-    const panes = gio.Menu.new();
-    panes.append("Split right", "app.split-right");
-    panes.append("Split down", "app.split-down");
-    panes.append("Zoom pane", "app.zoom-pane");
-    panes.append("Close pane", "app.close-pane");
-    menu.appendSection(null, panes.as(gio.MenuModel));
-    const other = gio.Menu.new();
-    other.append("Commands…", "app.palette");
-    other.append("Find…", "app.find");
-    other.append("New window", "app.new-window");
-    other.append("New session", "app.new-session");
-    other.append("Add remote host…", "app.add-host");
-    other.append("Settings…", "app.settings");
-    menu.appendSection(null, other.as(gio.MenuModel));
-    return menu.as(gio.MenuModel);
 }
 
 /// The "•••" menu on a window's row. Its actions carry "session window" as their target.
