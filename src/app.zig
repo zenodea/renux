@@ -246,6 +246,9 @@ pub const App = struct {
         // GTK may have reset it while starting up.
         if (builtin.os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
         settings.load();
+        // Asked before Compy forces a scheme of its own, while libadwaita still reports the
+        // desktop's preference: dark only when the desktop prefers dark.
+        if (builtin.os.tag != .macos) linux_dark = adw.StyleManager.getDefault().getDark() != 0;
         termview.pad_x = settings.current.pad_x;
         termview.pad_y = settings.current.pad_y;
         a.applied_text = TextSetup.now();
@@ -434,7 +437,10 @@ pub const App = struct {
         a.tabsChanged();
         themes.active = themes.resolve(effectiveTheme());
         a.last_dark = systemDark();
-        _ = glib.timeoutAddSeconds(3, &appearanceTick, a);
+        // The Mac is asked every few seconds; a Linux desktop says when its appearance changes.
+        if (builtin.os.tag == .macos) {
+            _ = glib.timeoutAddSeconds(3, &appearanceTick, a);
+        } else a.watchAppearance();
         @import("workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
         installShotHook(a);
@@ -2710,13 +2716,72 @@ pub const App = struct {
     /// the system setting on the Mac.
     fn systemDark() bool {
         if (builtin.os.tag == .macos) return @import("macos.zig").systemDark();
-        const gs = gtk.Settings.getDefault() orelse return true;
-        var value = std.mem.zeroes(gobject.Value);
-        _ = value.init(gobject.ext.types.int);
-        defer value.unset();
-        gs.as(gobject.Object).getProperty("gtk-interface-color-scheme", &value);
-        // 2 is dark and 3 light; 0 and 1 mean no preference.
-        return value.getInt() != 3;
+        // GTK's own setting can't say: Compy forces a scheme to match its theme, which that
+        // setting then repeats, and GTK before 4.20 doesn't have it. The desktop's settings
+        // portal can, and `watchAppearance` keeps this up to date from it.
+        return linux_dark;
+    }
+
+    /// The desktop prefers a dark appearance, as last heard. No preference counts as light.
+    var linux_dark: bool = false;
+
+    const portal_name = "org.freedesktop.portal.Desktop";
+    const portal_path = "/org/freedesktop/portal/desktop";
+    const portal_settings = "org.freedesktop.portal.Settings";
+    const appearance_namespace = "org.freedesktop.appearance";
+
+    /// Follows the desktop's light or dark preference through its settings portal: the value now,
+    /// and every change after. A desktop without the portal keeps what libadwaita said at launch.
+    fn watchAppearance(a: *App) void {
+        gio.busGet(.session, null, &gotAppearanceBus, a);
+    }
+
+    fn gotAppearanceBus(_: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        // The session bus everything shares; this reference lasts as long as Compy runs.
+        const bus = gio.busGetFinish(result, null) orelse return;
+        _ = bus.signalSubscribe(portal_name, portal_settings, "SettingChanged", portal_path, appearance_namespace, .{}, &appearanceSignal, a, null);
+        const args = glib.Variant.newTuple(&[_]*glib.Variant{ glib.Variant.newString(appearance_namespace), glib.Variant.newString("color-scheme") }, 2);
+        bus.call(portal_name, portal_path, portal_settings, "Read", args, null, .{}, 2000, null, &appearanceRead, a);
+    }
+
+    fn appearanceRead(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        const bus: *gio.DBusConnection = @ptrCast(@alignCast(source orelse return));
+        const reply = bus.callFinish(result, null) orelse return;
+        defer reply.unref();
+        if (!std.mem.eql(u8, std.mem.span(reply.getTypeString()), "(v)")) return;
+        const value = reply.getChildValue(0);
+        defer value.unref();
+        a.appearanceIs(value);
+    }
+
+    fn appearanceSignal(_: *gio.DBusConnection, _: ?[*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, params: *glib.Variant, data: ?*anyopaque) callconv(.c) void {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        if (!std.mem.eql(u8, std.mem.span(params.getTypeString()), "(ssv)")) return;
+        const key = params.getChildValue(1);
+        defer key.unref();
+        if (!std.mem.eql(u8, std.mem.span(key.getString(null)), "color-scheme")) return;
+        const value = params.getChildValue(2);
+        defer value.unref();
+        a.appearanceIs(value);
+    }
+
+    /// Takes the portal's color-scheme value, however many variants wrap it: 1 prefers dark,
+    /// while 0 (no preference) and 2 (prefers light) don't.
+    fn appearanceIs(a: *App, wrapped: *glib.Variant) void {
+        var v = wrapped.ref();
+        defer v.unref();
+        while (std.mem.eql(u8, std.mem.span(v.getTypeString()), "v")) {
+            const inner = v.getVariant();
+            v.unref();
+            v = inner;
+        }
+        if (!std.mem.eql(u8, std.mem.span(v.getTypeString()), "u")) return;
+        const dark = v.getUint32() == 1;
+        if (dark == linux_dark) return;
+        linux_dark = dark;
+        if (settings.current.theme_follow_system and dark != a.last_dark) a.themeChanged();
     }
 
     /// The theme in effect: the one picked, or with separate light and dark themes the one for
@@ -2727,7 +2792,7 @@ pub const App = struct {
         return if (systemDark()) st.theme_dark else st.theme_light;
     }
 
-    /// Checks the system appearance every few seconds while themes follow it.
+    /// Checks the Mac's appearance every few seconds while themes follow it.
     fn appearanceTick(data: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(data.?));
         if (!settings.current.theme_follow_system) return 1;
