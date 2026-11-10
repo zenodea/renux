@@ -5,6 +5,7 @@ const std = @import("std");
 const glib = @import("glib");
 const stream = @import("stream.zig");
 const Colors = stream.Colors;
+const Rgb = @import("theme.zig").Rgb;
 
 const gpa = std.heap.c_allocator;
 
@@ -34,44 +35,24 @@ pub const builtins = [_]Theme{
 /// cube blends between the background, the six base colors and the foreground, and the 24
 /// grays run from the background to the foreground.
 pub fn extendPalette(p: *[256]u32, bg: u32, fg: u32) void {
-    const ch = struct {
-        fn get(c: u32, shift: u5) f64 {
-            return @floatFromInt((c >> shift) & 0xff);
-        }
-        fn mix(a: u32, b: u32, t: f64) [3]f64 {
-            return .{ get(a, 16) + (get(b, 16) - get(a, 16)) * t, get(a, 8) + (get(b, 8) - get(a, 8)) * t, get(a, 0) + (get(b, 0) - get(a, 0)) * t };
-        }
-        fn lerp3(a: [3]f64, b: [3]f64, t: f64) [3]f64 {
-            return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t };
-        }
-        fn pack(c: [3]f64) u32 {
-            var out: u32 = 0xFF000000;
-            for (c, 0..) |v, i| out |= @as(u32, @intFromFloat(@round(std.math.clamp(v, 0, 255)))) << @intCast(16 - 8 * i);
-            return out;
-        }
-    };
     // Corners of the cube: black is the background and white the foreground.
-    const k000 = bg;
-    const k100 = p[1];
-    const k010 = p[2];
-    const k110 = p[3];
-    const k001 = p[4];
-    const k101 = p[5];
-    const k011 = p[6];
-    const k111 = fg;
+    const k000 = Rgb.of(bg);
+    const k100 = Rgb.of(p[1]);
+    const k010 = Rgb.of(p[2]);
+    const k110 = Rgb.of(p[3]);
+    const k001 = Rgb.of(p[4]);
+    const k101 = Rgb.of(p[5]);
+    const k011 = Rgb.of(p[6]);
+    const k111 = Rgb.of(fg);
     for (0..6) |r| for (0..6) |g| for (0..6) |b| {
         const tr = @as(f64, @floatFromInt(r)) / 5;
         const tg = @as(f64, @floatFromInt(g)) / 5;
         const tb = @as(f64, @floatFromInt(b)) / 5;
-        const c00 = ch.mix(k000, k100, tr);
-        const c10 = ch.mix(k010, k110, tr);
-        const c01 = ch.mix(k001, k101, tr);
-        const c11 = ch.mix(k011, k111, tr);
-        const c0 = ch.lerp3(c00, c10, tg);
-        const c1 = ch.lerp3(c01, c11, tg);
-        p[16 + r * 36 + g * 6 + b] = ch.pack(ch.lerp3(c0, c1, tb));
+        const c0 = k000.mix(k100, tr).mix(k010.mix(k110, tr), tg);
+        const c1 = k001.mix(k101, tr).mix(k011.mix(k111, tr), tg);
+        p[16 + r * 36 + g * 6 + b] = c0.mix(c1, tb).pack() | 0xFF000000;
     };
-    for (0..24) |i| p[232 + i] = ch.pack(ch.mix(bg, fg, @as(f64, @floatFromInt(i + 1)) / 25));
+    for (0..24) |i| p[232 + i] = k000.mix(k111, @as(f64, @floatFromInt(i + 1)) / 25).pack() | 0xFF000000;
 }
 
 pub fn colorsOf(t: Theme) Colors {
@@ -127,4 +108,21 @@ test "ghostty theme files" {
     try std.testing.expectEqual(@as(u32, 0xFF00FF00), c.cursor);
     try std.testing.expect(parseGhostty("nothing = here") == null);
     try std.testing.expect(resolve("Nord") != null);
+}
+
+test "the generated palette runs from the background to the foreground" {
+    var p = stream.builtin_palette;
+    const nord = colorsOf(builtins[0]);
+    p = nord.palette.?;
+    extendPalette(&p, nord.bg, nord.fg);
+    // The cube's corners are the background, the six base colors and the foreground.
+    try std.testing.expectEqual(nord.bg, p[16]);
+    try std.testing.expectEqual(nord.fg, p[231]);
+    try std.testing.expectEqual(p[1], p[16 + 5 * 36]);
+    try std.testing.expectEqual(p[2], p[16 + 5 * 6]);
+    try std.testing.expectEqual(p[4], p[16 + 5]);
+    // The grays are opaque and step evenly between the two, never reaching either.
+    for (232..256) |i| try std.testing.expectEqual(@as(u32, 0xFF), p[i] >> 24);
+    try std.testing.expect(p[232] != nord.bg and p[255] != nord.fg);
+    try std.testing.expectEqual(Rgb.of(nord.bg).mix(Rgb.of(nord.fg), 0.52).pack(), p[244] & 0xffffff);
 }

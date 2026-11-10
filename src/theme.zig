@@ -2,6 +2,7 @@
 //! chrome: surfaces and strokes are small mixes of the background toward the foreground, controls
 //! are the foreground at low opacity, and the accent is the cursor color.
 const std = @import("std");
+const gdk = @import("gdk");
 const Colors = @import("stream.zig").Colors;
 
 /// Colors for a terminal whose host reports no theme: a neutral dark one.
@@ -31,6 +32,20 @@ pub const Rgb = struct {
 
     fn byte(x: f64) u8 {
         return @intFromFloat(@round(std.math.clamp(x, 0, 1) * 255));
+    }
+
+    /// As 0xRRGGBB.
+    pub fn pack(c: Rgb) u32 {
+        return (@as(u32, byte(c.r)) << 16) | (@as(u32, byte(c.g)) << 8) | byte(c.b);
+    }
+
+    pub fn fromRgba(v: *const gdk.RGBA) Rgb {
+        return .{ .r = v.f_red, .g = v.f_green, .b = v.f_blue };
+    }
+
+    /// For GTK, fully opaque.
+    pub fn rgba(c: Rgb) gdk.RGBA {
+        return .{ .f_red = @floatCast(c.r), .f_green = @floatCast(c.g), .f_blue = @floatCast(c.b), .f_alpha = 1 };
     }
 
     pub fn format(c: Rgb, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -150,4 +165,12 @@ test "a dark theme gives a dark palette with surfaces just above the canvas" {
     var w: std.Io.Writer = .fixed(&buf);
     try p.css(&w);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "@define-color accent_bg_color #4fe3c1;") != null);
+}
+
+test "a color packs back to the number it came from" {
+    for ([_]u32{ 0x000000, 0xffffff, 0x4fe3c1, 0x010203, 0x7f8081 }) |c| {
+        try std.testing.expectEqual(c, Rgb.of(c).pack());
+        try std.testing.expectEqual(c, Rgb.fromRgba(&Rgb.of(c).rgba()).pack());
+    }
+    try std.testing.expectEqual(@as(u32, 0x808080), Rgb.of(0).mix(Rgb.of(0xffffff), 0.5).pack());
 }
