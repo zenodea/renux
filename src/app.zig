@@ -92,7 +92,6 @@ const css =
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
     \\.find-bar { margin: 6px 12px 14px 12px; padding: 4px 5px 4px 6px; min-width: 230px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
     \\.find-bar entry { background: none; box-shadow: none; outline: none; border: none; min-height: 28px; padding-left: 6px; }
-    \\.find-bar entry > image:first-child { opacity: 0; }
     \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }

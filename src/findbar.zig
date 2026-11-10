@@ -10,7 +10,7 @@ const gpa = std.heap.c_allocator;
 pub const FindBar = struct {
     view: *TermView,
     revealer: *gtk.Revealer,
-    entry: *gtk.SearchEntry,
+    entry: *gtk.Entry,
     count: *gtk.Label,
     total: usize = 0,
 
@@ -19,18 +19,20 @@ pub const FindBar = struct {
         const f = gpa.create(FindBar) catch return null;
         const row = gtk.Box.new(.horizontal, 2);
         row.as(gtk.Widget).addCssClass("find-bar");
-        f.* = .{ .view = view, .revealer = gtk.Revealer.new(), .entry = gtk.SearchEntry.new(), .count = gtk.Label.new("") };
+        f.* = .{ .view = view, .revealer = gtk.Revealer.new(), .entry = gtk.Entry.new(), .count = gtk.Label.new("") };
         f.entry.as(gtk.Widget).setHexpand(1);
         f.entry.as(gtk.Editable).setWidthChars(12);
         f.entry.as(gtk.Editable).setMaxWidthChars(18);
         f.entry.setPlaceholderText("Find");
-        // Matches follow the typing at once.
-        f.entry.setSearchDelay(0);
-        _ = gtk.SearchEntry.signals.search_changed.connect(f.entry, *FindBar, &changed, f, .{});
-        _ = gtk.SearchEntry.signals.activate.connect(f.entry, *FindBar, &nextSignal, f, .{});
-        _ = gtk.SearchEntry.signals.next_match.connect(f.entry, *FindBar, &nextSignal, f, .{});
-        _ = gtk.SearchEntry.signals.previous_match.connect(f.entry, *FindBar, &prevSignal, f, .{});
-        _ = gtk.SearchEntry.signals.stop_search.connect(f.entry, *FindBar, &stopSignal, f, .{});
+        // A plain field: nothing in it but the text, with no icon or clear button.
+        f.entry.setHasFrame(0);
+        _ = gtk.Editable.signals.changed.connect(f.entry, *FindBar, &changed, f, .{});
+        _ = gtk.Entry.signals.activate.connect(f.entry, *FindBar, &nextSignal, f, .{});
+        // Escape closes the bar, and Shift+Return goes back a match.
+        const keys = gtk.EventControllerKey.new();
+        keys.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.EventControllerKey.signals.key_pressed.connect(keys, *FindBar, &keyed, f, .{});
+        f.entry.as(gtk.Widget).addController(keys.as(gtk.EventController));
         f.count.as(gtk.Widget).addCssClass("find-count");
         row.append(f.entry.as(gtk.Widget));
         row.append(f.count.as(gtk.Widget));
@@ -111,17 +113,22 @@ pub const FindBar = struct {
         f.count.setText(text.ptr);
     }
 
-    fn changed(entry: *gtk.SearchEntry, f: *FindBar) callconv(.c) void {
+    fn changed(entry: *gtk.Entry, f: *FindBar) callconv(.c) void {
         if (f.isOpen()) f.setText(std.mem.span(entry.as(gtk.Editable).getText()));
     }
-    fn nextSignal(_: *gtk.SearchEntry, f: *FindBar) callconv(.c) void {
+    fn nextSignal(_: *gtk.Entry, f: *FindBar) callconv(.c) void {
         f.step(true);
     }
-    fn prevSignal(_: *gtk.SearchEntry, f: *FindBar) callconv(.c) void {
-        f.step(false);
-    }
-    fn stopSignal(_: *gtk.SearchEntry, f: *FindBar) callconv(.c) void {
-        f.close();
+    fn keyed(_: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: @import("gdk").ModifierType, f: *FindBar) callconv(.c) c_int {
+        if (keyval == 0xff1b) { // Escape
+            f.close();
+            return 1;
+        }
+        if ((keyval == 0xff0d or keyval == 0xff8d) and state.shift_mask) { // Shift+Return
+            f.step(false);
+            return 1;
+        }
+        return 0;
     }
     fn nextClicked(_: *gtk.Button, f: *FindBar) callconv(.c) void {
         f.step(true);
