@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("data/dev.compy.linux.desktop", "share/applications/dev.compy.linux.desktop");
     // What software centers show, and the license.
     b.installFile("data/dev.compy.linux.metainfo.xml", "share/metainfo/dev.compy.linux.metainfo.xml");
-    b.installFile("../LICENSE", "share/licenses/compy/LICENSE");
+    b.installFile("LICENSE", "share/licenses/compy/LICENSE");
     // Nerd Font symbols, so icons in prompts show with any font.
     b.installFile("data/fonts/SymbolsNerdFontMono-Regular.ttf", "share/compy/fonts/SymbolsNerdFontMono-Regular.ttf");
     b.installFile("data/fonts/SymbolsNerdFont-LICENSE.txt", "share/compy/fonts/SymbolsNerdFont-LICENSE.txt");
