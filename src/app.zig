@@ -210,11 +210,16 @@ pub const App = struct {
     look_css: ?*gtk.CssProvider = null,
     last_dark: bool = true,
     badge_count: u32 = 0,
+    /// The session bus the launcher badge is sent on, once it has answered.
+    badge_bus: ?*gio.DBusConnection = null,
+    badge_bus_asked: bool = false,
     /// The shown window's tiled pane count, to balance splits when it changes.
     balance_count: usize = 0,
     balance_window: [64]u8 = undefined,
     balance_window_len: usize = 0,
     theme_for: ?@import("stream.zig").Colors = null,
+    /// Each pane's folder as last seen, hashed, to tell a move from a repeat.
+    block_folders: std.AutoHashMapUnmanaged(u64, u64) = .empty,
 
     pub fn create() !*App {
         const a = try gpa.create(App);
@@ -588,21 +593,38 @@ pub const App = struct {
         if (a.hasHostUrl(url)) {
             for (a.hosts.items) |x| if (std.mem.eql(u8, x.server.url, std.mem.trimEnd(u8, url, "/"))) return x;
         }
-        const s = Server.create(url, clientLabel()) catch return null;
-        const ws = Workspace.create(s) catch return null;
+        // Everything is made before any of it is wired up, so running out of memory part way
+        // leaves nothing behind but the workspace's few widgets.
+        a.hosts.ensureUnusedCapacity(gpa, 1) catch return null;
         const h = gpa.create(Host) catch return null;
-        h.* = .{
-            .app = a,
-            .label = gpa.dupe(u8, label) catch return null,
-            .server = s,
-            .workspace = ws,
-            .page = std.fmt.allocPrintSentinel(gpa, "host-{d}", .{a.next_page}, 0) catch return null,
+        const host_label = gpa.dupe(u8, label) catch {
+            gpa.destroy(h);
+            return null;
         };
+        const page = std.fmt.allocPrintSentinel(gpa, "host-{d}", .{a.next_page}, 0) catch {
+            gpa.free(host_label);
+            gpa.destroy(h);
+            return null;
+        };
+        const s = Server.create(url, clientLabel()) catch {
+            gpa.free(page);
+            gpa.free(host_label);
+            gpa.destroy(h);
+            return null;
+        };
+        const ws = Workspace.create(s) catch {
+            s.destroy();
+            gpa.free(page);
+            gpa.free(host_label);
+            gpa.destroy(h);
+            return null;
+        };
+        h.* = .{ .app = a, .label = host_label, .server = s, .workspace = ws, .page = page };
         a.next_page += 1;
         s.observer = .{ .ctx = h, .changed = serverChanged };
         s.performer = .{ .ctx = h, .perform = perform };
         _ = a.stack.addNamed(ws.root, h.page.ptr);
-        a.hosts.append(gpa, h) catch return null;
+        a.hosts.appendAssumeCapacity(h);
         if (a.current == null) a.selectHost(h);
         a.rebuildSidebar();
         return h;
@@ -657,6 +679,20 @@ pub const App = struct {
         a.ensureSelection();
     }
 
+    /// Whether a pane's folder differs from the one last seen for it, which is then remembered.
+    fn folderMoved(a: *App, h: *Host, block_id: []const u8, path: []const u8) bool {
+        var hasher = std.hash.Wyhash.init(@intFromPtr(h));
+        hasher.update(block_id);
+        const key = hasher.final();
+        const now = std.hash.Wyhash.hash(0, path);
+        // Panes come and go; the few bytes each leaves are dropped together now and then.
+        if (a.block_folders.count() > 4096) a.block_folders.clearRetainingCapacity();
+        const slot = a.block_folders.getOrPut(gpa, key) catch return true;
+        if (slot.found_existing and slot.value_ptr.* == now) return false;
+        slot.value_ptr.* = now;
+        return true;
+    }
+
     fn hostOf(a: *App, s: *Server) ?*Host {
         for (a.hosts.items) |h| if (h.server == s) return h;
         return null;
@@ -699,7 +735,8 @@ pub const App = struct {
                 if (h.server.blockInfo(block)) |info| if (info.folder) |f| {
                     var pbuf: [1024]u8 = undefined;
                     const path = folderPath(&pbuf, f);
-                    if (path.len > 1) settings.addRecentPath(path);
+                    // Block details change often; a folder is only recent when a pane moves to it.
+                    if (path.len > 1 and a.folderMoved(h, block, path)) settings.addRecentPath(path);
                 };
             },
             .alert => a.showAlert(h),
@@ -1035,6 +1072,8 @@ pub const App = struct {
             @import("tailscale.zig").read(list, &tailnetRead);
         } else |_| {}
         // An address copied from Rex's Pair screen is likely what's wanted.
+        // The read can finish after the dialog closed, so it holds the field until then.
+        _ = url.as(gobject.Object).ref();
         a.window.as(gtk.Widget).getClipboard().readTextAsync(null, &clipboardForUrl, url);
         dialog.setExtraChild(box.as(gtk.Widget));
         dialog.addResponse("cancel", "Cancel");
@@ -1073,14 +1112,37 @@ pub const App = struct {
             const text = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ peer.name, if (peer.online) "" else " (offline)" }, 0) catch continue;
             const b = gtk.Button.newWithLabel(text.ptr);
             b.as(gtk.Widget).addCssClass("flat");
-            const pick = gpa.create(TailnetPick) catch continue;
-            pick.* = .{ .entry = list.url, .name = list.name, .url = gpa.dupeSentinel(u8, peer.url, 0) catch continue, .label = gpa.dupeSentinel(u8, peer.name, 0) catch continue };
+            const pick_url = gpa.dupeSentinel(u8, peer.url, 0) catch continue;
+            const pick_label = gpa.dupeSentinel(u8, peer.name, 0) catch {
+                gpa.free(pick_url);
+                continue;
+            };
+            const pick = gpa.create(TailnetPick) catch {
+                gpa.free(pick_url);
+                gpa.free(pick_label);
+                continue;
+            };
+            pick.* = .{ .entry = list.url, .name = list.name, .url = pick_url, .label = pick_label };
             _ = gtk.Button.signals.clicked.connect(b, *TailnetPick, &tailnetPicked, pick, .{});
+            // The pick belongs to its button and goes when the button does.
+            gobject.Object.setDataFull(b.as(gobject.Object), "pick", pick, &TailnetPick.free);
             list.box.append(b.as(gtk.Widget));
         }
     }
 
-    const TailnetPick = struct { entry: *gtk.Entry, name: *gtk.Entry, url: [:0]u8, label: [:0]u8 };
+    const TailnetPick = struct {
+        entry: *gtk.Entry,
+        name: *gtk.Entry,
+        url: [:0]u8,
+        label: [:0]u8,
+
+        fn free(data: ?*anyopaque) callconv(.c) void {
+            const p: *TailnetPick = @ptrCast(@alignCast(data orelse return));
+            gpa.free(p.url);
+            gpa.free(p.label);
+            gpa.destroy(p);
+        }
+    };
 
     fn tailnetPicked(_: *gtk.Button, p: *TailnetPick) callconv(.c) void {
         p.entry.as(gtk.Editable).setText(p.url.ptr);
@@ -1089,6 +1151,7 @@ pub const App = struct {
 
     fn clipboardForUrl(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const entry: *gtk.Entry = @ptrCast(@alignCast(data.?));
+        defer entry.as(gobject.Object).unref();
         const clipboard: *gdk.Clipboard = @ptrCast(source orelse return);
         const text = clipboard.readTextFinish(result, null) orelse return;
         defer glib.free(text);
@@ -1404,13 +1467,35 @@ pub const App = struct {
         if (n == a.badge_count) return;
         a.badge_count = n;
         if (builtin.os.tag == .macos) return @import("macos.zig").setBadge(n);
-        // Unity's launcher entry, which KDE, Plank and Dash to Dock show.
-        const bus = gio.busGetSync(.session, null, null) orelse return;
-        const props = glib.VariantBuilder.new(glib.VariantType.new("a{sv}"));
+        a.sendBadge();
+    }
+
+    /// Unity's launcher entry, which KDE, Plank and Dash to Dock show. The session bus is asked
+    /// for once, without waiting; the count goes out when it arrives and on every change after.
+    fn sendBadge(a: *App) void {
+        const bus = a.badge_bus orelse {
+            if (!a.badge_bus_asked) {
+                a.badge_bus_asked = true;
+                gio.busGet(.session, null, &gotBadgeBus, a);
+            }
+            return;
+        };
+        const n = a.badge_count;
+        const dict = glib.VariantType.new("a{sv}");
+        defer dict.free();
+        const props = glib.VariantBuilder.new(dict);
+        defer props.unref();
         props.add("{sv}", "count", glib.Variant.newInt64(n));
         props.add("{sv}", "count-visible", glib.Variant.newBoolean(@intFromBool(n > 0)));
+        // The tuple is floating, and sending it takes it over along with what it holds.
         const params = glib.Variant.newTuple(&[_]*glib.Variant{ glib.Variant.newString("application://dev.compy.linux.desktop"), props.end() }, 2);
         _ = bus.emitSignal(null, "/dev/compy/linux", "com.canonical.Unity.LauncherEntry", "Update", params, null);
+    }
+
+    fn gotBadgeBus(_: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.badge_bus = gio.busGetFinish(result, null) orelse return;
+        a.sendBadge();
     }
 
     /// Opens a tab in the shown session that runs a command, such as `rex skill setup`.
@@ -1539,7 +1624,7 @@ pub const App = struct {
             termview.setKeyMode("");
             return true;
         }
-        if (std.mem.indexOf(u8, action, "palette") != null) return a.did(openPalette);
+        if (std.mem.startsWith(u8, action, "client.palette.")) return a.did(openPalette);
         if (std.mem.eql(u8, action, "client.sidebar.toggle")) {
             a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
             return true;
@@ -2218,7 +2303,6 @@ pub const App = struct {
             .{ "zoom-pane", zoomPane, "" },
             .{ "new-window", newWindow, "" },
             .{ "new-session", newSession, "" },
-            .{ "paste", paste, "" },
             .{ "retry", retry, "" },
             .{ "change-server", changeServer, "" },
             .{ "toggle-sidebar", toggleSidebar, "" },
@@ -2416,11 +2500,6 @@ pub const App = struct {
         ctx.* = .{ .app = a, .entry = undefined, .session_id = gpa.dupe(u8, t[1]) catch return false, .window_id = gpa.dupe(u8, "") catch return false, .block_id = gpa.dupe(u8, t[2]) catch return false };
         a.askName("Rename pane", current, null, "Rename", ctx);
         return true;
-    }
-
-    fn paste(a: *App) void {
-        const ws = a.workspace orelse return;
-        _ = ws;
     }
 
     fn retry(a: *App) void {
@@ -3175,11 +3254,6 @@ fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0
         return std.fmt.bufPrintSentinel(buf, "Window {d}", .{i + 1}, 0) catch "Window";
     };
     return "Window";
-}
-
-fn sessionLabel(s: *Server, id: []const u8) []const u8 {
-    for (s.sessions.items) |session| if (std.mem.eql(u8, session.id, id)) return if (session.label.len > 0) session.label else "Session";
-    return "";
 }
 
 fn eqlOpt(a: ?[]const u8, b: []const u8) bool {
