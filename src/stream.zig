@@ -245,8 +245,7 @@ pub const Stream = struct {
         s.state = .reconnecting;
         if (fresh) s.token = null;
         s.changed();
-        const wait: c_uint = @min(10_000, @as(c_uint, 500) << @min(s.retries, 5));
-        if (s.retries < 31) s.retries += 1;
+        const wait = ws.backoffMs(500, 10_000, &s.retries);
         s.cancelRetry();
         s.retry_timer = glib.timeoutAdd(wait, &retryNow, s);
     }

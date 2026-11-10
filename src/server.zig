@@ -234,8 +234,7 @@ pub const Server = struct {
         else
             reason;
         s.setState(.offline, explained);
-        const wait: c_uint = @min(30_000, @as(c_uint, 1000) << @min(s.retries, 5));
-        if (s.retries < 31) s.retries += 1;
+        const wait = @import("ws.zig").backoffMs(1000, 30_000, &s.retries);
         if (s.retry_timer != 0) _ = glib.Source.remove(s.retry_timer);
         s.retry_timer = glib.timeoutAdd(wait, &retryNow, s);
     }
