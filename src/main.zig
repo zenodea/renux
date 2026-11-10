@@ -73,6 +73,11 @@ pub fn main(init: std.process.Init) !void {
             break;
         }
     }
+    // GTK drops the GPU programs it built for drawing once they go 15 seconds unused, then
+    // builds them again at the next use, which stalls a frame for tens to hundreds of
+    // milliseconds: after any pause, the next tab switch, menu or dialog hitched. A day's
+    // patience keeps them for the session. Someone who set the variable themselves keeps theirs.
+    _ = @import("glib").setenv("GSK_CACHE_TIMEOUT", "86400", 0);
     // Before GTK starts, which is when Pango first lists the fonts.
     @import("fonts.zig").registerBundled();
     if (@import("builtin").os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
