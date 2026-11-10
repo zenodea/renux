@@ -1827,7 +1827,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const st = v.stream() orelse return snapshotEmpty(v, sn, w, h, "Closed");
     const t = st.term orelse return snapshotEmpty(v, sn, w, h, switch (st.state) {
         .closed => "This pane has closed",
-        else => "Connecting…",
+        // A pane is nearly always on screen a moment later, so nothing is written meanwhile.
+        else => "",
     });
     _ = t.render(true);
     const f = &t.frame;

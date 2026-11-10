@@ -520,6 +520,7 @@ pub const App = struct {
         // is using; otherwise their typing lands in Compy.
         const dev_shot = build_options.dev and std.c.getenv("COMPY_SHOT") != null;
         if (dev_shot) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
+        @import("warm.zig").start(win.as(gtk.Window));
         // `compy --toggle` finds this process by its ID and signals it.
         if (!dev_shot) {
             @import("main.zig").claimToggle();
@@ -895,7 +896,9 @@ pub const App = struct {
             },
             .connecting => if (!a.was_online) {
                 a.status.setIconName(null);
-                a.status.setTitle("Connecting…");
+                // A connection is usually up before anyone could read a message, so the page
+                // stays empty while it's made; a server that can't be reached says so after.
+                a.status.setTitle("");
                 a.status.setDescription(null);
                 a.retry_button.as(gtk.Widget).setVisible(0);
                 a.stack.setVisibleChildName("status");
@@ -2694,7 +2697,6 @@ pub const App = struct {
         };
         // Rex can only dock beside a tiled pane, so with none the layer fills the window instead.
         t[0].resizeLayer(t[1], p.layer_id, .{ .x = 0, .y = 0, .w = 1, .h = 1 });
-        a.toast("No tiled pane to dock beside, so it fills the window");
     }
 
     /// Minimizes a pane to the tray. A tiled pane floats first, then goes once the server says so.
