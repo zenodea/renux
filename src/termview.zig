@@ -285,6 +285,7 @@ pub const TermView = struct {
     sent_cols: u16 = 0,
     sent_rows: u16 = 0,
     size_timer: c_uint = 0,
+    frozen: bool = false,
     flash_timer: c_uint = 0,
     drag_idle: c_uint = 0,
     /// Lines of scrolling not yet sent to a program that takes the mouse.
@@ -401,6 +402,13 @@ pub const TermView = struct {
         v.measure();
         if (server.terminal(session_id, block_id)) |st| st.addListener(.{ .ctx = v, .changed = changed });
         return v;
+    }
+
+    /// Stops this view telling the server about its size, for a card on its way out.
+    pub fn freeze(v: *TermView) void {
+        v.frozen = true;
+        if (v.size_timer != 0) _ = glib.Source.remove(v.size_timer);
+        v.size_timer = 0;
     }
 
     pub fn widget(v: *TermView) *gtk.Widget {
@@ -558,6 +566,8 @@ pub const TermView = struct {
     // Size.
 
     fn resized(v: *TermView, width: c_int, height: c_int) void {
+        // A card shrinking away into the tray is no size for its program to hear about.
+        if (v.frozen) return;
         const fit_cols = @floor((@as(f64, @floatFromInt(width)) - 2 * pad_x) / v.cell_w);
         const fit_rows = @floor((@as(f64, @floatFromInt(height)) - 2 * pad_y) / v.cell_h);
         // A pane with no room yet, or squeezed to nothing on its way to the tray, isn't a size

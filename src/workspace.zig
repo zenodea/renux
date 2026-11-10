@@ -11,6 +11,7 @@ const std = @import("std");
 const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
+const graphene = @import("graphene");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
 const gsk = @import("gsk");
@@ -89,7 +90,12 @@ const Leaving = struct {
     size: [2]f64,
     alpha: f64,
     block_id: []u8,
+    /// Set for a card going to the tray: the layer whose chip it shrinks into.
+    to_layer: ?[]u8 = null,
 };
+
+/// Where a chip was when its layer came back from the tray, for its card to grow out of.
+const Restored = struct { layer_id: []u8, rect: [4]f64 };
 
 const Divider = struct {
     horizontal: bool,
@@ -117,6 +123,7 @@ pub const Workspace = struct {
     /// The line shown on a divider under the pointer or being dragged, and which divider.
     line: *gtk.Widget,
     line_at: ?usize = null,
+    restored: std.ArrayList(Restored) = .empty,
     swap_arrows: *gtk.Widget,
     target_cur: [4]f64 = .{ 0, 0, 0, 0 },
     target_vel: [4]f64 = .{ 0, 0, 0, 0 },
@@ -415,6 +422,8 @@ pub const Workspace = struct {
         ws.minimized.deinit(gpa);
         ws.backdrops.deinit(gpa);
         ws.leaving.deinit(gpa);
+        for (ws.restored.items) |r| gpa.free(r.layer_id);
+        ws.restored.deinit(gpa);
         inline for (.{ ws.session_id, ws.window_id, ws.focused }) |slot| if (slot) |v| gpa.free(v);
         gpa.destroy(ws);
     }
@@ -451,10 +460,38 @@ pub const Workspace = struct {
             for (ws.minimized.items) |m| ws.refreshChip(m);
             return;
         }
+        ws.noteRestored(w);
         ws.clearTray();
         if (w.zoomed_block_id == null) for (w.layers) |layer| {
             if (layer.floating and layer.minimized and layer.blocks.len > 0) ws.addToTray(layer.id, layer.blocks[0].id);
         };
+    }
+
+    /// Where a layer's chip sits in the tray, or where the next chip will go if it has no
+    /// place yet (it was made a moment ago).
+    fn chipRect(ws: *Workspace, layer_id: []const u8) [4]f64 {
+        const tray = ws.tray.as(gtk.Widget);
+        for (ws.minimized.items) |m| if (std.mem.eql(u8, m.layer_id, layer_id)) {
+            var b: graphene.Rect = undefined;
+            if (m.button.getWidth() > 0 and m.button.computeBounds(ws.root, &b) != 0) return .{ b.f_origin.f_x, b.f_origin.f_y, b.f_size.f_width, b.f_size.f_height };
+        };
+        const tw: f64 = @floatFromInt(tray.getWidth());
+        return .{ 10 + tw, ws.height() - 42, 120, 32 };
+    }
+
+    /// Notes where the chips are that the window no longer has, so the cards coming back
+    /// from them can grow out of those places.
+    fn noteRestored(ws: *Workspace, w: *const view.Window) void {
+        for (ws.restored.items) |r| gpa.free(r.layer_id);
+        ws.restored.clearRetainingCapacity();
+        for (ws.minimized.items) |m| {
+            const still = for (w.layers) |layer| {
+                if (layer.minimized and std.mem.eql(u8, layer.id, m.layer_id)) break true;
+            } else false;
+            if (still) continue;
+            const id = gpa.dupe(u8, m.layer_id) catch continue;
+            ws.restored.append(gpa, .{ .layer_id = id, .rect = ws.chipRect(m.layer_id) }) catch gpa.free(id);
+        }
     }
 
     fn refreshChip(ws: *Workspace, m: Minimized) void {
@@ -467,10 +504,17 @@ pub const Workspace = struct {
     fn leave(ws: *Workspace, p: Pane) void {
         if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         p.frame.setCanTarget(0);
-        gpa.free(p.layer_id);
+        defer gpa.free(p.layer_id);
         // The terminal stays until the card has faded, so it fades with its text.
         const r = ws.paneRect(&p);
-        ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id }) catch {
+        // A pane whose layer just went to the tray shrinks into its chip there.
+        var to_layer: ?[]u8 = null;
+        for (ws.minimized.items) |m| if (std.mem.eql(u8, m.layer_id, p.layer_id)) {
+            to_layer = gpa.dupe(u8, m.layer_id) catch null;
+        };
+        if (to_layer != null) p.term.freeze();
+        ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id, .to_layer = to_layer }) catch {
+            if (to_layer) |t| gpa.free(t);
             p.frame.unparent();
             ws.server.parkTerminal(p.block_id);
             gpa.free(p.block_id);
@@ -481,6 +525,7 @@ pub const Workspace = struct {
 
     /// A faded card goes for good, and its terminal too unless the pane came back meanwhile.
     fn gone(ws: *Workspace, l: Leaving) void {
+        if (l.to_layer) |t| gpa.free(t);
         l.frame.unparent();
         if (ws.paneOf(l.block_id) == null) ws.server.parkTerminal(l.block_id);
         gpa.free(l.block_id);
@@ -852,6 +897,11 @@ pub const Workspace = struct {
     /// Gives the keyboard to the focused pane.
     pub fn grabFocus(ws: *Workspace) void {
         if (ws.focusedView()) |tv| _ = tv.widget().grabFocus();
+    }
+
+    fn restoredFrom(ws: *Workspace, layer_id: []const u8) ?[4]f64 {
+        for (ws.restored.items) |r| if (std.mem.eql(u8, r.layer_id, layer_id)) return r.rect;
+        return null;
     }
 
     /// The highlighted pane's find bar.
@@ -1488,10 +1538,18 @@ pub const Workspace = struct {
         var i: usize = 0;
         while (i < ws.leaving.items.len) {
             const l = &ws.leaving.items[i];
-            l.alpha -= dt / 0.16;
-            // Shrinks a little toward its middle as it fades.
-            const s = 1 - 0.25 * dt;
-            l.cur = .{ l.cur[0] + l.cur[2] * (1 - s) / 2, l.cur[1] + l.cur[3] * (1 - s) / 2, l.cur[2] * s, l.cur[3] * s };
+            if (l.to_layer) |layer| {
+                // To the tray: the card glides and shrinks into its chip, fading as it lands.
+                const to = ws.chipRect(layer);
+                const k = 1 - @exp(-16 * dt);
+                for (0..4) |c| l.cur[c] += (to[c] - l.cur[c]) * k;
+                l.alpha -= dt / 0.26;
+            } else {
+                l.alpha -= dt / 0.16;
+                // Shrinks a little toward its middle as it fades.
+                const s = 1 - 0.25 * dt;
+                l.cur = .{ l.cur[0] + l.cur[2] * (1 - s) / 2, l.cur[1] + l.cur[3] * (1 - s) / 2, l.cur[2] * s, l.cur[3] * s };
+            }
             if (l.alpha <= 0) {
                 ws.gone(ws.leaving.orderedRemove(i));
             } else i += 1;
@@ -1632,6 +1690,10 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
             if (ws.snap or resized) {
                 p.cur = target;
                 p.alpha = 1;
+            } else if (ws.restoredFrom(p.layer_id)) |from| {
+                // Back from the tray: the card grows out of where its chip was.
+                p.cur = from;
+                p.alpha = 0.2;
             } else {
                 // A new card grows in from a little smaller than its place.
                 const inset_x = target[2] * 0.04;
@@ -1653,7 +1715,13 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         allocateAt(p.frame, p.cur);
     }
     for (ws.leaving.items) |l| {
-        l.frame.setOpacity(@max(0, l.alpha));
+        // Eased so the card stays solid for most of its trip and fades as it arrives.
+        l.frame.setOpacity(if (l.to_layer != null) @min(1, @max(0, l.alpha) * 1.8) else @max(0, l.alpha));
+        if (l.to_layer != null) {
+            // Its terminal is frozen, so the card can take the shrinking size itself.
+            allocateAt(l.frame, .{ l.cur[0], l.cur[1], @max(24, l.cur[2]), @max(16, l.cur[3]) });
+            continue;
+        }
         // A leaving card keeps its size, so its terminal never asks the server for a new one.
         allocateAt(l.frame, .{ l.cur[0] + (l.cur[2] - l.size[0]) / 2, l.cur[1] + (l.cur[3] - l.size[1]) / 2, l.size[0], l.size[1] });
     }
