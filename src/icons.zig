@@ -6,8 +6,7 @@ const gdk = @import("gdk");
 const cairo = @import("cairo");
 const rsvg = @import("rsvg");
 const table = @import("ui_icons.zig");
-
-const gpa = std.heap.c_allocator;
+const draw_util = @import("draw.zig");
 
 pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, palette, interface, keyboard, search, bell, up, down, right, new_session, add_host, filter, minimize };
 
@@ -15,7 +14,7 @@ pub fn image(kind: Kind, size: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();
     area.setContentWidth(size);
     area.setContentHeight(size);
-    area.setDrawFunc(&draw, @ptrFromInt(@as(usize, @intFromEnum(kind)) + 1), null);
+    area.setDrawFunc(&draw, @ptrFromInt(@as(usize, @backingInt(kind)) + 1), null);
     const w = area.as(gtk.Widget);
     w.setCanTarget(0);
     w.setValign(.center);
@@ -36,10 +35,10 @@ pub fn button(kind: Kind, tooltip: [:0]const u8, action: ?[:0]const u8) *gtk.But
 }
 
 fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int, data: ?*anyopaque) callconv(.c) void {
-    const kind: Kind = @enumFromInt(@intFromPtr(data) - 1);
+    const kind: Kind = @fromBackingInt(@intCast(@intFromPtr(data) - 1));
     var color: gdk.RGBA = undefined;
     area.as(gtk.Widget).getColor(&color);
-    const h = handleFor(kind, color) orelse return;
+    const h = handleFor(kind) orelse return;
     const side: f64 = @floatFromInt(@min(width, height));
     const viewport: rsvg.Rectangle = .{
         .f_x = (@as(f64, @floatFromInt(width)) - side) / 2,
@@ -47,27 +46,25 @@ fn draw(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, height: c_int,
         .f_width = side,
         .f_height = side,
     };
+    // The shape is drawn once as a mask and filled with the widget's color, so a color that
+    // fades (hover, a disabled button) needs no new SVG for each shade on the way.
+    cr.pushGroup();
     _ = h.renderDocument(cr, &viewport, null);
+    const shape = cr.popGroup();
+    defer shape.destroy();
+    draw_util.setRgba(cr, color, 1);
+    cr.mask(shape);
 }
 
-var handles: std.AutoHashMapUnmanaged(u64, *rsvg.Handle) = .empty;
+var handles: [std.enums.values(Kind).len]?*rsvg.Handle = @splat(null);
 
-/// The icon as an SVG in this color, parsed once per color.
-fn handleFor(kind: Kind, color: gdk.RGBA) ?*rsvg.Handle {
+/// The icon's shape as an SVG, parsed once.
+fn handleFor(kind: Kind) ?*rsvg.Handle {
+    const slot = &handles[@backingInt(kind)];
+    if (slot.*) |h| return h;
     const icon = for (table.icons) |i| {
         if (std.mem.eql(u8, i.name, @tagName(kind))) break i;
     } else return null;
-    const r: u8 = @intFromFloat(@round(std.math.clamp(color.f_red, 0, 1) * 255));
-    const g: u8 = @intFromFloat(@round(std.math.clamp(color.f_green, 0, 1) * 255));
-    const b: u8 = @intFromFloat(@round(std.math.clamp(color.f_blue, 0, 1) * 255));
-    const a: u8 = @intFromFloat(@round(std.math.clamp(color.f_alpha, 0, 1) * 255));
-    const key = (@as(u64, @intFromEnum(kind)) << 32) | (@as(u64, r) << 24) | (@as(u64, g) << 16) | (@as(u64, b) << 8) | a;
-    if (handles.get(key)) |h| return h;
-    const svg = std.fmt.allocPrint(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><path fill=\"#{x:0>2}{x:0>2}{x:0>2}\" fill-opacity=\"{d:.3}\" transform=\"{s}\" d=\"{s}\"/></svg>", .{
-        r, g, b, @as(f64, @floatFromInt(a)) / 255, icon.transform, icon.path,
-    }) catch return null;
-    defer gpa.free(svg);
-    const h = rsvg.Handle.newFromData(svg.ptr, svg.len, null) orelse return null;
-    handles.put(gpa, key, h) catch {};
-    return h;
+    slot.* = draw_util.svgHandle(icon.path, icon.transform, "#ffffff");
+    return slot.*;
 }

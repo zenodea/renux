@@ -5,6 +5,7 @@ const gobject = @import("gobject");
 const cairo = @import("cairo");
 const rsvg = @import("rsvg");
 const table = @import("program_icons.zig");
+const draw = @import("draw.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -71,21 +72,14 @@ fn handleFor(icon: *const table.Icon, dark_glyph: bool) ?*rsvg.Handle {
     var key_buf: [80]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buf, "{s}:{}", .{ icon.slug, dark_glyph }) catch return null;
     if (handles.get(key)) |h| return h;
-    const svg = std.fmt.allocPrint(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><path fill=\"{s}\" d=\"{s}\"/></svg>", .{
-        if (dark_glyph) "#111111" else "#ffffff", icon.path,
-    }) catch return null;
-    defer gpa.free(svg);
-    const h = rsvg.Handle.newFromData(svg.ptr, svg.len, null) orelse return null;
+    const h = draw.svgHandle(icon.path, "", if (dark_glyph) "#111111" else "#ffffff") orelse return null;
     handles.put(gpa, gpa.dupe(u8, key) catch return h, h) catch {};
     return h;
 }
 
-fn luma(c: u32) f64 {
-    const r: f64 = @floatFromInt((c >> 16) & 0xff);
-    const g: f64 = @floatFromInt((c >> 8) & 0xff);
-    const b: f64 = @floatFromInt(c & 0xff);
-    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-}
+const luma = draw.luma;
+const setColor = draw.setColor;
+const roundRect = draw.roundRect;
 
 /// Draws a rounded tile of `size` at (x, y): the brand color with the logo, or a neutral tile
 /// with a prompt when nothing matches. `neutral` and `ink` are the theme's tile and text colors.
@@ -124,18 +118,18 @@ pub fn drawTile(cr: *cairo.Context, icon: ?*const table.Icon, x: f64, y: f64, si
     cr.stroke();
 }
 
-fn setColor(cr: *cairo.Context, c: u32) void {
-    cr.setSourceRgb(@as(f64, @floatFromInt((c >> 16) & 0xff)) / 255, @as(f64, @floatFromInt((c >> 8) & 0xff)) / 255, @as(f64, @floatFromInt(c & 0xff)) / 255);
+/// A program's own name from what a block reports (`name/script`, a login shell as `-zsh`).
+pub fn programName(process: []const u8) []const u8 {
+    return std.mem.trimStart(u8, process[0 .. std.mem.indexOfScalar(u8, process, '/') orelse process.len], "-");
 }
 
-fn roundRect(cr: *cairo.Context, x: f64, y: f64, w: f64, h: f64, r: f64) void {
-    const pi: f64 = std.math.pi;
-    cr.newSubPath();
-    cr.arc(x + w - r, y + r, r, -pi / 2, 0);
-    cr.arc(x + w - r, y + h - r, r, 0, pi / 2);
-    cr.arc(x + r, y + h - r, r, pi / 2, pi);
-    cr.arc(x + r, y + r, r, pi, 3 * pi / 2);
-    cr.closePath();
+/// What runs in a pane and where, such as "zsh ~/compy": the program's name, then its folder
+/// when one is known. A pane that reported nothing is a shell.
+pub fn displayTitle(buf: []u8, process: ?[]const u8, folder: ?[]const u8) []const u8 {
+    const name = programName(process orelse "shell");
+    const f = folder orelse return name;
+    var folder_buf: [256]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s} {s}", .{ name, shortFolder(&folder_buf, f) }) catch name;
 }
 
 /// The folder part of a reported directory, shortened under a home directory: `~/compy`.
@@ -165,4 +159,20 @@ test "program names map to icons" {
     try std.testing.expectEqualStrings("~/compy", shortFolder(&buf, "file://mac.local/Users/someone/compy"));
     try std.testing.expectEqualStrings("~", shortFolder(&buf, "/home/someone"));
     try std.testing.expectEqualStrings("/etc", shortFolder(&buf, "/etc"));
+}
+
+test "titles name the program and its folder" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("zsh", programName("-zsh"));
+    try std.testing.expectEqualStrings("node", programName("node/claude.js"));
+    try std.testing.expectEqualStrings("zsh ~/compy", displayTitle(&buf, "-zsh", "/home/someone/compy"));
+    try std.testing.expectEqualStrings("claude", displayTitle(&buf, "claude", null));
+    try std.testing.expectEqualStrings("shell /etc", displayTitle(&buf, null, "/etc"));
+    // A title too long for the buffer falls back to the name alone.
+    var small: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("vim", displayTitle(&small, "vim", "/var/log"));
+}
+
+test {
+    _ = @import("draw.zig");
 }
