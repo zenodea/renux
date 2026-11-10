@@ -83,7 +83,7 @@ const css =
     \\.pane-card.focused .pane-tools, .pane-card:hover .pane-tools { opacity: 1; }
     \\.icon-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; opacity: 0.5; }
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
-    \\.find-bar { margin: 16px 22px 18px 18px; padding: 4px 5px 4px 6px; min-width: 300px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
+    \\.find-bar { margin: 6px 12px 14px 12px; padding: 4px 5px 4px 6px; min-width: 230px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
     \\.find-bar entry { background: none; box-shadow: none; outline: none; border: none; min-height: 28px; padding-left: 6px; }
     \\.find-bar entry > image:first-child { opacity: 0; }
     \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
@@ -227,10 +227,6 @@ pub const App = struct {
     stack: *gtk.Stack = undefined,
     status: *adw.StatusPage = undefined,
     retry_button: *gtk.Button = undefined,
-    find_bar: *gtk.Revealer = undefined,
-    find_entry: *gtk.SearchEntry = undefined,
-    find_count: *gtk.Label = undefined,
-    find_total: usize = 0,
     entry: *gtk.Entry = undefined,
     /// The host whose session is shown; `server` and `workspace` are its.
     server: ?*Server = null,
@@ -427,33 +423,6 @@ pub const App = struct {
         _ = a.stack.addNamed(a.status.as(gtk.Widget), "status");
         _ = a.stack.addNamed(a.connectPage(), "connect");
 
-        // Find: a small bar that floats over the panes' top right corner, as in Rex.
-        const find_row = gtk.Box.new(.horizontal, 2);
-        find_row.as(gtk.Widget).addCssClass("find-bar");
-        a.find_entry = gtk.SearchEntry.new();
-        a.find_entry.as(gtk.Widget).setHexpand(1);
-        a.find_entry.setPlaceholderText("Find");
-        // Matches follow the typing at once.
-        a.find_entry.setSearchDelay(0);
-        _ = gtk.SearchEntry.signals.search_changed.connect(a.find_entry, *App, &findChanged, a, .{});
-        _ = gtk.SearchEntry.signals.activate.connect(a.find_entry, *App, &findNextSignal, a, .{});
-        _ = gtk.SearchEntry.signals.next_match.connect(a.find_entry, *App, &findNextSignal, a, .{});
-        _ = gtk.SearchEntry.signals.previous_match.connect(a.find_entry, *App, &findPrevSignal, a, .{});
-        _ = gtk.SearchEntry.signals.stop_search.connect(a.find_entry, *App, &findStopSignal, a, .{});
-        a.find_count = gtk.Label.new("");
-        a.find_count.as(gtk.Widget).addCssClass("find-count");
-        find_row.append(a.find_entry.as(gtk.Widget));
-        find_row.append(a.find_count.as(gtk.Widget));
-        find_row.append(icons.button(.up, "Newer match", "app.find-prev").as(gtk.Widget));
-        find_row.append(icons.button(.down, "Older match", "app.find-next").as(gtk.Widget));
-        find_row.append(icons.button(.close, "Close find", "app.find-close").as(gtk.Widget));
-        a.find_bar = gtk.Revealer.new();
-        a.find_bar.setChild(find_row.as(gtk.Widget));
-        a.find_bar.setTransitionType(.crossfade);
-        a.find_bar.setTransitionDuration(120);
-        a.find_bar.as(gtk.Widget).setHalign(.end);
-        a.find_bar.as(gtk.Widget).setValign(.start);
-
         // Keys belong to the highlighted pane wherever the keyboard happens to sit: on a button
         // just clicked, a sidebar row, another pane, or nowhere after a pane closed.
         const stray = gtk.EventControllerKey.new();
@@ -473,11 +442,7 @@ pub const App = struct {
         a.tab_strip.as(gtk.Widget).addCssClass("tab-strip");
         a.tab_strip.as(gtk.Widget).setVisible(0);
         card.append(a.tab_strip.as(gtk.Widget));
-        const body = gtk.Overlay.new();
-        body.setChild(a.stack.as(gtk.Widget));
-        body.addOverlay(a.find_bar.as(gtk.Widget));
-        body.as(gtk.Widget).setVexpand(1);
-        card.append(body.as(gtk.Widget));
+        card.append(a.stack.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
 
         const split = adw.OverlaySplitView.new();
@@ -2973,83 +2938,27 @@ pub const App = struct {
         _ = entry.as(gtk.Widget).grabFocus();
     }
 
-    // Find.
+    // Find: each pane has its own bar; these act on the highlighted pane's.
 
-    fn findTerm(a: *App) ?*@import("term.zig").Term {
+    fn focusedFind(a: *App) ?*@import("findbar.zig").FindBar {
         const ws = a.workspace orelse return null;
-        const tv = ws.focusedView() orelse return null;
-        return tv.term();
-    }
-
-    fn redrawFocused(a: *App) void {
-        const ws = a.workspace orelse return;
-        if (ws.focusedView()) |tv| tv.widget().queueDraw();
+        return ws.focusedFind();
     }
 
     fn openFind(a: *App) void {
-        a.find_bar.setRevealChild(1);
-        _ = a.find_entry.as(gtk.Widget).grabFocus();
+        if (a.focusedFind()) |f| f.open();
     }
 
     fn closeFind(a: *App) void {
-        a.find_bar.setRevealChild(0);
-        if (a.findTerm()) |t| t.endFind();
-        a.find_count.setText("");
-        a.redrawFocused();
-        if (a.workspace) |ws| ws.grabFocus();
-    }
-
-    pub fn findText(a: *App, text: []const u8) void {
-        const t = a.findTerm() orelse return;
-        if (text.len == 0) {
-            t.endFind();
-            a.find_total = 0;
-            a.find_count.setText("");
-        } else {
-            a.find_total = t.find(text);
-            a.showFindCount(if (a.find_total > 0) t.findStep(true) else null);
-        }
-        a.redrawFocused();
-    }
-
-    fn showFindCount(a: *App, index: ?usize) void {
-        var buf: [32]u8 = undefined;
-        const text = if (a.find_total == 0)
-            std.fmt.bufPrintSentinel(&buf, "0/0", .{}, 0) catch ""
-        else
-            std.fmt.bufPrintSentinel(&buf, "{d}/{d}", .{ (index orelse 0) + 1, a.find_total }, 0) catch "";
-        a.find_count.setText(text.ptr);
-    }
-
-    fn step(a: *App, older: bool) void {
-        const t = a.findTerm() orelse return;
-        if (!t.finding() or a.find_total == 0) return;
-        a.showFindCount(t.findStep(older));
-        a.redrawFocused();
+        if (a.focusedFind()) |f| f.close();
     }
 
     fn findNext(a: *App) void {
-        a.step(true);
+        if (a.focusedFind()) |f| f.step(true);
     }
 
     fn findPrev(a: *App) void {
-        a.step(false);
-    }
-
-    fn findChanged(entry: *gtk.SearchEntry, a: *App) callconv(.c) void {
-        a.findText(std.mem.span(entry.as(gtk.Editable).getText()));
-    }
-
-    fn findNextSignal(_: *gtk.SearchEntry, a: *App) callconv(.c) void {
-        a.findNext();
-    }
-
-    fn findPrevSignal(_: *gtk.SearchEntry, a: *App) callconv(.c) void {
-        a.findPrev();
-    }
-
-    fn findStopSignal(_: *gtk.SearchEntry, a: *App) callconv(.c) void {
-        a.closeFind();
+        if (a.focusedFind()) |f| f.step(false);
     }
 
     fn openPalette(a: *App) void {
@@ -3867,7 +3776,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             a.openFind();
             const z = gpa.dupeSentinel(u8, rest, 0) catch continue;
             defer gpa.free(z);
-            a.find_entry.as(gtk.Editable).setText(z.ptr);
+            if (a.focusedFind()) |f| f.type_(z);
         } else if (std.mem.eql(u8, cmd, "close-find")) {
             a.closeFind();
         } else if (std.mem.eql(u8, cmd, "select")) {

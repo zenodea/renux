@@ -52,6 +52,7 @@ const Pane = struct {
     title_row: *gtk.Widget,
     /// The title row's Float or dock and Minimize buttons, greyed while they can do nothing.
     float_button: ?*gtk.Widget = null,
+    find: ?*@import("findbar.zig").FindBar = null,
     minimize_button: ?*gtk.Widget = null,
     /// "Copied", shown for a moment after the pane's selection reaches the clipboard.
     copied: *gtk.Widget,
@@ -601,7 +602,13 @@ pub const Workspace = struct {
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).setOverflow(.hidden);
         card.append(row.as(gtk.Widget));
-        card.append(tv.widget());
+        // The pane's own find bar floats over its terminal's top right corner.
+        const find = @import("findbar.zig").FindBar.create(tv);
+        const body = gtk.Overlay.new();
+        body.setChild(tv.widget());
+        if (find) |f| body.addOverlay(f.widget());
+        body.as(gtk.Widget).setVexpand(1);
+        card.append(body.as(gtk.Widget));
         tv.setTitleLabel(label);
 
         // Floating cards resize from their bottom-right corner.
@@ -674,6 +681,7 @@ pub const Workspace = struct {
             .grip = gw,
             .title_row = row.as(gtk.Widget),
             .float_button = float_button,
+            .find = find,
             .minimize_button = minimize_button,
             .copied = cw,
             .rect = rect,
@@ -844,6 +852,12 @@ pub const Workspace = struct {
     /// Gives the keyboard to the focused pane.
     pub fn grabFocus(ws: *Workspace) void {
         if (ws.focusedView()) |tv| _ = tv.widget().grabFocus();
+    }
+
+    /// The highlighted pane's find bar.
+    pub fn focusedFind(ws: *Workspace) ?*@import("findbar.zig").FindBar {
+        if (ws.focused) |f| if (ws.paneOf(f)) |p| return p.find;
+        return if (ws.panes.items.len > 0) ws.panes.items[0].find else null;
     }
 
     /// The focused pane's terminal view.
