@@ -96,6 +96,10 @@ pub var font: ?Font = null;
 pub var cursor_accent: u32 = 0;
 /// How opaque a terminal's own background is.
 pub var term_opacity: f64 = 1;
+/// Set while the sidebar's edge is being dragged: panes keep the size their programs have, so
+/// text isn't laid out again at every step of the drag, and take the new size once at the end.
+pub var hold_sizes: bool = false;
+
 /// How many panes are animating a scroll, for COMPY_PERF.
 pub var scroll_ticking: u32 = 0;
 
@@ -572,7 +576,8 @@ pub const TermView = struct {
     fn applySize(data: ?*anyopaque) callconv(.c) c_int {
         const v: *TermView = @ptrCast(@alignCast(data.?));
         v.size_timer = 0;
-        v.sendSize();
+        // While an edge is being dragged the size waits; `sendSize` follows when it's let go.
+        if (!hold_sizes) v.sendSize();
         return 0;
     }
 

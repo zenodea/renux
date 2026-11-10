@@ -466,6 +466,7 @@ pub const App = struct {
         _ = gtk.GestureDrag.signals.drag_begin.connect(handle_drag, *App, &sidebarDragBegin, a, .{});
         _ = gtk.GestureDrag.signals.drag_update.connect(handle_drag, *App, &sidebarDragUpdate, a, .{});
         _ = gtk.GestureDrag.signals.drag_end.connect(handle_drag, *App, &sidebarDragEnd, a, .{});
+        _ = gtk.Gesture.signals.cancel.connect(handle_drag, *App, &sidebarDragCancel, a, .{});
         handle.as(gtk.Widget).addController(handle_drag.as(gtk.EventController));
         side_overlay.addOverlay(handle.as(gtk.Widget));
         split.setSidebar(side_overlay.as(gtk.Widget));
@@ -534,6 +535,8 @@ pub const App = struct {
         const dev_shot = build_options.dev and std.c.getenv("COMPY_SHOT") != null;
         if (dev_shot) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
         @import("warm.zig").start(win.as(gtk.Window));
+        // The sidebar's buttons are fitted again once the window's corner has its real width.
+        _ = glib.idleAdd(&refitSidebar, a);
         // `compy --toggle` finds this process by its ID and signals it.
         if (!dev_shot) {
             @import("main.zig").claimToggle();
@@ -628,8 +631,26 @@ pub const App = struct {
         }
     }
 
+    fn refitSidebar(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.setSidebarWidth(a.split.getMaxSidebarWidth());
+        return 0;
+    }
+
     fn sidebarDragBegin(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
         sidebar_drag_start = a.split.getMaxSidebarWidth();
+        termview.hold_sizes = true;
+    }
+
+    /// The drag is over, however it ended: panes take the sizes they now have.
+    fn sidebarDragDone(a: *App) void {
+        if (!termview.hold_sizes) return;
+        termview.hold_sizes = false;
+        for (a.hosts.items) |h| h.workspace.sendSizes();
+    }
+
+    fn sidebarDragCancel(_: *gtk.GestureDrag, _: ?*gdk.EventSequence, a: *App) callconv(.c) void {
+        a.sidebarDragDone();
     }
 
     fn sidebarDragUpdate(_: *gtk.GestureDrag, dx: f64, _: f64, a: *App) callconv(.c) void {
@@ -639,6 +660,7 @@ pub const App = struct {
     fn sidebarDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
         settings.current.sidebar_width = a.split.getMaxSidebarWidth();
         settings.save();
+        a.sidebarDragDone();
     }
 
     /// A key pressed while the keyboard isn't in the highlighted pane goes to that pane, which
@@ -691,13 +713,17 @@ pub const App = struct {
     /// Tabs above the panes start after the window's corner when it covers them.
     fn tabsRoom(a: *App) void {
         const strip = a.tab_strip.as(gtk.Widget);
-        var x: f64 = 0;
-        var y: f64 = 0;
-        const root = strip.getRoot() orelse return;
-        if (strip.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) == 0) return;
-        const margin: f64 = @floatFromInt(strip.getMarginStart());
-        const room = @max(0, a.cornerRight() + 4 - (x - margin));
-        const want: c_int = @intFromFloat(@round(room));
+        const want: c_int = if (strip.getVisible() == 0) 0 else blk: {
+            // Measured from the card the strip sits in, never from the strip itself: its own
+            // place moves with the very margin being set, and measuring that fed each answer
+            // into the next until the window was too wide for the screen to draw.
+            var x: f64 = 0;
+            var y: f64 = 0;
+            const root = a.card.getRoot() orelse return;
+            if (a.card.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) == 0) return;
+            const room = std.math.clamp(a.cornerRight() + 4 - x, 0, 400);
+            break :blk @intFromFloat(@round(room));
+        };
         if (strip.getMarginStart() != want) strip.setMarginStart(want);
     }
 

@@ -900,6 +900,11 @@ pub const Workspace = struct {
     }
 
     /// After reconnecting, sizes must be sent again.
+    /// Tells the server each pane's size if it changed, after sizes were held back.
+    pub fn sendSizes(ws: *Workspace) void {
+        for (ws.panes.items) |p| p.term.sendSize();
+    }
+
     pub fn resendSizes(ws: *Workspace) void {
         for (ws.panes.items) |p| p.term.resendSize();
     }
