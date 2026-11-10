@@ -385,6 +385,7 @@ pub const App = struct {
         const footer = gtk.Box.new(.horizontal, 2);
         footer.as(gtk.Widget).addCssClass("sidebar-footer");
         a.filter_button = gtk.MenuButton.new();
+        steadyMenu(a.filter_button);
         const pill = gtk.Box.new(.horizontal, 6);
         pill.append(icons.image(.filter, 16));
         a.filter_label = gtk.Label.new("Filter");
@@ -441,7 +442,9 @@ pub const App = struct {
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).addCssClass("content");
         // Two fingers sideways on a trackpad switch tabs, like Rex.
-        const swipe = gtk.EventControllerScroll.new(.{ .horizontal = true });
+        // Both directions are heard, though only sideways swipes act: without the up and down
+        // part there is no telling a swipe from the sideways drift of ordinary scrolling.
+        const swipe = gtk.EventControllerScroll.new(.{ .horizontal = true, .vertical = true });
         swipe.as(gtk.EventController).setPropagationPhase(.capture);
         _ = gtk.EventControllerScroll.signals.scroll.connect(swipe, *App, &swiped, a, .{});
         _ = gtk.EventControllerScroll.signals.scroll_end.connect(swipe, *App, &swipeEnded, a, .{});
@@ -1841,22 +1844,46 @@ pub const App = struct {
     }
 
     var swipe_dx: f64 = 0;
+    var swipe_dy: f64 = 0;
+    var swipe_at: i64 = 0;
+    var swipe_axis: enum { undecided, sideways, scrolling } = .undecided;
     var swipe_done = false;
 
     fn swiped(_: *gtk.EventControllerScroll, dx: f64, dy: f64, a: *App) callconv(.c) c_int {
-        if (!settings.current.trackpad_gestures or @abs(dy) > @abs(dx)) return 0;
+        if (!settings.current.trackpad_gestures) return 0;
+        // A pause means a new gesture, also when the trackpad never said the last one ended.
+        const now = glib.getMonotonicTime();
+        if (now - swipe_at > 250_000) swipeReset();
+        swipe_at = now;
+        // Each gesture is one thing or the other, decided by its first stretch: scrolling a
+        // terminal up or down always drifts a little sideways, and must never count as a
+        // swipe between tabs however long it goes on.
+        if (swipe_axis == .undecided) {
+            swipe_dx += dx;
+            swipe_dy += dy;
+            if (@abs(swipe_dx) + @abs(swipe_dy) < 16) return 0;
+            swipe_axis = if (@abs(swipe_dx) > 2 * @abs(swipe_dy)) .sideways else .scrolling;
+            return 0;
+        }
+        if (swipe_axis == .scrolling) return 0;
         swipe_dx += dx;
         // One tab for each swipe, once it has gone far enough.
-        if (!swipe_done and @abs(swipe_dx) > 60) {
+        if (!swipe_done and @abs(swipe_dx) > 70) {
             swipe_done = true;
             _ = a.stepWindow(if (swipe_dx > 0) 1 else -1);
         }
         return 0;
     }
 
-    fn swipeEnded(_: *gtk.EventControllerScroll, _: *App) callconv(.c) void {
+    fn swipeReset() void {
         swipe_dx = 0;
+        swipe_dy = 0;
         swipe_done = false;
+        swipe_axis = .undecided;
+    }
+
+    fn swipeEnded(_: *gtk.EventControllerScroll, _: *App) callconv(.c) void {
+        swipeReset();
     }
 
     /// Hides the window, or brings it back to the front.
@@ -2618,13 +2645,34 @@ pub const App = struct {
 
     fn confirmCloseSession(a: *App) bool {
         const sid = a.session_id orelse return false;
+        return a.confirmCloseSessionOn(a.current orelse return false, sid);
+    }
+
+    /// The host a session is on, whichever host is shown.
+    fn hostOfSession(a: *App, session_id: []const u8) ?*Host {
+        for (a.hosts.items) |h| for (h.server.sessions.items) |session| {
+            if (std.mem.eql(u8, session.id, session_id)) return h;
+        };
+        return null;
+    }
+
+    /// "Delete Session" in a session's menu. A session with nothing in it just goes; one with
+    /// programs running asks first.
+    fn deleteSessionFromMenu(a: *App, session_id: []const u8) void {
+        const h = a.hostOfSession(session_id) orelse return;
+        const empty = if (h.server.sessionView(session_id)) |v| v.windows.len == 0 else false;
+        if (empty) return h.server.destroySession(session_id);
+        _ = a.confirmCloseSessionOn(h, session_id);
+    }
+
+    fn confirmCloseSessionOn(a: *App, host: *Host, sid: []const u8) bool {
         const dialog = adw.AlertDialog.new("Close this session?", "Every window and program in it ends.");
         dialog.addResponse("cancel", "Cancel");
         dialog.addResponse("close", "Close Session");
         dialog.setResponseAppearance("close", .destructive);
         dialog.setDefaultResponse("cancel");
         // The session and its host as they are now: another may be shown by the time it's answered.
-        const ctx = a.renameCtx(sid, "", "") orelse return false;
+        const ctx = a.renameCtxOn(host, sid, "", "") orelse return false;
         const Done = struct {
             fn run(_: *adw.AlertDialog, response: [*:0]const u8, c: *RenameCtx) callconv(.c) void {
                 defer c.free();
@@ -2796,7 +2844,7 @@ pub const App = struct {
             _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
             a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
         }
-        inline for (.{ .{ "new-window-in", newWindowIn }, .{ "toggle-session", toggleSession }, .{ "filter", filterAction }, .{ "move-session-up", moveSessionUp }, .{ "move-session-down", moveSessionDown }, .{ "rename-session", renameSessionFromMenu } }) |e| {
+        inline for (.{ .{ "new-window-in", newWindowIn }, .{ "toggle-session", toggleSession }, .{ "filter", filterAction }, .{ "move-session-up", moveSessionUp }, .{ "move-session-down", moveSessionDown }, .{ "rename-session", renameSessionFromMenu }, .{ "delete-session", deleteSessionFromMenu } }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
                 fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
@@ -2987,7 +3035,10 @@ pub const App = struct {
     /// What a name dialog needs to act on the shown host later: the session, and the window or
     /// pane when the name is for one of those. `askName` takes it over.
     fn renameCtx(a: *App, session_id: []const u8, window_id: []const u8, block_id: []const u8) ?*RenameCtx {
-        const h = a.current orelse return null;
+        return a.renameCtxOn(a.current orelse return null, session_id, window_id, block_id);
+    }
+
+    fn renameCtxOn(a: *App, h: *Host, session_id: []const u8, window_id: []const u8, block_id: []const u8) ?*RenameCtx {
         const ctx = gpa.create(RenameCtx) catch return null;
         ctx.* = .{ .app = a, .host = refHost(h), .entry = undefined, .session_id = &.{}, .window_id = &.{}, .block_id = &.{} };
         ctx.session_id = gpa.dupe(u8, session_id) catch return failed(ctx);
@@ -3673,7 +3724,7 @@ fn sessionMenu(session_id: []const u8) *gio.MenuModel {
     const z = gpa.dupeSentinel(u8, session_id, 0) catch return gio.Menu.new().as(gio.MenuModel);
     defer gpa.free(z);
     const menu = gio.Menu.new();
-    inline for (.{ .{ "New Window Here", "app.new-window-in" }, .{ "Show or Hide Windows", "app.toggle-session" }, .{ "Rename…", "app.rename-session" }, .{ "Move Up", "app.move-session-up" }, .{ "Move Down", "app.move-session-down" } }) |e| {
+    inline for (.{ .{ "New Window Here", "app.new-window-in" }, .{ "Show or Hide Windows", "app.toggle-session" }, .{ "Rename…", "app.rename-session" }, .{ "Move Up", "app.move-session-up" }, .{ "Move Down", "app.move-session-down" }, .{ "Delete Session", "app.delete-session" } }) |e| {
         const item = gio.MenuItem.new(e[0], null);
         item.setActionAndTargetValue(e[1], glib.Variant.newString(z.ptr));
         menu.appendItem(item);
@@ -3681,8 +3732,27 @@ fn sessionMenu(session_id: []const u8) *gio.MenuModel {
     return menu.as(gio.MenuModel);
 }
 
+/// Makes a second click on a menu's button close the menu and leave it closed. The press of
+/// that click lands outside the menu, which closes it; the release then counted as a fresh
+/// click on the button and opened it again. A menu that closed a moment ago stays closed.
+pub fn steadyMenu(button: *gtk.MenuButton) void {
+    _ = gobject.Object.signals.notify.connect(button, ?*anyopaque, &menuToggled, null, .{ .detail = "active" });
+}
+
+fn menuToggled(button: *gtk.MenuButton, _: *gobject.ParamSpec, _: ?*anyopaque) callconv(.c) void {
+    const obj = button.as(gobject.Object);
+    const now: usize = @intCast(@divTrunc(glib.getMonotonicTime(), 1000));
+    if (button.getActive() == 0) {
+        obj.setData("compy-menu-closed", @ptrFromInt(now + 1));
+        return;
+    }
+    const closed = @intFromPtr(obj.getData("compy-menu-closed"));
+    if (closed != 0 and now + 1 -| closed < 350) button.setActive(0);
+}
+
 fn menuButton(model: *gio.MenuModel, tooltip: [:0]const u8) *gtk.MenuButton {
     const button = gtk.MenuButton.new();
+    steadyMenu(button);
     button.setChild(icons.image(.more, 16));
     button.setMenuModel(model);
     button.as(gtk.Widget).setTooltipText(tooltip.ptr);
