@@ -176,6 +176,8 @@ pub const App = struct {
     }
 
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
+        // GTK may have reset it while starting up.
+        if (builtin.os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
         settings.load();
         termview.font = termview.Font.init(gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch "Monospace 11");
         const provider = gtk.CssProvider.new();

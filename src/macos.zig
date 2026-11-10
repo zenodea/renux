@@ -67,3 +67,10 @@ pub fn setBlur(surface: *anyopaque, on: bool, radius: f64) void {
     }
     send(void, effect, "setHidden:", .{!on});
 }
+
+/// Development: a test run that must never take the keyboard from the app being used. The
+/// window still draws, and COMPY_SHOT pictures still work.
+pub fn neverActivate() void {
+    const app = send(Id, objc_getClass("NSApplication"), "sharedApplication", .{});
+    send(void, app, "setActivationPolicy:", .{@as(isize, 2)}); // prohibited
+}
