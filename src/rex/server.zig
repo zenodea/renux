@@ -465,27 +465,10 @@ pub const Server = struct {
         const name = json.str(payload, "name") orelse return;
         const fields = json.get(payload, "payload");
         const b = s.infoFor(block) orelse return;
-        if (eql(name, "program_status_changed")) {
-            const was_blocked = b.has_status and b.status == .blocked;
-            s.setStatus(b, json.get(fields, "record"));
-            if (b.status == .done or b.status == .blocked or b.status == .failed) b.attention = true;
-            if (b.status == .blocked and !was_blocked) {
-                var buf: [256]u8 = undefined;
-                const who = b.status_app orelse "A program";
-                const k = b.status_kind orelse "";
-                const what = if (eql(k, "permission")) "needs your permission" else if (eql(k, "question")) "has a question" else if (eql(k, "auth")) "needs a password" else "needs you";
-                s.alert_kind = .blocked;
-                s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, what }) catch "A program needs you");
-            } else if (b.status == .done or b.status == .failed) {
-                var buf: [256]u8 = undefined;
-                const who = b.status_app orelse "A program";
-                s.alert_kind = if (b.status == .done) .done else .failed;
-                s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, if (b.status == .done) "finished" else "failed" }) catch "A program finished");
-            }
-        } else if (eql(name, "program_status_removed")) {
-            b.has_status = false;
-            b.status = .other;
-            setStr(&b.message, null);
+        if (eql(name, "program_status_changed") or eql(name, "program_status_removed")) {
+            // A pane holds several records, a parent's and its children's, and an event tells of
+            // one. Which counts now is the server's to say, so its whole list is read again.
+            s.readStatus(session_id, block, true);
         } else if (eql(name, "process_changed")) {
             s.setProgram(b, json.get(fields, "foreground"));
         } else if (eql(name, "pwd_changed")) {
@@ -563,9 +546,25 @@ pub const Server = struct {
         if (b.status != was or b.since == 0) b.since = glib.getMonotonicTime();
     }
 
+    /// What to call a program: the name it was started by when its file is named for its version,
+    /// as Claude Code's is (`claude` runs a file called `2.1.322`), and its own name otherwise.
+    fn programName(name: []const u8, invoked_path: ?[]const u8) []const u8 {
+        if (name.len == 0 or !std.ascii.isDigit(name[0])) return name;
+        const path = invoked_path orelse return name;
+        const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| path[i + 1 ..] else path;
+        return if (base.len > 0) base else name;
+    }
+
+    test programName {
+        try std.testing.expectEqualStrings("claude", programName("2.1.322", "/home/someone/.local/bin/claude"));
+        try std.testing.expectEqualStrings("2.1.322", programName("2.1.322", null));
+        try std.testing.expectEqualStrings("zsh", programName("zsh", "/bin/zsh"));
+        try std.testing.expectEqualStrings("codex", programName("codex", "/opt/bin/codex-cli"));
+    }
+
     /// An interpreter's script says more than its name, so node running claude counts as claude.
     fn setProgram(_: *Server, b: *BlockInfo, foreground: ?json.Value) void {
-        const name = json.str(foreground, "name") orelse return;
+        const name = programName(json.str(foreground, "name") orelse return, json.str(foreground, "invoked_path"));
         var buf: [256]u8 = undefined;
         const text = if (json.str(foreground, "script")) |script| blk: {
             const base = if (std.mem.lastIndexOfScalar(u8, script, '/')) |i| script[i + 1 ..] else script;
@@ -578,11 +577,48 @@ pub const Server = struct {
         session_id: []u8,
         block_id: []u8,
         which: enum { status, title, process, pwd },
+        /// Whether a change of status found by this read is news to tell the person.
+        announce: bool = false,
         fn deinit(d: *DetailFor) void {
             gpa.free(d.session_id);
             gpa.free(d.block_id);
         }
     };
+
+    fn readStatus(s: *Server, session_id: []const u8, block_id: []const u8, announce: bool) void {
+        const d: DetailFor = .{
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .block_id = gpa.dupe(u8, block_id) catch return,
+            .which = .status,
+            .announce = announce,
+        };
+        s.call("com.superlogical.terminal.program_status", .{ .session_id = session_id, .block_id = block_id }, DetailFor, d, gotDetail);
+    }
+
+    /// Takes the most pressing of a pane's records as its status, or none when it has no record
+    /// left, and when that is news marks the pane and raises the alert for it.
+    fn applyStatus(s: *Server, b: *BlockInfo, session_id: []const u8, block: []const u8, best: ?json.Value, announce: bool) void {
+        const had = b.has_status;
+        const was = b.status;
+        if (best) |rec| s.setStatus(b, rec) else {
+            b.has_status = false;
+            b.status = .other;
+            setStr(&b.message, null);
+        }
+        if (!announce or !b.has_status or (had and b.status == was)) return;
+        if (b.status == .done or b.status == .blocked or b.status == .failed) b.attention = true;
+        var buf: [256]u8 = undefined;
+        const who = b.status_app orelse "A program";
+        if (b.status == .blocked) {
+            const k = b.status_kind orelse "";
+            const what = if (eql(k, "permission")) "needs your permission" else if (eql(k, "question")) "has a question" else if (eql(k, "auth")) "needs a password" else "needs you";
+            s.alert_kind = .blocked;
+            s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, what }) catch "A program needs you");
+        } else if (b.status == .done or b.status == .failed) {
+            s.alert_kind = if (b.status == .done) .done else .failed;
+            s.raiseAlert(session_id, block, std.fmt.bufPrint(&buf, "{s} {s}", .{ who, if (b.status == .done) "finished" else "failed" }) catch "A program finished");
+        }
+    }
 
     /// Reads what a block runs, where, and its status, once per connection that could have
     /// missed a change; events keep them current after. A read that never arrived is tried again.
@@ -630,7 +666,7 @@ pub const Server = struct {
                         best_rank = rank;
                     }
                 }
-                if (best) |rec| s.setStatus(b, rec);
+                s.applyStatus(b, d.session_id, d.block_id, best, d.announce);
             },
             .title => setStr(&b.title, json.str(payload, "title")),
             .process => s.setProgram(b, json.get(payload, "foreground")),
