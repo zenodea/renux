@@ -4,9 +4,9 @@ const std = @import("std");
 const glib = @import("glib");
 const gtk = @import("gtk");
 const pango = @import("pango");
-const Server = @import("server.zig").Server;
-const blockicon = @import("blockicon.zig");
-const programs = @import("programs.zig");
+const Server = @import("../rex/server.zig").Server;
+const blockicon = @import("../icons/blockicon.zig");
+const programs = @import("../icons/programs.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -153,7 +153,7 @@ fn show(ctx: *Ctx) void {
         // What runs there: the title a program gave its pane, or the program's name.
         const prog: ?[]const u8 = if (info) |i| ((if (i.has_status) i.status_app else null) orelse i.program) else null;
         // A shell's own title is only its prompt's idea of one, so a shell goes by its name.
-        const is_shell = if (prog) |p| @import("termview.zig").TermView.isShell(programs.programName(p)) else true;
+        const is_shell = if (prog) |p| @import("../terminal/termview.zig").TermView.isShell(programs.programName(p)) else true;
         const own_title: ?[]const u8 = if (is_shell) null else if (info) |i| (if (i.title) |t| (if (t.len > 0) t else null) else null) else null;
         const name = own_title orelse programs.displayTitle(&buf, prog, null);
         const top = gtk.Box.new(.horizontal, 8);

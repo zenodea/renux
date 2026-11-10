@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes src/ui_icons.zig from Material Icons Round SVGs (Apache 2.0), the set the Android app
+"""Writes src/icons/ui_icons.zig from Material Icons Round SVGs (Apache 2.0), the set the Android app
 uses through Icons.Rounded. Usage: gen-ui-icons.py <folder of downloaded 24px SVGs>
 
 Download each with:
@@ -46,4 +46,4 @@ for kind, name, transform in KINDS:
     d = re.sub(r"\s+", " ", d).strip()
     out.append(f'    .{{ .name = "{kind}", .path = "{d}", .transform = "{transform}" }},')
 out.append("};")
-open(os.path.join(os.path.dirname(__file__), "..", "src", "ui_icons.zig"), "w").write("\n".join(out) + "\n")
+open(os.path.join(os.path.dirname(__file__), "..", "src", "icons", "ui_icons.zig"), "w").write("\n".join(out) + "\n")

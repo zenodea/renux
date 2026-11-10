@@ -16,13 +16,13 @@ const graphene = @import("graphene");
 const keys = @import("keys.zig");
 // Not `term`: inside TermView that name is the method that finds the pane's terminal.
 const term_mod = @import("term.zig");
-const Server = @import("server.zig").Server;
-const Binding = @import("server.zig").Binding;
-const Stream = @import("stream.zig").Stream;
+const Server = @import("../rex/server.zig").Server;
+const Binding = @import("../rex/server.zig").Binding;
+const Stream = @import("../rex/stream.zig").Stream;
 const boxdraw = @import("boxdraw.zig");
 const links = @import("links.zig");
-const programs = @import("programs.zig");
-const settings = @import("settings.zig");
+const programs = @import("../icons/programs.zig");
+const settings = @import("../settings/settings.zig");
 const fonts = @import("fonts.zig");
 
 const gpa = std.heap.c_allocator;

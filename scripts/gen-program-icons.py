@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds src/program_icons.zig from the icons in data/program-icons: one SVG each, with a
+"""Builds src/icons/program_icons.zig from the icons in data/program-icons: one SVG each, with a
 single path on a 24 by 24 grid, and its tile color in colors.txt. See the README there for
 where the icons come from. Run from anywhere: python3 scripts/gen-program-icons.py
 """
@@ -29,5 +29,5 @@ for slug, (color, path) in sorted(entries.items()):
     data = path.replace("\\", "\\\\").replace('"', '\\"')
     lines.append(f'    .{{ .slug = "{slug}", .color = 0xFF{color}, .path = "{data}" }},')
 lines += ["};", ""]
-(root / "src/program_icons.zig").write_text("\n".join(lines))
+(root / "src/icons/program_icons.zig").write_text("\n".join(lines))
 print(f"{len(entries)} icons")

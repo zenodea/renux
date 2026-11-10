@@ -6,7 +6,7 @@ const gobject = @import("gobject");
 const gio = @import("gio");
 const gtk = @import("gtk");
 const adw = @import("adw");
-const Server = @import("server.zig").Server;
+const Server = @import("../rex/server.zig").Server;
 const filterdialog = @import("filterdialog.zig");
 
 const gpa = std.heap.c_allocator;

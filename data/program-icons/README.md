@@ -1,6 +1,6 @@
 # Program icons
 
-`scripts/gen-program-icons.py` builds `src/program_icons.zig` from this folder.
+`scripts/gen-program-icons.py` builds `src/icons/program_icons.zig` from this folder.
 
 Each icon is one SVG with a single path on a 24 by 24 grid, named for the program, and a
 line in `colors.txt` giving the color of its tile.

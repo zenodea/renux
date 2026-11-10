@@ -15,14 +15,14 @@ const graphene = @import("graphene");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
 const gsk = @import("gsk");
-const view = @import("view.zig");
-const Server = @import("server.zig").Server;
-const TermView = @import("termview.zig").TermView;
-const icons = @import("icons.zig");
-const blockicon = @import("blockicon.zig");
-const draw = @import("draw.zig");
-const programs = @import("programs.zig");
-const settings = @import("settings.zig");
+const view = @import("../rex/view.zig");
+const Server = @import("../rex/server.zig").Server;
+const TermView = @import("../terminal/termview.zig").TermView;
+const icons = @import("../icons/icons.zig");
+const blockicon = @import("../icons/blockicon.zig");
+const draw = @import("../util/draw.zig");
+const programs = @import("../icons/programs.zig");
+const settings = @import("../settings/settings.zig");
 
 const gpa = std.heap.c_allocator;
 

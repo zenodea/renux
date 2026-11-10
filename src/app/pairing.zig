@@ -3,7 +3,7 @@ const std = @import("std");
 const gtk = @import("gtk");
 const adw = @import("adw");
 const cairo = @import("cairo");
-const qr = @import("qr.zig");
+const qr = @import("../util/qr.zig");
 
 const gpa = std.heap.c_allocator;
 

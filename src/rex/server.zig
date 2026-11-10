@@ -3,7 +3,7 @@
 const std = @import("std");
 const glib = @import("glib");
 const control = @import("control.zig");
-const json = @import("json.zig");
+const json = @import("../util/json.zig");
 const view = @import("view.zig");
 const stream_mod = @import("stream.zig");
 const Control = control.Control;
@@ -1456,7 +1456,7 @@ pub const Server = struct {
     pub fn applyShortcuts(s: *Server) void {
         _ = s.overrides_arena.reset(.retain_capacity);
         const a = s.overrides_arena.allocator();
-        const mine = @import("settings.zig").current.shortcuts.items;
+        const mine = @import("../settings/settings.zig").current.shortcuts.items;
         var out: std.ArrayList(Binding) = .empty;
         for (s.config_bindings) |b| {
             const replaced = for (mine) |sc| {

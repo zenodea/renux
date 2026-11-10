@@ -56,8 +56,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     // The app icon and desktop entry, where Linux desktops look for them.
-    b.installFile("data/dev.compy.linux.svg", "share/icons/hicolor/scalable/apps/dev.compy.linux.svg");
-    b.installFile("data/dev.compy.linux.png", "share/icons/hicolor/512x512/apps/dev.compy.linux.png");
+    b.installFile("data/icons/dev.compy.linux.svg", "share/icons/hicolor/scalable/apps/dev.compy.linux.svg");
+    b.installFile("data/icons/dev.compy.linux.png", "share/icons/hicolor/512x512/apps/dev.compy.linux.png");
     b.installFile("data/dev.compy.linux.desktop", "share/applications/dev.compy.linux.desktop");
     // What software centers show, and the license.
     b.installFile("data/dev.compy.linux.metainfo.xml", "share/metainfo/dev.compy.linux.metainfo.xml");

@@ -9,10 +9,10 @@ const gdk = @import("gdk");
 const cairo = @import("cairo");
 const pango = @import("pango");
 const pangocairo = @import("pangocairo");
-const draw = @import("draw.zig");
+const draw = @import("../util/draw.zig");
 const settings = @import("settings.zig");
-const themes = @import("themes.zig");
-const termview = @import("termview.zig");
+const themes = @import("../theme/themes.zig");
+const termview = @import("../terminal/termview.zig");
 
 /// What a card shows.
 pub const Art = enum(usize) { scheme_auto, scheme_light, scheme_dark, tabs_left, tabs_right, tabs_above, panes_roomy, panes_compact };

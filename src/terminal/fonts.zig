@@ -14,7 +14,7 @@ const file_name = "SymbolsNerdFontMono-Regular.ttf";
 /// before Pango first lists fonts.
 pub fn registerBundled() void {
     var exe_buf: [4096]u8 = undefined;
-    const n = std.process.executableDirPath(@import("main.zig").io, &exe_buf) catch return;
+    const n = std.process.executableDirPath(@import("../main.zig").io, &exe_buf) catch return;
     var path_buf: [4200]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/../share/compy/fonts/{s}", .{ exe_buf[0..n], file_name }, 0) catch return;
     if (glib.fileTest(path.ptr, .{ .exists = true }) == 0) return;

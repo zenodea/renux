@@ -3,8 +3,8 @@
 const std = @import("std");
 const glib = @import("glib");
 const ws = @import("ws.zig");
-const json = @import("json.zig");
-const Term = @import("term.zig").Term;
+const json = @import("../util/json.zig");
+const Term = @import("../terminal/term.zig").Term;
 const Server = @import("server.zig").Server;
 
 const gpa = std.heap.c_allocator;
@@ -163,14 +163,14 @@ pub const Stream = struct {
 
     fn applyColors(s: *Stream) void {
         const t = s.term orelse return;
-        const theme = @import("theme.zig");
-        const c = @import("themes.zig").active orelse s.theme orelse s.server.host_colors orelse Colors{};
+        const theme = @import("../theme/theme.zig");
+        const c = @import("../theme/themes.zig").active orelse s.theme orelse s.server.host_colors orelse Colors{};
         const fg = if (c.fg != 0) c.fg else theme.default_fg;
         const bg = if (c.bg != 0) c.bg else theme.default_bg;
         // Colors 16 to 255 can be made from the theme's own 16, so they belong to it.
         var extended: [256]u32 = if (c.palette) |p| p else builtin_palette;
-        if (@import("settings.zig").current.extended_palette) {
-            @import("themes.zig").extendPalette(&extended, bg, fg);
+        if (@import("../settings/settings.zig").current.extended_palette) {
+            @import("../theme/themes.zig").extendPalette(&extended, bg, fg);
             t.setColors(fg, bg, c.cursor, &extended);
             return;
         }

@@ -3,7 +3,7 @@
 //! file can be imported too.
 const std = @import("std");
 const glib = @import("glib");
-const stream = @import("stream.zig");
+const stream = @import("../rex/stream.zig");
 const Colors = stream.Colors;
 const Rgb = @import("theme.zig").Rgb;
 

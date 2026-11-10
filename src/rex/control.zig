@@ -3,7 +3,7 @@
 const std = @import("std");
 const glib = @import("glib");
 const ws = @import("ws.zig");
-const json = @import("json.zig");
+const json = @import("../util/json.zig");
 
 const gpa = std.heap.c_allocator;
 

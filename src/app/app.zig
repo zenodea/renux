@@ -11,17 +11,17 @@ const gdk = @import("gdk");
 const gsk = @import("gsk");
 const pango = @import("pango");
 const adw = @import("adw");
-const server_mod = @import("server.zig");
-const view = @import("view.zig");
-const termview = @import("termview.zig");
+const server_mod = @import("../rex/server.zig");
+const view = @import("../rex/view.zig");
+const termview = @import("../terminal/termview.zig");
 const Server = server_mod.Server;
-const Workspace = @import("workspace.zig").Workspace;
-const settings = @import("settings.zig");
-const themes = @import("themes.zig");
-const theme = @import("theme.zig");
-const icons = @import("icons.zig");
-const keys = @import("keys.zig");
-const Palette = @import("palette.zig").Palette;
+const Workspace = @import("../ui/workspace.zig").Workspace;
+const settings = @import("../settings/settings.zig");
+const themes = @import("../theme/themes.zig");
+const theme = @import("../theme/theme.zig");
+const icons = @import("../icons/icons.zig");
+const keys = @import("../terminal/keys.zig");
+const Palette = @import("../ui/palette.zig").Palette;
 
 const gpa = std.heap.c_allocator;
 
@@ -269,7 +269,7 @@ pub const App = struct {
     hints: *gtk.Box = undefined,
     /// The session's windows as tabs above the panes, when tabs go there.
     tab_strip: *gtk.Box = undefined,
-    activity: *@import("activity.zig").Activity = undefined,
+    activity: *@import("../ui/activity.zig").Activity = undefined,
     /// A pane being floated so it can be minimized.
     minimize_next: ?[]u8 = null,
     rows: std.ArrayList(?Row) = .empty,
@@ -304,7 +304,7 @@ pub const App = struct {
     balance_count: usize = 0,
     balance_window: [64]u8 = undefined,
     balance_window_len: usize = 0,
-    theme_for: ?@import("stream.zig").Colors = null,
+    theme_for: ?@import("../rex/stream.zig").Colors = null,
     /// The terminal options last applied, so a change to one redoes only that one's work.
     applied_text: TextSetup = .{},
     applied_extended: bool = false,
@@ -325,7 +325,7 @@ pub const App = struct {
 
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
         // GTK may have reset it while starting up.
-        if (builtin.os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
+        if (builtin.os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("../platform/macos.zig").neverActivate();
         settings.load();
         // Asked before Compy forces a scheme of its own, while libadwaita still reports the
         // desktop's preference: dark only when the desktop prefers dark.
@@ -510,7 +510,7 @@ pub const App = struct {
         a.hints.as(gtk.Widget).setMarginBottom(62);
         a.hints.as(gtk.Widget).setCanTarget(0);
         layered.addOverlay(a.hints.as(gtk.Widget));
-        a.activity = @import("activity.zig").Activity.create(a);
+        a.activity = @import("../ui/activity.zig").Activity.create(a);
         a.activity.widget().setMarginTop(6);
         a.activity.widget().setMarginBottom(8);
         a.activity.widget().setMarginEnd(8);
@@ -531,7 +531,7 @@ pub const App = struct {
         if (builtin.os.tag == .macos) {
             _ = glib.timeoutAddSeconds(3, &appearanceTick, a);
         } else a.watchAppearance();
-        @import("workspace.zig").show_headers = settings.current.show_headers;
+        @import("../ui/workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
         // The development hooks (screenshots, the test script) are only in `-Ddev` builds.
         if (build_options.dev) installShotHook(a);
@@ -554,7 +554,7 @@ pub const App = struct {
         _ = glib.idleAdd(&refitSidebar, a);
         // `compy --toggle` finds this process by its ID and signals it.
         if (!dev_shot) {
-            @import("main.zig").claimToggle();
+            @import("../main.zig").claimToggle();
             _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
         }
         if (build_options.dev and std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
@@ -658,7 +658,7 @@ pub const App = struct {
         const config = settings.folder() orelse return;
         defer gpa.free(config);
         _ = glib.mkdirWithParents(config.ptr, 0o700);
-        const themes_dir = @import("theme_editor.zig").dir();
+        const themes_dir = @import("../settings/theme_editor.zig").dir();
         defer if (themes_dir) |d| gpa.free(d);
         if (themes_dir) |d| _ = glib.mkdirWithParents(d.ptr, 0o700);
         inline for (.{ @as(?[:0]u8, config), themes_dir }) |maybe| if (maybe) |path| {
@@ -741,7 +741,7 @@ pub const App = struct {
             if (f.getAncestor(T.getGObjectType()) != null) return 0;
         };
         // Find in the pane: Command+F on a Mac, Ctrl+Shift+F elsewhere, as terminals have it.
-        const K = @import("keys.zig");
+        const K = @import("../terminal/keys.zig");
         const mods = K.modsFromGdk(@bitCast(state));
         const find_mods: u4 = if (builtin.os.tag == .macos) K.super else K.ctrl | K.shift;
         if ((keyval == 'f' or keyval == 'F') and mods == find_mods) {
@@ -754,7 +754,7 @@ pub const App = struct {
                 if (f.getAncestor(T.getGObjectType()) != null) return 0;
             }
         }
-        if (@import("keys.zig").isModifier(keyval)) return 0;
+        if (@import("../terminal/keys.zig").isModifier(keyval)) return 0;
         _ = pane.grabFocus();
         return ctl.forward(pane);
     }
@@ -767,7 +767,7 @@ pub const App = struct {
 
     /// Tells the panes how much of their top-left the corner covers.
     fn cornerChanged(a: *App) void {
-        @import("workspace.zig").corner_right = a.cornerRight();
+        @import("../ui/workspace.zig").corner_right = a.cornerRight();
         a.tabsRoom();
         if (a.workspace) |ws| ws.cornerChanged();
         // The sidebar slides in or out over a few frames; the title follows it on each one.
@@ -804,7 +804,7 @@ pub const App = struct {
 
     fn cornerTick(_: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(data.?));
-        @import("workspace.zig").corner_right = a.cornerRight();
+        @import("../ui/workspace.zig").corner_right = a.cornerRight();
         a.tabsRoom();
         if (a.workspace) |ws| ws.cornerChanged();
         if (glib.getMonotonicTime() < a.corner_until) return 1;
@@ -897,8 +897,8 @@ pub const App = struct {
         // Nothing may still point at the host once it is freed: the activity panel's rows and
         // any open palette, Go to Anything or folder browser let go of it first.
         a.activity.hostRemoved();
-        @import("palette.zig").serverGone(h.server);
-        @import("goto.zig").hostRemoved(h.server);
+        @import("../ui/palette.zig").serverGone(h.server);
+        @import("../ui/goto.zig").hostRemoved(h.server);
         // The workspace goes while its widget and the server are still there, since freeing it
         // releases its terminals; the widget leaves the stack after.
         // Calls still out fail as the server goes; none of them may reach the freed workspace.
@@ -1036,7 +1036,7 @@ pub const App = struct {
         }
         a.theme_for = colors;
         // A forced scheme that the theme doesn't match uses a plain palette of that brightness.
-        var source = colors orelse @import("stream.zig").Colors{};
+        var source = colors orelse @import("../rex/stream.zig").Colors{};
         const theme_dark = theme.Palette.from(source).dark;
         switch (settings.current.color_scheme) {
             .auto => {},
@@ -1534,7 +1534,7 @@ pub const App = struct {
                 line.append(more.as(gtk.Widget));
                 const row = gtk.ListBoxRow.new();
                 row.setChild(line.as(gtk.Widget));
-                @import("hovercard.zig").attach(row.as(gtk.Widget), item, more, h.server, session.id, w.id);
+                @import("../ui/hovercard.zig").attach(row.as(gtk.Widget), item, more, h.server, session.id, w.id);
                 a.sidebar.append(row.as(gtk.Widget));
                 a.rows.appendAssumeCapacity(.{ .host = h, .session_id = session_id, .window_id = window_id, .label = item, .line = line, .tile = tile });
                 a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = item, .line = line, .tile = tile, .tile_for = tileFor(w) });
@@ -1616,7 +1616,7 @@ pub const App = struct {
         if (gpa.create(TailnetList)) |list| {
             list.* = .{ .app = a, .box = box, .url = url, .name = name };
             inline for (.{ box, url, name }) |w| _ = w.as(gobject.Object).ref();
-            @import("tailscale.zig").read(list, &tailnetRead);
+            @import("../rex/tailscale.zig").read(list, &tailnetRead);
         } else |_| {}
         // An address copied from Rex's Pair screen is likely what's wanted.
         // The read can finish after the dialog closed, so it holds the field until then.
@@ -1638,7 +1638,7 @@ pub const App = struct {
     /// The Add Host dialog's fields, kept alive until Tailscale has answered.
     const TailnetList = struct { app: *App, box: *gtk.Box, url: *gtk.Entry, name: *gtk.Entry };
 
-    fn tailnetRead(data: ?*anyopaque, ts: *@import("tailscale.zig").Status) void {
+    fn tailnetRead(data: ?*anyopaque, ts: *@import("../rex/tailscale.zig").Status) void {
         const list: *TailnetList = @ptrCast(@alignCast(data.?));
         defer {
             inline for (.{ list.box, list.url, list.name }) |w| w.as(gobject.Object).unref();
@@ -1703,7 +1703,7 @@ pub const App = struct {
         const text = clipboard.readTextFinish(result, null) orelse return;
         defer glib.free(text);
         const t = std.mem.span(text);
-        if (!@import("tailscale.zig").looksLikeAddress(t)) return;
+        if (!@import("../rex/tailscale.zig").looksLikeAddress(t)) return;
         if (std.mem.span(entry.as(gtk.Editable).getText()).len > 0) return;
         const trimmed = gpa.dupeSentinel(u8, std.mem.trim(u8, t, " \n\r\t"), 0) catch return;
         defer gpa.free(trimmed);
@@ -1733,7 +1733,7 @@ pub const App = struct {
         if (w.focused_block_id) |fb| if (s.blockInfo(fb)) |info| if (info.program) |prog| {
             var fbuf: [256]u8 = undefined;
             const name = programName(prog);
-            if (info.folder) |f| return std.fmt.bufPrintSentinel(buf, "{s} {s}", .{ name, @import("programs.zig").shortFolder(&fbuf, f) }, 0) catch "Window";
+            if (info.folder) |f| return std.fmt.bufPrintSentinel(buf, "{s} {s}", .{ name, @import("../icons/programs.zig").shortFolder(&fbuf, f) }, 0) catch "Window";
             return std.fmt.bufPrintSentinel(buf, "{s}", .{name}, 0) catch "Window";
         };
         return windowTitle(buf, w, v);
@@ -1943,7 +1943,7 @@ pub const App = struct {
         };
         if (n == a.badge_count) return;
         a.badge_count = n;
-        if (builtin.os.tag == .macos) return @import("macos.zig").setBadge(n);
+        if (builtin.os.tag == .macos) return @import("../platform/macos.zig").setBadge(n);
         a.sendBadge();
     }
 
@@ -2012,10 +2012,10 @@ pub const App = struct {
         return folderPath(buf, uri);
     }
 
-    fn browse(a: *App, mode: @import("goto.zig").BrowseMode) bool {
+    fn browse(a: *App, mode: @import("../ui/goto.zig").BrowseMode) bool {
         const t = a.target() orelse return false;
         var buf: [1024]u8 = undefined;
-        @import("goto.zig").openBrowser(a, t[0], t[1], t[2], a.focusedFolder(&buf), mode);
+        @import("../ui/goto.zig").openBrowser(a, t[0], t[1], t[2], a.focusedFolder(&buf), mode);
         return true;
     }
 
@@ -2054,18 +2054,18 @@ pub const App = struct {
     // client.* actions. Key bindings live in the person's Lua config on the server; the server
     // runs its own actions and asks the client for these.
 
-    pub fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
+    pub fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("../util/json.zig").Value, session_id: ?[]const u8) bool {
         const done = performInner(ctx, action, args, session_id);
         if (!done) std.log.warn("not performed: {s}", .{action});
         return done;
     }
 
-    fn performInner(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
+    fn performInner(ctx: *anyopaque, action: []const u8, args: ?@import("../util/json.zig").Value, session_id: ?[]const u8) bool {
         const h: *Host = @ptrCast(@alignCast(ctx));
         const a = h.app;
         // A key bound on one host acts on that host's sessions.
         a.selectHost(h);
-        const J = @import("json.zig");
+        const J = @import("../util/json.zig");
         if (session_id) |sid| if (!eqlOpt(a.session_id, sid)) {
             a.auto_picked = false;
             setSlot(&a.session_id, sid);
@@ -2143,8 +2143,8 @@ pub const App = struct {
     }
 
     /// The rest of Rex's client and session actions that make sense in Compy.
-    fn moreActions(a: *App, action: []const u8, args: ?@import("json.zig").Value) bool {
-        const J = @import("json.zig");
+    fn moreActions(a: *App, action: []const u8, args: ?@import("../util/json.zig").Value) bool {
+        const J = @import("../util/json.zig");
         const is = struct {
             fn f(x: []const u8, y: []const u8) bool {
                 return std.mem.eql(u8, x, y);
@@ -2346,8 +2346,8 @@ pub const App = struct {
     }
 
     /// Rex's pane actions, which each app performs itself.
-    fn paneAction(a: *App, name: []const u8, args: ?@import("json.zig").Value) bool {
-        const J = @import("json.zig");
+    fn paneAction(a: *App, name: []const u8, args: ?@import("../util/json.zig").Value) bool {
+        const J = @import("../util/json.zig");
         const eql = std.mem.eql;
         if (eql(u8, name, "zoom")) return a.did(zoomPane);
         if (std.mem.startsWith(u8, name, "focus.")) return a.focusDirection(name[6..]);
@@ -2368,7 +2368,7 @@ pub const App = struct {
             return a.moveFocusedToTab(index - 1);
         }
         if (eql(u8, name, "go_to")) {
-            @import("goto.zig").openAnything(a);
+            @import("../ui/goto.zig").openAnything(a);
             return true;
         }
         if (eql(u8, name, "go_to_directory")) return a.browse(.cd);
@@ -2413,7 +2413,7 @@ pub const App = struct {
             const s = a.server orelse return false;
             const sid = a.session_id orelse return false;
             const block = ws.focusedBlock() orelse return false;
-            const key = @import("keys.zig").fromName(J.str(args, "key") orelse return false) orelse return false;
+            const key = @import("../terminal/keys.zig").fromName(J.str(args, "key") orelse return false) orelse return false;
             // Alone, the key has no binding of its own, so the server hands it to the block.
             s.sendKey(sid, block, key);
             return true;
@@ -2567,7 +2567,7 @@ pub const App = struct {
         // The new window reads the settings file as it starts, so it must hold every change made here.
         settings.flush();
         var exe: [4096]u8 = undefined;
-        const n = std.process.executablePath(@import("main.zig").io, &exe) catch return false;
+        const n = std.process.executablePath(@import("../main.zig").io, &exe) catch return false;
         if (n >= exe.len) return false;
         exe[n] = 0;
         var env = glib.getEnviron();
@@ -2968,7 +2968,7 @@ pub const App = struct {
     }
 
     pub fn setTight(a: *App, on: bool) void {
-        @import("workspace.zig").setTight(on);
+        @import("../ui/workspace.zig").setTight(on);
         if (settings.current.tight != on) {
             settings.current.tight = on;
             settings.save();
@@ -3093,7 +3093,7 @@ pub const App = struct {
 
     // Find: each pane has its own bar; these act on the highlighted pane's.
 
-    fn focusedFind(a: *App) ?*@import("findbar.zig").FindBar {
+    fn focusedFind(a: *App) ?*@import("../ui/findbar.zig").FindBar {
         const ws = a.workspace orelse return null;
         return ws.focusedFind();
     }
@@ -3124,7 +3124,7 @@ pub const App = struct {
     // Settings.
 
     fn openSettings(a: *App) void {
-        @import("settings_window.zig").open(a);
+        @import("../settings/settings_window.zig").open(a);
     }
 
     /// Applies the terminal font from the settings to every pane.
@@ -3143,7 +3143,7 @@ pub const App = struct {
     /// Whether the computer is set to a dark appearance: the desktop's preference on Linux,
     /// the system setting on the Mac.
     fn systemDark() bool {
-        if (builtin.os.tag == .macos) return @import("macos.zig").systemDark();
+        if (builtin.os.tag == .macos) return @import("../platform/macos.zig").systemDark();
         // GTK's own setting can't say: Compy forces a scheme to match its theme, which that
         // setting then repeats, and GTK before 4.20 doesn't have it. The desktop's settings
         // portal can, and `watchAppearance` keeps this up to date from it.
@@ -3293,14 +3293,14 @@ pub const App = struct {
         defer gpa.free(css_text);
         provider.loadFromString(css_text.ptr);
         if (builtin.os.tag == .macos) if (a.window.as(gtk.Native).getSurface()) |surface| {
-            @import("macos.zig").setBlur(surface, see_through and prefs.blur, window_radius);
+            @import("../platform/macos.zig").setBlur(surface, see_through and prefs.blur, window_radius);
         };
         for (a.hosts.items) |h| h.workspace.refreshProgramBgs();
         a.redrawAll();
     }
 
     pub fn headersChanged(a: *App) void {
-        @import("workspace.zig").show_headers = settings.current.show_headers;
+        @import("../ui/workspace.zig").show_headers = settings.current.show_headers;
         for (a.hosts.items) |h| h.workspace.headersChanged();
         a.markHeaders();
     }
@@ -3401,7 +3401,7 @@ pub const App = struct {
 fn useAppIcon() void {
     // Installed apps live in PREFIX/bin with their icons in PREFIX/share, zig-out included.
     var exe_buf: [4096]u8 = undefined;
-    const n = std.process.executableDirPath(@import("main.zig").io, &exe_buf) catch return;
+    const n = std.process.executableDirPath(@import("../main.zig").io, &exe_buf) catch return;
     var dir_buf: [4200]u8 = undefined;
     const data_dir = std.fmt.bufPrint(&dir_buf, "{s}/../share", .{exe_buf[0..n]}) catch return;
     const icons_dir = std.fmt.allocPrintSentinel(gpa, "{s}/icons", .{data_dir}, 0) catch return;
@@ -3411,7 +3411,7 @@ fn useAppIcon() void {
     if (builtin.os.tag == .macos) {
         const png = std.fmt.allocPrintSentinel(gpa, "{s}/icons/hicolor/512x512/apps/dev.compy.linux.png", .{data_dir}, 0) catch return;
         defer gpa.free(png);
-        @import("macos.zig").setDockIcon(png);
+        @import("../platform/macos.zig").setDockIcon(png);
     }
 }
 
@@ -3759,7 +3759,7 @@ fn rowTile(s: *Server, w: *const view.Window) *gtk.Widget {
         ids[n] = b.id;
         n += 1;
     };
-    return @import("blockicon.zig").createFor(s, block, ids[0..n], 16);
+    return @import("../icons/blockicon.zig").createFor(s, block, ids[0..n], 16);
 }
 
 /// A window's name as its row and tab show it.
@@ -3800,7 +3800,7 @@ fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0
 }
 
 /// A program as rows and tabs name it: "-zsh" and "node/server.js" are "zsh" and "node".
-const programName = @import("programs.zig").programName;
+const programName = @import("../icons/programs.zig").programName;
 
 /// A typed server address as a URL, with http:// when it names no scheme, or null when nothing
 /// was typed. The caller frees it.
@@ -3895,7 +3895,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
                         last = if (part.len == 0) "+" else part;
                         break;
                     }
-                    const K = @import("keys.zig");
+                    const K = @import("../terminal/keys.zig");
                     if (std.mem.eql(u8, part, "ctrl")) mods |= K.ctrl else if (std.mem.eql(u8, part, "shift")) mods |= K.shift else if (std.mem.eql(u8, part, "alt")) mods |= K.alt else if (std.mem.eql(u8, part, "super")) mods |= K.super;
                 }
                 const named = [_]struct { []const u8, c_uint }{ .{ "left", 0xff51 }, .{ "up", 0xff52 }, .{ "right", 0xff53 }, .{ "down", 0xff54 }, .{ "enter", 0xff0d }, .{ "escape", 0xff1b }, .{ "tab", 0xff09 } };
@@ -3917,7 +3917,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             if (a.split.getSidebar()) |sb| std.log.info("sidebar was {d} wide (asked {d:.0}, min {d:.0}, max {d:.0}, room {d}, header {d})", .{ sb.getWidth(), a.split.getMaxSidebarWidth(), a.split.getMinSidebarWidth(), a.split.getMaxSidebarWidth(), a.header_room.getWidth(), a.side_header.getWidth() });
             a.setSidebarWidth(std.fmt.parseFloat(f64, it.next() orelse "250") catch 250);
         } else if (std.mem.eql(u8, cmd, "hovercard")) {
-            @import("hovercard.zig").showLast();
+            @import("../ui/hovercard.zig").showLast();
         } else if (std.mem.eql(u8, cmd, "line")) {
             ws.simulateLine();
         } else if (std.mem.eql(u8, cmd, "divider")) {
@@ -3954,8 +3954,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "type")) {
             const view_ = std.unicode.Utf8View.init(rest) catch continue;
             var cps = view_.iterator();
-            while (cps.nextCodepoint()) |cp| a.server.?.sendKey(tv.session_id, tv.block_id, @import("keys.zig").forChar(cp, 0));
-            a.server.?.sendKey(tv.session_id, tv.block_id, @import("keys.zig").fromGdk(0xff0d, 0, 0).?);
+            while (cps.nextCodepoint()) |cp| a.server.?.sendKey(tv.session_id, tv.block_id, @import("../terminal/keys.zig").forChar(cp, 0));
+            a.server.?.sendKey(tv.session_id, tv.block_id, @import("../terminal/keys.zig").fromGdk(0xff0d, 0, 0).?);
         }
         tv.widget().queueDraw();
     }
@@ -4030,7 +4030,7 @@ const FrameLog = struct {
             @as(f64, @floatFromInt(@divTrunc(work_total, frames))) / 1000,
             @as(f64, @floatFromInt(worst_work)) / 1000,
             @as(f64, @floatFromInt(refresh(clock))) / 1000,
-            @import("workspace.zig").ticking,
+            @import("../ui/workspace.zig").ticking,
             termview.scroll_ticking,
             if (shot_app) |a| a.corner_tick != 0 else false,
         });
@@ -4093,7 +4093,7 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
     defer texture.as(gobject.Object).unref();
     _ = texture.saveToPng(path);
     // The settings page showing, whole, with what is scrolled out of sight.
-    if (@import("settings_window.zig").wholePage()) |pw| {
+    if (@import("../settings/settings_window.zig").wholePage()) |pw| {
         const pp = gtk.WidgetPaintable.new(pw);
         defer pp.as(gobject.Object).unref();
         const ps = gtk.Snapshot.new();
@@ -4107,7 +4107,7 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
         }
     }
     // A hover card is a window of its own, so it gets a picture of its own beside the first.
-    if (@import("hovercard.zig").visibleCard()) |cw| {
+    if (@import("../ui/hovercard.zig").visibleCard()) |cw| {
         const cp = gtk.WidgetPaintable.new(cw);
         defer cp.as(gobject.Object).unref();
         const cs = gtk.Snapshot.new();

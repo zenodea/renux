@@ -29,9 +29,18 @@ export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig
 
 | Path | What it holds |
 |---|---|
-| `src/` | The app: `app.zig` is the window, `workspace.zig` the panes, `termview.zig` the terminal, `server.zig` the Rex protocol |
-| `data/` | The desktop file, icons, fonts and program icons that are installed with it |
-| `scripts/` | Generators for the icon tables in `src/` |
+| `src/main.zig` | Where the program starts |
+| `src/app/` | The window and its actions, start-up, local server and pairing pages |
+| `src/ui/` | Panes and their cards, the activity panel, the palette and other dialogs, find, hover cards |
+| `src/terminal/` | The terminal widget, the terminal model on libghostty-vt, keys, links, fonts |
+| `src/rex/` | The Rex protocol: control connection, output streams, WebSocket, layout model |
+| `src/settings/` | Settings, their window, shortcuts and the theme editor |
+| `src/theme/` | Colors and built-in themes |
+| `src/icons/` | Interface and program icons, and how they are drawn |
+| `src/platform/` | Parts for one operating system only |
+| `src/util/` | Small helpers: JSON, drawing, subprocesses, QR codes |
+| `data/` | What is installed beside the program: desktop file, app icons, fonts, program icons |
+| `scripts/` | Generators for the icon tables in `src/icons/` |
 | `third_party/ghostty` | Ghostty, for its terminal library |
 
 ## License

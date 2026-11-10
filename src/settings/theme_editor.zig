@@ -6,9 +6,9 @@ const gdk = @import("gdk");
 const adw = @import("adw");
 const glib = @import("glib");
 const gobject = @import("gobject");
-const themes = @import("themes.zig");
-const stream = @import("stream.zig");
-const Rgb = @import("theme.zig").Rgb;
+const themes = @import("../theme/themes.zig");
+const stream = @import("../rex/stream.zig");
+const Rgb = @import("../theme/theme.zig").Rgb;
 
 const gpa = std.heap.c_allocator;
 

@@ -11,12 +11,12 @@ const adw = @import("adw");
 const pango = @import("pango");
 const pangocairo = @import("pangocairo");
 const settings = @import("settings.zig");
-const themes = @import("themes.zig");
-const Rgb = @import("theme.zig").Rgb;
+const themes = @import("../theme/themes.zig");
+const Rgb = @import("../theme/theme.zig").Rgb;
 const shortcuts = @import("shortcuts.zig");
-const icons = @import("icons.zig");
+const icons = @import("../icons/icons.zig");
 const art = @import("settings_art.zig");
-const App = @import("app.zig").App;
+const App = @import("../app/app.zig").App;
 
 const gpa = std.heap.c_allocator;
 
@@ -528,7 +528,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
         row.addSuffix(show.as(gtk.Widget));
         pair.add(row.as(gtk.Widget));
     }
-    @import("manage.zig").localServerGroup(p, a);
+    @import("../app/manage.zig").localServerGroup(p, a);
     const more = group(p, "Help", null);
     inline for (.{ .{ "Diagnostics", "What Compy knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
         const row = adw.ActionRow.new();
@@ -551,7 +551,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     ts_row.as(adw.PreferencesRow).setTitle("Checking Tailscale…");
     // Asked without waiting; the row is kept until the answer has been written on it.
     _ = ts_row.as(gobject.Object).ref();
-    @import("tailscale.zig").read(ts_row, &tailscaleRead);
+    @import("../rex/tailscale.zig").read(ts_row, &tailscaleRead);
     tsg.add(ts_row.as(gtk.Widget));
 
     const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. It applies on the next connection.");
@@ -587,7 +587,7 @@ fn showStatus(ctx: *Ctx) void {
     if (ctx.status_retry) |r| r.setVisible(1);
 }
 
-fn tailscaleRead(data: ?*anyopaque, ts: *@import("tailscale.zig").Status) void {
+fn tailscaleRead(data: ?*anyopaque, ts: *@import("../rex/tailscale.zig").Status) void {
     const ts_row: *adw.ActionRow = @ptrCast(@alignCast(data.?));
     defer ts_row.as(gobject.Object).unref();
     if (ts.running) {
@@ -780,7 +780,7 @@ fn themeSaved(data: *anyopaque, old: ?[]const u8, path: []const u8) void {
 }
 
 fn newTheme(_: *gtk.Button, ctx: *Ctx) callconv(.c) void {
-    const start = themes.active orelse (if (ctx.app.server) |s| s.host_colors else null) orelse @import("stream.zig").Colors{};
+    const start = themes.active orelse (if (ctx.app.server) |s| s.host_colors else null) orelse @import("../rex/stream.zig").Colors{};
     theme_editor.open(ctx.dialog.as(gtk.Widget), null, start, ctx.app, &themeSaved);
 }
 

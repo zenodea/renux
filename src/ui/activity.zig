@@ -4,12 +4,12 @@ const std = @import("std");
 const gtk = @import("gtk");
 const gobject = @import("gobject");
 const glib = @import("glib");
-const app_mod = @import("app.zig");
-const settings = @import("settings.zig");
-const blockicon = @import("blockicon.zig");
-const programs = @import("programs.zig");
-const Server = @import("server.zig").Server;
-const StatusKind = @import("server.zig").StatusKind;
+const app_mod = @import("../app/app.zig");
+const settings = @import("../settings/settings.zig");
+const blockicon = @import("../icons/blockicon.zig");
+const programs = @import("../icons/programs.zig");
+const Server = @import("../rex/server.zig").Server;
+const StatusKind = @import("../rex/server.zig").StatusKind;
 
 const gpa = std.heap.c_allocator;
 

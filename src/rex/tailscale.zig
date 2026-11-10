@@ -2,8 +2,8 @@
 //! the tailnet run Rex. It only reads `tailscale status --json`; nothing is changed or sent.
 const std = @import("std");
 const glib = @import("glib");
-const json = @import("json.zig");
-const proc = @import("proc.zig");
+const json = @import("../util/json.zig");
+const proc = @import("../util/proc.zig");
 
 const gpa = std.heap.c_allocator;
 

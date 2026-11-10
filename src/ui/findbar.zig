@@ -2,8 +2,8 @@
 //! Each pane has its own, so two panes can be searched side by side for different things.
 const std = @import("std");
 const gtk = @import("gtk");
-const icons = @import("icons.zig");
-const TermView = @import("termview.zig").TermView;
+const icons = @import("../icons/icons.zig");
+const TermView = @import("../terminal/termview.zig").TermView;
 
 const gpa = std.heap.c_allocator;
 

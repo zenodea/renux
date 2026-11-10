@@ -1,7 +1,7 @@
 //! What a session looks like: its windows, their layers, and how panes tile. Each view owns an
 //! arena holding everything it points at, so it is replaced as a whole when the server changes it.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("../util/json.zig");
 
 const gpa = std.heap.c_allocator;
 

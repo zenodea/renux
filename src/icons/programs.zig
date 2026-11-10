@@ -5,7 +5,7 @@ const gobject = @import("gobject");
 const cairo = @import("cairo");
 const rsvg = @import("rsvg");
 const table = @import("program_icons.zig");
-const draw = @import("draw.zig");
+const draw = @import("../util/draw.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -185,5 +185,5 @@ test "titles name the program and its folder" {
 }
 
 test {
-    _ = @import("draw.zig");
+    _ = @import("../util/draw.zig");
 }

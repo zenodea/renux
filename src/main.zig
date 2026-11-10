@@ -1,5 +1,5 @@
 const std = @import("std");
-const App = @import("app.zig").App;
+const App = @import("app/app.zig").App;
 
 /// For the few standard library calls that need it.
 pub var io: std.Io = undefined;
@@ -79,36 +79,36 @@ pub fn main(init: std.process.Init) !void {
     // patience keeps them for the session. Someone who set the variable themselves keeps theirs.
     _ = @import("glib").setenv("GSK_CACHE_TIMEOUT", "86400", 0);
     // Before GTK starts, which is when Pango first lists the fonts.
-    @import("fonts.zig").registerBundled();
-    if (@import("builtin").os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
+    @import("terminal/fonts.zig").registerBundled();
+    if (@import("builtin").os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("platform/macos.zig").neverActivate();
     const app = try App.create();
     const code = app.run();
     // A setting changed in the last second is still waiting to be written.
-    @import("settings.zig").flush();
+    @import("settings/settings.zig").flush();
     releaseToggle();
     std.process.exit(@intCast(code));
 }
 
 test {
-    _ = @import("ws.zig");
-    _ = @import("term.zig");
-    _ = @import("control.zig");
-    _ = @import("json.zig");
-    _ = @import("view.zig");
-    _ = @import("stream.zig");
-    _ = @import("server.zig");
-    _ = @import("keys.zig");
-    _ = @import("theme.zig");
-    _ = @import("boxdraw.zig");
-    _ = @import("links.zig");
-    _ = @import("programs.zig");
-    _ = @import("blockicon.zig");
-    _ = @import("palette.zig");
-    _ = @import("settings.zig");
-    _ = @import("themes.zig");
-    _ = @import("settings_window.zig");
-    _ = @import("shortcuts.zig");
-    _ = @import("theme_editor.zig");
-    _ = @import("tailscale.zig");
-    _ = @import("qr.zig");
+    _ = @import("rex/ws.zig");
+    _ = @import("terminal/term.zig");
+    _ = @import("rex/control.zig");
+    _ = @import("util/json.zig");
+    _ = @import("rex/view.zig");
+    _ = @import("rex/stream.zig");
+    _ = @import("rex/server.zig");
+    _ = @import("terminal/keys.zig");
+    _ = @import("theme/theme.zig");
+    _ = @import("terminal/boxdraw.zig");
+    _ = @import("terminal/links.zig");
+    _ = @import("icons/programs.zig");
+    _ = @import("icons/blockicon.zig");
+    _ = @import("ui/palette.zig");
+    _ = @import("settings/settings.zig");
+    _ = @import("theme/themes.zig");
+    _ = @import("settings/settings_window.zig");
+    _ = @import("settings/shortcuts.zig");
+    _ = @import("settings/theme_editor.zig");
+    _ = @import("rex/tailscale.zig");
+    _ = @import("util/qr.zig");
 }

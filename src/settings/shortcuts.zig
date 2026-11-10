@@ -5,10 +5,10 @@ const gtk = @import("gtk");
 const gdk = @import("gdk");
 const adw = @import("adw");
 const gobject = @import("gobject");
-const app_mod = @import("app.zig");
+const app_mod = @import("../app/app.zig");
 const settings = @import("settings.zig");
-const keys = @import("keys.zig");
-const Server = @import("server.zig").Server;
+const keys = @import("../terminal/keys.zig");
+const Server = @import("../rex/server.zig").Server;
 
 const gpa = std.heap.c_allocator;
 const App = app_mod.App;

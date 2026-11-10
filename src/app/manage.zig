@@ -6,9 +6,9 @@ const adw = @import("adw");
 const glib = @import("glib");
 const gobject = @import("gobject");
 const app_mod = @import("app.zig");
-const settings = @import("settings.zig");
-const icons = @import("icons.zig");
-const proc = @import("proc.zig");
+const settings = @import("../settings/settings.zig");
+const icons = @import("../icons/icons.zig");
+const proc = @import("../util/proc.zig");
 
 const gpa = std.heap.c_allocator;
 const App = app_mod.App;
@@ -118,7 +118,7 @@ pub fn openDiagnostics(a: *App) void {
         const s = h.server;
         text.print(gpa, "\nHost {s}\n  address: {s}\n  state: {s}\n", .{ h.label, s.url, @tagName(s.state) }) catch return;
         if (s.rex_version) |v| text.print(gpa, "  Rex: {s}\n", .{v}) catch return;
-        if (s.api_revision != 0) text.print(gpa, "  API revision: {d} (Compy speaks {d})\n", .{ s.api_revision, @import("control.zig").api_revision }) catch return;
+        if (s.api_revision != 0) text.print(gpa, "  API revision: {d} (Compy speaks {d})\n", .{ s.api_revision, @import("../rex/control.zig").api_revision }) catch return;
         if (s.state == .offline) text.print(gpa, "  reason: {s}\n", .{s.reason.items}) catch return;
         var windows: usize = 0;
         var panes: usize = 0;
