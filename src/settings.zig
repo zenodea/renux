@@ -126,11 +126,7 @@ pub fn setShortcut(action: []const u8, args: []const u8, keys: ?[]const u8) void
         _ = list.orderedRemove(i);
         break;
     };
-    if (keys) |k| list.append(gpa, .{
-        .keys = gpa.dupe(u8, k) catch return,
-        .action = gpa.dupe(u8, action) catch return,
-        .args = gpa.dupe(u8, args) catch return,
-    }) catch {};
+    if (keys) |k| appendShortcut(k, action, args);
     save();
 }
 
@@ -151,18 +147,97 @@ pub fn addRecentPath(path: []const u8) void {
 
 pub var current: Settings = undefined;
 
+const log = std.log.scoped(.settings);
+
+/// Set when settings.ini is there but can't be read or written. Compy then leaves the file
+/// alone, so a slip made editing it by hand costs nothing; the Settings window shows this.
+pub var problem: ?[:0]const u8 = null;
+
+/// Tests keep their files here instead of in the person's own config folder.
+pub var test_dir: ?[]const u8 = null;
+
+fn configDir() []const u8 {
+    return test_dir orelse std.mem.span(glib.getUserConfigDir());
+}
+
 fn dir() ?[:0]u8 {
-    return std.fmt.allocPrintSentinel(gpa, "{s}/compy", .{std.mem.span(glib.getUserConfigDir())}, 0) catch null;
+    return std.fmt.allocPrintSentinel(gpa, "{s}/compy", .{configDir()}, 0) catch null;
 }
 
 fn file() ?[:0]u8 {
-    return std.fmt.allocPrintSentinel(gpa, "{s}/compy/settings.ini", .{std.mem.span(glib.getUserConfigDir())}, 0) catch null;
+    return std.fmt.allocPrintSentinel(gpa, "{s}/compy/settings.ini", .{configDir()}, 0) catch null;
+}
+
+// Every field of `Settings` that isn't a list is one key of the [compy] group, read and written
+// from the field itself: its name with dashes is the key, its type says how it is stored and its
+// default is the one in the struct. So a new setting is declared once, there. Only what a field
+// can't say lives here: keys that differ from the name, the range of each number and the
+// starting text of each string.
+
+const renamed = [_][2][:0]const u8{
+    .{ "pad_x", "padding-x" },
+    .{ "pad_y", "padding-y" },
+    .{ "recent_paths_shown", "recent-paths" },
+};
+
+const ranges = [_]struct { []const u8, f64, f64 }{
+    .{ "cursor_width", 1, 6 },
+    .{ "line_height", 0.8, 2 },
+    .{ "letter_spacing", -2, 6 },
+    .{ "window_opacity", 0.2, 1 },
+    .{ "terminal_opacity", 0.2, 1 },
+    .{ "sidebar_width", 180, 480 },
+    .{ "sidebar_text_scale", 0.8, 1.4 },
+    .{ "fade_inactive", 0, 0.6 },
+    .{ "highlight_opacity", 0.1, 1 },
+    .{ "cursor_blink_ms", 200, 2000 },
+    .{ "pad_x", 0, 40 },
+    .{ "pad_y", 0, 40 },
+};
+
+const texts = [_][2][]const u8{
+    .{ "font", "Monospace 11" },
+    .{ "theme_light", "Solarized Light" },
+};
+
+const fields = @typeInfo(Settings).@"struct";
+
+fn isList(comptime T: type) bool {
+    return T == std.ArrayList([]u8) or T == std.ArrayList(Host) or T == std.ArrayList(Shortcut);
+}
+
+fn keyOf(comptime name: []const u8) [:0]const u8 {
+    return comptime blk: {
+        @setEvalBranchQuota(100_000);
+        for (renamed) |r| if (std.mem.eql(u8, r[0], name)) break :blk r[1];
+        var buf: [name.len:0]u8 = undefined;
+        for (name, 0..) |c, i| buf[i] = if (c == '_') '-' else c;
+        const out = buf;
+        break :blk &out;
+    };
+}
+
+fn rangeOf(comptime name: []const u8) [2]f64 {
+    return comptime blk: {
+        @setEvalBranchQuota(100_000);
+        for (ranges) |r| if (std.mem.eql(u8, r[0], name)) break :blk .{ r[1], r[2] };
+        @compileError("the number setting " ++ name ++ " needs a range in settings.zig");
+    };
+}
+
+fn textOf(comptime name: []const u8) []const u8 {
+    return comptime blk: {
+        @setEvalBranchQuota(100_000);
+        for (texts) |t| if (std.mem.eql(u8, t[0], name)) break :blk t[1];
+        break :blk "";
+    };
 }
 
 fn str(kf: *glib.KeyFile, key: [*:0]const u8, default: []const u8) []u8 {
-    const v = kf.getString("compy", key, null) orelse return gpa.dupe(u8, default) catch unreachable;
+    // Out of memory leaves it empty, which every use takes and `gpa.free` accepts.
+    const v = kf.getString("compy", key, null) orelse return gpa.dupe(u8, default) catch &.{};
     defer glib.free(v);
-    return gpa.dupe(u8, std.mem.span(v)) catch unreachable;
+    return gpa.dupe(u8, std.mem.span(v)) catch &.{};
 }
 
 fn boolean(kf: *glib.KeyFile, key: [*:0]const u8, default: bool) bool {
@@ -186,136 +261,173 @@ fn number(kf: *glib.KeyFile, key: [*:0]const u8, default: f64, min: f64, max: f6
 }
 
 fn enumOf(comptime E: type, kf: *glib.KeyFile, key: [*:0]const u8, default: E) E {
-    const v = str(kf, key, @tagName(default));
-    defer gpa.free(v);
-    return std.meta.stringToEnum(E, v) orelse default;
+    const v = kf.getString("compy", key, null) orelse return default;
+    defer glib.free(v);
+    return std.meta.stringToEnum(E, std.mem.span(v)) orelse default;
 }
+
+fn readScalars(kf: *glib.KeyFile, s: *Settings) void {
+    inline for (fields.field_names, fields.field_types, fields.field_attrs) |name, T, attrs| {
+        if (comptime isList(T)) {
+            @field(s, name) = .empty;
+            continue;
+        }
+        const key = comptime keyOf(name);
+        @field(s, name) = switch (T) {
+            []u8 => str(kf, key, comptime textOf(name)),
+            bool => boolean(kf, key, comptime attrs.defaultValue(T).?),
+            f64 => number(kf, key, comptime attrs.defaultValue(T).?, comptime rangeOf(name)[0], comptime rangeOf(name)[1]),
+            // A color, 0xRRGGBB, with 0 for none.
+            u32 => @intFromFloat(number(kf, key, @floatFromInt(comptime attrs.defaultValue(T).?), 0, 0xffffff)),
+            else => enumOf(T, kf, key, comptime attrs.defaultValue(T).?),
+        };
+    }
+}
+
+fn writeScalars(kf: *glib.KeyFile, s: *const Settings) error{OutOfMemory}!void {
+    inline for (fields.field_names, fields.field_types) |name, T| {
+        if (comptime isList(T)) continue;
+        const key = comptime keyOf(name);
+        const v = @field(s, name);
+        switch (T) {
+            []u8 => {
+                const z = try gpa.dupeSentinel(u8, v, 0);
+                defer gpa.free(z);
+                kf.setString("compy", key, z.ptr);
+            },
+            bool => kf.setBoolean("compy", key, @intFromBool(v)),
+            f64 => kf.setDouble("compy", key, v),
+            u32 => kf.setDouble("compy", key, @floatFromInt(v)),
+            else => kf.setString("compy", key, @tagName(v)),
+        }
+    }
+}
+
+fn readList(kf: *glib.KeyFile, group: [*:0]const u8, key: [*:0]const u8, out: *std.ArrayList([]u8)) void {
+    var n: usize = 0;
+    const list = kf.getStringList(group, key, &n, null) orelse return;
+    defer glib.strfreev(@ptrCast(list));
+    for (0..n) |i| if (std.mem.span(list[i])) |item| {
+        const copy = gpa.dupe(u8, item) catch continue;
+        out.append(gpa, copy) catch gpa.free(copy);
+    };
+}
+
+fn writeList(kf: *glib.KeyFile, group: [*:0]const u8, key: [*:0]const u8, items: []const []const u8) error{OutOfMemory}!void {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const list = try arena.allocator().alloc(?[*:0]const u8, items.len);
+    for (items, list) |item, *slot| slot.* = (try arena.allocator().dupeSentinel(u8, item, 0)).ptr;
+    kf.setStringList(group, key, @ptrCast(list.ptr), list.len);
+}
+
+/// Everything in `s`, as the key file that holds it.
+fn toKeyFile(s: *const Settings) error{OutOfMemory}!*glib.KeyFile {
+    const kf = glib.KeyFile.new();
+    errdefer kf.unref();
+    try writeScalars(kf, s);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const al = arena.allocator();
+    // Hosts are stored as matching lists of labels and addresses.
+    const labels = try al.alloc([]const u8, s.hosts.items.len);
+    const urls = try al.alloc([]const u8, s.hosts.items.len);
+    for (s.hosts.items, labels, urls) |h, *l, *u| {
+        l.* = h.label;
+        u.* = h.url;
+    }
+    try writeList(kf, "hosts", "labels", labels);
+    try writeList(kf, "hosts", "urls", urls);
+    try writeList(kf, "paths", "recent", s.recent_paths.items);
+    try writeList(kf, "links", "trusted", s.trusted_schemes.items);
+    // Each shortcut is "keys<TAB>action<TAB>args".
+    const lines = try al.alloc([]const u8, s.shortcuts.items.len);
+    for (s.shortcuts.items, lines) |sc, *line| line.* = try std.fmt.allocPrint(al, "{s}\t{s}\t{s}", .{ sc.keys, sc.action, sc.args });
+    try writeList(kf, "shortcuts", "bindings", lines);
+    return kf;
+}
+
+const Read = enum { ok, missing, broken };
+
+/// Reads settings.ini into `kf`, keeping its comments and the keys Compy doesn't know.
+fn readFile(kf: *glib.KeyFile) Read {
+    const f = file() orelse return .missing;
+    defer gpa.free(f);
+    var err: ?*glib.Error = null;
+    if (kf.loadFromFile(f.ptr, .{ .keep_comments = true, .keep_translations = true }, &err) != 0) return .ok;
+    const e = err orelse return .broken;
+    defer e.free();
+    if (e.matches(glib.fileErrorQuark(), @intFromEnum(glib.FileError.noent)) != 0) return .missing;
+    log.warn("settings.ini can't be read, so it is left as it is: {s}", .{if (e.f_message) |m| std.mem.span(m) else "unknown error"});
+    return .broken;
+}
+
+const unreadable = "settings.ini can't be read, so changes made now aren't saved. Fix or remove the file.";
+const unwritable = "settings.ini can't be written, so changes made now aren't saved.";
+
+/// What this process last read from or wrote to the file. A save writes only the keys that
+/// differ from it, so the changes another Compy window made in the meantime stay.
+var base: ?*glib.KeyFile = null;
+var dirty = false;
+var timer: c_uint = 0;
 
 pub fn load() void {
     const kf = glib.KeyFile.new();
     defer kf.unref();
-    if (file()) |f| {
-        defer gpa.free(f);
-        _ = kf.loadFromFile(f.ptr, .{}, null);
-    }
-    current = .{
-        .font = str(kf, "font", "Monospace 11"),
-        .theme = str(kf, "theme", ""),
-        .client_label = str(kf, "client-label", ""),
-        .theme_light = str(kf, "theme-light", "Solarized Light"),
-        .theme_dark = str(kf, "theme-dark", ""),
-    };
+    problem = if (readFile(kf) == .broken) unreadable else null;
+    readScalars(kf, &current);
     const s = &current;
-    s.tight = boolean(kf, "tight", false);
-    s.show_headers = boolean(kf, "show-headers", true);
-    s.color_scheme = enumOf(ColorScheme, kf, "color-scheme", .auto);
-    s.brand_icons = boolean(kf, "brand-icons", true);
-    s.cursor_style = enumOf(CursorStyle, kf, "cursor-style", .program);
-    s.cursor_blink = boolean(kf, "cursor-blink", true);
-    s.cursor_width = number(kf, "cursor-width", 2, 1, 6);
-    s.line_height = number(kf, "line-height", 1, 0.8, 2);
-    s.letter_spacing = number(kf, "letter-spacing", 0, -2, 6);
-    s.window_opacity = number(kf, "window-opacity", 1, 0.2, 1);
-    s.terminal_opacity = number(kf, "terminal-opacity", 1, 0.2, 1);
-    s.blur = boolean(kf, "blur", true);
-    s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
-    s.key_hints = boolean(kf, "key-hints", true);
-    s.welcomed = boolean(kf, "welcomed", false);
-    s.show_on_launch = boolean(kf, "show-on-launch", true);
-    s.trackpad_gestures = boolean(kf, "trackpad-gestures", true);
-    s.sidebar_text_scale = number(kf, "sidebar-text-scale", 1, 0.8, 1.4);
-    s.unread_badge = boolean(kf, "unread-badge", true);
-    s.theme_follow_system = boolean(kf, "theme-follow-system", false);
-    s.focus_follows_mouse = boolean(kf, "focus-follows-mouse", false);
-    s.fade_inactive = number(kf, "fade-inactive", 0, 0, 0.6);
-    s.fade_inactive_window = boolean(kf, "fade-inactive-window", false);
-    s.highlight_border = boolean(kf, "highlight-border", true);
-    s.highlight_opacity = number(kf, "highlight-opacity", 0.85, 0.1, 1);
-    s.highlight_animate = boolean(kf, "highlight-animate", true);
-    s.highlight_color = @intFromFloat(number(kf, "highlight-color", 0, 0, 0xffffff));
-    s.autobalance = boolean(kf, "autobalance", false);
-    s.match_program_bg = boolean(kf, "match-program-bg", false);
-    s.rounded_selection = boolean(kf, "rounded-selection", true);
-    s.ligatures = boolean(kf, "ligatures", true);
-    s.font_smoothing = boolean(kf, "font-smoothing", true);
-    s.bold_italic = enumOf(BoldItalic, kf, "bold-italic", .fonts);
-    s.cursor_blink_ms = number(kf, "cursor-blink-ms", 530, 200, 2000);
-    s.cursor_text_color = @intFromFloat(number(kf, "cursor-text-color", 0, 0, 0xffffff));
-    s.selection_bg = @intFromFloat(number(kf, "selection-bg", 0, 0, 0xffffff));
-    s.selection_fg = @intFromFloat(number(kf, "selection-fg", 0, 0, 0xffffff));
-    s.pad_x = number(kf, "padding-x", 8, 0, 40);
-    s.pad_y = number(kf, "padding-y", 8, 0, 40);
-    s.padding_color = enumOf(PaddingColor, kf, "padding-color", .terminal);
-    s.extended_palette = boolean(kf, "extended-palette", false);
-    s.copy_animation = boolean(kf, "copy-animation", true);
+    readList(kf, "links", "trusted", &s.trusted_schemes);
+    readList(kf, "paths", "recent", &s.recent_paths);
     {
-        var n: usize = 0;
-        if (kf.getStringList("links", "trusted", &n, null)) |list| {
-            defer glib.strfreev(@ptrCast(list));
-            for (0..n) |i| if (std.mem.span(list[i])) |t| {
-                s.trusted_schemes.append(gpa, gpa.dupe(u8, t) catch continue) catch {};
-            };
+        var lines: std.ArrayList([]u8) = .empty;
+        defer {
+            for (lines.items) |l| gpa.free(l);
+            lines.deinit(gpa);
         }
-    }
-    s.tab_position = enumOf(TabPosition, kf, "tab-position", .left);
-    s.tab_fill = boolean(kf, "tab-fill", true);
-    s.tab_processes = boolean(kf, "tab-processes", false);
-    s.alerts = boolean(kf, "alerts", true);
-    s.alert_blocked = boolean(kf, "alert-blocked", true);
-    s.alert_error = boolean(kf, "alert-error", true);
-    s.alert_done = boolean(kf, "alert-done", true);
-    s.sound = boolean(kf, "sound", false);
-    s.terminal_notifications = boolean(kf, "terminal-notifications", true);
-    s.improve_contrast = boolean(kf, "improve-contrast", true);
-    s.visual_bell = boolean(kf, "visual-bell", true);
-    s.paste_warning = boolean(kf, "paste-warning", true);
-    s.copy_on_select = boolean(kf, "copy-on-select", true);
-    s.recent_paths_shown = boolean(kf, "recent-paths", true);
-    {
-        // Each one is "keys<TAB>action<TAB>args".
-        var n: usize = 0;
-        if (kf.getStringList("shortcuts", "bindings", &n, null)) |list| {
-            defer glib.strfreev(@ptrCast(list));
-            for (0..n) |i| if (std.mem.span(list[i])) |line| {
-                var parts = std.mem.splitScalar(u8, line, '\t');
-                const k = parts.next() orelse continue;
-                const act = parts.next() orelse continue;
-                const args = parts.next() orelse "";
-                s.shortcuts.append(gpa, .{ .keys = gpa.dupe(u8, k) catch continue, .action = gpa.dupe(u8, act) catch continue, .args = gpa.dupe(u8, args) catch continue }) catch {};
-            };
+        readList(kf, "shortcuts", "bindings", &lines);
+        for (lines.items) |line| {
+            var parts = std.mem.splitScalar(u8, line, '\t');
+            const k = parts.next() orelse continue;
+            const act = parts.next() orelse continue;
+            appendShortcut(k, act, parts.next() orelse "");
         }
     }
     {
-        var n: usize = 0;
-        if (kf.getStringList("paths", "recent", &n, null)) |list| {
-            defer glib.strfreev(@ptrCast(list));
-            for (0..n) |i| if (std.mem.span(list[i])) |p| {
-                s.recent_paths.append(gpa, gpa.dupe(u8, p) catch continue) catch {};
-            };
-        }
+        var labels: std.ArrayList([]u8) = .empty;
+        var urls: std.ArrayList([]u8) = .empty;
+        defer for ([_]*std.ArrayList([]u8){ &labels, &urls }) |list| {
+            for (list.items) |l| gpa.free(l);
+            list.deinit(gpa);
+        };
+        readList(kf, "hosts", "labels", &labels);
+        readList(kf, "hosts", "urls", &urls);
+        for (0..@min(labels.items.len, urls.items.len)) |i| addHostNoSave(labels.items[i], urls.items[i]);
     }
-
-    // Hosts are stored as matching lists of labels and addresses.
-    var n_labels: usize = 0;
-    var n_urls: usize = 0;
-    const labels = kf.getStringList("hosts", "labels", &n_labels, null);
-    const urls = kf.getStringList("hosts", "urls", &n_urls, null);
-    if (labels != null and urls != null) {
-        for (0..@min(n_labels, n_urls)) |i| {
-            const l = std.mem.span(labels.?[i]) orelse continue;
-            const u = std.mem.span(urls.?[i]) orelse continue;
-            addHostNoSave(l, u);
-        }
-    }
-    if (labels) |l| glib.strfreev(@ptrCast(l));
-    if (urls) |u| glib.strfreev(@ptrCast(u));
+    if (base) |old| old.unref();
+    base = toKeyFile(&current) catch null;
+    dirty = false;
     migrateOldServer();
+}
+
+fn appendShortcut(keys: []const u8, action: []const u8, args: []const u8) void {
+    const k = gpa.dupe(u8, keys) catch return;
+    const act = gpa.dupe(u8, action) catch return gpa.free(k);
+    const ar = gpa.dupe(u8, args) catch {
+        gpa.free(k);
+        return gpa.free(act);
+    };
+    current.shortcuts.append(gpa, .{ .keys = k, .action = act, .args = ar }) catch {
+        gpa.free(k);
+        gpa.free(act);
+        gpa.free(ar);
+    };
 }
 
 /// The first version kept one server address in ~/.config/compy/server.
 fn migrateOldServer() void {
     if (current.hosts.items.len > 0) return;
-    const old = std.fmt.allocPrintSentinel(gpa, "{s}/compy/server", .{std.mem.span(glib.getUserConfigDir())}, 0) catch return;
+    const old = std.fmt.allocPrintSentinel(gpa, "{s}/compy/server", .{configDir()}, 0) catch return;
     defer gpa.free(old);
     var contents: [*]u8 = undefined;
     var len: usize = 0;
@@ -348,7 +460,9 @@ fn addHostNoSave(label: []const u8, url: []const u8) void {
 
 pub fn addHost(label: []const u8, url: []const u8) void {
     addHostNoSave(label, url);
+    // Written at once: a window opened next is another process, which reads the file.
     save();
+    flush();
 }
 
 pub fn removeHost(index: usize) void {
@@ -357,6 +471,7 @@ pub fn removeHost(index: usize) void {
     gpa.free(h.label);
     gpa.free(h.url);
     save();
+    flush();
 }
 
 pub fn setString(slot: *[]u8, value: []const u8) void {
@@ -366,107 +481,225 @@ pub fn setString(slot: *[]u8, value: []const u8) void {
     save();
 }
 
+/// Notes that a setting changed. The file is written a second later, so a burst of changes
+/// (a spinner held down, a pane changing folder over and over) is one write.
 pub fn save() void {
-    const kf = glib.KeyFile.new();
-    defer kf.unref();
-    const s = &current;
-    inline for (.{ .{ "font", s.font }, .{ "theme", s.theme }, .{ "client-label", s.client_label }, .{ "theme-light", s.theme_light }, .{ "theme-dark", s.theme_dark } }) |e| {
-        const z = gpa.dupeSentinel(u8, e[1], 0) catch return;
-        defer gpa.free(z);
-        kf.setString("compy", e[0], z.ptr);
-    }
-    inline for (.{
-        .{ "tight", s.tight },                 .{ "show-headers", s.show_headers },
-        .{ "brand-icons", s.brand_icons },     .{ "cursor-blink", s.cursor_blink },
-        .{ "alerts", s.alerts },               .{ "alert-blocked", s.alert_blocked },
-        .{ "alert-error", s.alert_error },     .{ "alert-done", s.alert_done },
-        .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
-        .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
-        .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
-        .{ "key-hints", s.key_hints },         .{ "welcomed", s.welcomed },
-        .{ "show-on-launch", s.show_on_launch }, .{ "trackpad-gestures", s.trackpad_gestures },
-        .{ "unread-badge", s.unread_badge },         .{ "theme-follow-system", s.theme_follow_system },         .{ "focus-follows-mouse", s.focus_follows_mouse },
-        .{ "fade-inactive-window", s.fade_inactive_window }, .{ "highlight-border", s.highlight_border },
-        .{ "highlight-animate", s.highlight_animate }, .{ "autobalance", s.autobalance },
-        .{ "match-program-bg", s.match_program_bg }, .{ "rounded-selection", s.rounded_selection },
-        .{ "ligatures", s.ligatures },         .{ "font-smoothing", s.font_smoothing },
-        .{ "extended-palette", s.extended_palette }, .{ "copy-animation", s.copy_animation },         .{ "recent-paths", s.recent_paths_shown },         .{ "tab-fill", s.tab_fill },
-        .{ "tab-processes", s.tab_processes },
-    }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
-    kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
-    kf.setString("compy", "cursor-style", @tagName(s.cursor_style));
-    kf.setString("compy", "tab-position", @tagName(s.tab_position));
-    kf.setDouble("compy", "cursor-width", s.cursor_width);
-    kf.setDouble("compy", "line-height", s.line_height);
-    kf.setDouble("compy", "letter-spacing", s.letter_spacing);
-    kf.setDouble("compy", "window-opacity", s.window_opacity);
-    kf.setDouble("compy", "terminal-opacity", s.terminal_opacity);
-    kf.setBoolean("compy", "blur", @intFromBool(s.blur));
-    kf.setDouble("compy", "sidebar-width", s.sidebar_width);
-    kf.setDouble("compy", "fade-inactive", s.fade_inactive);
-    kf.setDouble("compy", "sidebar-text-scale", s.sidebar_text_scale);
-    kf.setDouble("compy", "highlight-opacity", s.highlight_opacity);
-    kf.setDouble("compy", "highlight-color", @floatFromInt(s.highlight_color));
-    kf.setDouble("compy", "cursor-blink-ms", s.cursor_blink_ms);
-    kf.setDouble("compy", "cursor-text-color", @floatFromInt(s.cursor_text_color));
-    kf.setDouble("compy", "selection-bg", @floatFromInt(s.selection_bg));
-    kf.setDouble("compy", "selection-fg", @floatFromInt(s.selection_fg));
-    kf.setDouble("compy", "padding-x", s.pad_x);
-    kf.setDouble("compy", "padding-y", s.pad_y);
-    kf.setString("compy", "bold-italic", @tagName(s.bold_italic));
-    kf.setString("compy", "padding-color", @tagName(s.padding_color));
+    dirty = true;
+    if (timer == 0) timer = glib.timeoutAdd(1000, &onTimer, null);
+}
 
-    var labels: std.ArrayList(?[*:0]const u8) = .empty;
-    var urls: std.ArrayList(?[*:0]const u8) = .empty;
-    var owned: std.ArrayList([:0]u8) = .empty;
-    defer {
-        for (owned.items) |o| gpa.free(o);
-        owned.deinit(gpa);
-        labels.deinit(gpa);
-        urls.deinit(gpa);
-    }
-    for (s.hosts.items) |h| {
-        const l = gpa.dupeSentinel(u8, h.label, 0) catch return;
-        const u = gpa.dupeSentinel(u8, h.url, 0) catch return;
-        owned.append(gpa, l) catch return;
-        owned.append(gpa, u) catch return;
-        labels.append(gpa, l.ptr) catch return;
-        urls.append(gpa, u.ptr) catch return;
-    }
-    kf.setStringList("hosts", "labels", @ptrCast(labels.items.ptr), labels.items.len);
-    kf.setStringList("hosts", "urls", @ptrCast(urls.items.ptr), urls.items.len);
+fn onTimer(_: ?*anyopaque) callconv(.c) c_int {
+    timer = 0;
+    flush();
+    return 0;
+}
 
-    var recent: std.ArrayList(?[*:0]const u8) = .empty;
-    defer recent.deinit(gpa);
-    for (s.recent_paths.items) |p| {
-        const z = gpa.dupeSentinel(u8, p, 0) catch return;
-        owned.append(gpa, z) catch return;
-        recent.append(gpa, z.ptr) catch return;
+/// Writes what changed now: as Compy quits, and for changes another window is about to read.
+pub fn flush() void {
+    if (timer != 0) {
+        _ = glib.Source.remove(timer);
+        timer = 0;
     }
-    kf.setStringList("paths", "recent", @ptrCast(recent.items.ptr), recent.items.len);
-    var trusted: std.ArrayList(?[*:0]const u8) = .empty;
-    defer trusted.deinit(gpa);
-    for (s.trusted_schemes.items) |t| {
-        const z = gpa.dupeSentinel(u8, t, 0) catch return;
-        owned.append(gpa, z) catch return;
-        trusted.append(gpa, z.ptr) catch return;
+    if (!dirty) return;
+    const mine = toKeyFile(&current) catch return;
+    var keep = false;
+    defer if (!keep) mine.unref();
+    // The file as it is now, which another window may have written since this one read it.
+    const disk = glib.KeyFile.new();
+    defer disk.unref();
+    if (readFile(disk) == .broken) {
+        problem = unreadable;
+        return;
     }
-    kf.setStringList("links", "trusted", @ptrCast(trusted.items.ptr), trusted.items.len);
-    var shortcut_lines: std.ArrayList(?[*:0]const u8) = .empty;
-    defer shortcut_lines.deinit(gpa);
-    for (s.shortcuts.items) |sc| {
-        const z = std.fmt.allocPrintSentinel(gpa, "{s}\t{s}\t{s}", .{ sc.keys, sc.action, sc.args }, 0) catch return;
-        owned.append(gpa, z) catch return;
-        shortcut_lines.append(gpa, z.ptr) catch return;
-    }
-    kf.setStringList("shortcuts", "bindings", @ptrCast(shortcut_lines.items.ptr), shortcut_lines.items.len);
-
+    merge(disk, mine, base);
     const d = dir() orelse return;
     defer gpa.free(d);
     _ = glib.mkdirWithParents(d.ptr, 0o700);
     const f = file() orelse return;
     defer gpa.free(f);
-    _ = kf.saveToFile(f.ptr, null);
+    var err: ?*glib.Error = null;
+    if (disk.saveToFile(f.ptr, &err) == 0) {
+        if (err) |e| {
+            log.warn("settings.ini can't be written: {s}", .{if (e.f_message) |m| std.mem.span(m) else "unknown error"});
+            e.free();
+        }
+        problem = unwritable;
+        return;
+    }
+    problem = null;
+    dirty = false;
+    if (base) |old| old.unref();
+    base = mine;
+    keep = true;
+}
+
+fn sameValue(kf: ?*glib.KeyFile, group: [*:0]const u8, key: [*:0]const u8, value: [*:0]const u8) bool {
+    const other = (kf orelse return false).getValue(group, key, null) orelse return false;
+    defer glib.free(other);
+    return std.mem.eql(u8, std.mem.span(other), std.mem.span(value));
+}
+
+/// Copies into `disk` every key of `mine` whose value isn't the one in `since`.
+fn merge(disk: *glib.KeyFile, mine: *glib.KeyFile, since: ?*glib.KeyFile) void {
+    const groups = mine.getGroups(null);
+    defer glib.strfreev(@ptrCast(groups));
+    var gi: usize = 0;
+    while (groups[gi]) |group| : (gi += 1) {
+        const names = mine.getKeys(group, null, null) orelse continue;
+        defer glib.strfreev(@ptrCast(names));
+        // A host's label and address are two lists that only make sense together.
+        var whole_group = false;
+        if (std.mem.eql(u8, std.mem.span(group), "hosts")) {
+            var hi: usize = 0;
+            while (names[hi]) |key| : (hi += 1) {
+                const value = mine.getValue(group, key, null) orelse continue;
+                defer glib.free(value);
+                if (!sameValue(since, group, key, value)) whole_group = true;
+            }
+        }
+        var ki: usize = 0;
+        while (names[ki]) |key| : (ki += 1) {
+            const value = mine.getValue(group, key, null) orelse continue;
+            defer glib.free(value);
+            if (whole_group or !sameValue(since, group, key, value)) disk.setValue(group, key, value);
+        }
+    }
+}
+
+fn clearForTest() void {
+    if (timer != 0) _ = glib.Source.remove(timer);
+    timer = 0;
+    if (base) |old| old.unref();
+    base = null;
+    dirty = false;
+    problem = null;
+}
+
+/// A folder of its own for one test's settings.ini, with `text` in the file when given.
+fn testFolder(text: ?[]const u8) ![:0]u8 {
+    const tmp = glib.Dir.makeTmp("compy-test-XXXXXX", null) orelse return error.NoTempFolder;
+    defer glib.free(tmp);
+    const root = try gpa.dupeSentinel(u8, std.mem.span(tmp), 0);
+    test_dir = root;
+    clearForTest();
+    if (text) |t| {
+        const d = dir().?;
+        defer gpa.free(d);
+        _ = glib.mkdirWithParents(d.ptr, 0o700);
+        try writeTestFile(t);
+    }
+    return root;
+}
+
+fn writeTestFile(text: []const u8) !void {
+    const f = file().?;
+    defer gpa.free(f);
+    if (glib.fileSetContents(f.ptr, @ptrCast(text.ptr), @intCast(text.len), null) == 0) return error.WriteFailed;
+}
+
+fn readTestFile() ![]u8 {
+    const f = file().?;
+    defer gpa.free(f);
+    var contents: [*]u8 = undefined;
+    var len: usize = 0;
+    if (glib.fileGetContents(f.ptr, &contents, &len, null) == 0) return error.ReadFailed;
+    defer glib.free(contents);
+    return gpa.dupe(u8, contents[0..len]);
+}
+
+fn removeTestFolder(root: [:0]u8) void {
+    if (file()) |f| {
+        _ = glib.unlink(f.ptr);
+        gpa.free(f);
+    }
+    if (dir()) |d| {
+        _ = glib.rmdir(d.ptr);
+        gpa.free(d);
+    }
+    _ = glib.rmdir(root.ptr);
+    clearForTest();
+    test_dir = null;
+    gpa.free(root);
+}
+
+test "every setting comes back as it was saved" {
+    const root = try testFolder(null);
+    defer removeTestFolder(root);
+    load();
+    try std.testing.expectEqualStrings("Monospace 11", current.font);
+    try std.testing.expectEqualStrings("Solarized Light", current.theme_light);
+    try std.testing.expect(current.show_headers and !current.tight);
+    setString(&current.font, "Iosevka 13");
+    current.tight = true;
+    current.pad_x = 12;
+    current.cursor_style = .bar;
+    current.highlight_color = 0x4fe3c1;
+    current.recent_paths_shown = false;
+    addHostNoSave("box", "http://box:8765/");
+    addRecentPath("/srv/app");
+    setShortcut("pane.close", "", "ctrl+a x");
+    flush();
+    load();
+    try std.testing.expectEqualStrings("Iosevka 13", current.font);
+    try std.testing.expect(current.tight);
+    try std.testing.expectEqual(@as(f64, 12), current.pad_x);
+    try std.testing.expectEqual(CursorStyle.bar, current.cursor_style);
+    try std.testing.expectEqual(@as(u32, 0x4fe3c1), current.highlight_color);
+    try std.testing.expect(!current.recent_paths_shown);
+    try std.testing.expectEqual(@as(usize, 1), current.hosts.items.len);
+    try std.testing.expectEqualStrings("http://box:8765", current.hosts.items[0].url);
+    try std.testing.expectEqualStrings("/srv/app", current.recent_paths.items[0]);
+    try std.testing.expectEqualStrings("ctrl+a x", current.shortcuts.items[0].keys);
+    // The keys in the file are the ones older versions wrote.
+    const text = try readTestFile();
+    defer gpa.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "padding-x=12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "recent-paths=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "cursor-style=bar") != null);
+}
+
+test "a save keeps what another window wrote, unknown keys and comments" {
+    const root = try testFolder("# mine\n[compy]\ntheme=Nord\nfrom-the-future=1\n");
+    defer removeTestFolder(root);
+    load();
+    try std.testing.expectEqualStrings("Nord", current.theme);
+    // Another window changes the theme and adds a host while this one is open.
+    try writeTestFile("# mine\n[compy]\ntheme=Dracula\nfrom-the-future=1\n\n[hosts]\nlabels=box;\nurls=http://box:8765;\n");
+    current.tight = true;
+    save();
+    flush();
+    const text = try readTestFile();
+    defer gpa.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "theme=Dracula") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "from-the-future=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "# mine") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tight=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "labels=box;") != null);
+    // What this window didn't change isn't written at all.
+    try std.testing.expect(std.mem.indexOf(u8, text, "font=") == null);
+}
+
+test "a settings file that can't be read is left alone" {
+    const broken = "[compy\ntheme=Nord\n";
+    const root = try testFolder(broken);
+    defer removeTestFolder(root);
+    load();
+    try std.testing.expect(problem != null);
+    try std.testing.expectEqualStrings("", current.theme);
+    current.tight = true;
+    save();
+    flush();
+    const text = try readTestFile();
+    defer gpa.free(text);
+    try std.testing.expectEqualStrings(broken, text);
+    // Once the file is fixed, the change waiting to be saved goes in.
+    try writeTestFile("[compy]\ntheme=Nord\n");
+    flush();
+    try std.testing.expect(problem == null);
+    const fixed = try readTestFile();
+    defer gpa.free(fixed);
+    try std.testing.expect(std.mem.indexOf(u8, fixed, "theme=Nord") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixed, "tight=true") != null);
 }
 
 test "labels from addresses" {

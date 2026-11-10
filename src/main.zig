@@ -78,6 +78,8 @@ pub fn main(init: std.process.Init) !void {
     if (@import("builtin").os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
     const app = try App.create();
     const code = app.run();
+    // A setting changed in the last second is still waiting to be written.
+    @import("settings.zig").flush();
     releaseToggle();
     std.process.exit(@intCast(code));
 }
