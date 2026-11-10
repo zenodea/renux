@@ -6,6 +6,7 @@ const gtk = @import("gtk");
 const gobject = @import("gobject");
 const glib = @import("glib");
 const app_mod = @import("../app/app.zig");
+const settings = @import("../settings/settings.zig");
 const blockicon = @import("../icons/blockicon.zig");
 const icons = @import("../icons/icons.zig");
 const programs = @import("../icons/programs.zig");
@@ -33,6 +34,14 @@ const Card = struct {
     since: *gtk.Label,
     progress: *gtk.ProgressBar,
     column: ?Column = null,
+    /// Set when the card changed column in the last pass, for it to arrive with a small move.
+    moved: bool = false,
+    /// When its status last changed, to put the latest first.
+    since_us: i64 = 0,
+    /// Where its session comes in the sidebar's order, and the session's name.
+    session_rank: usize = 0,
+    session_label: [96]u8 = undefined,
+    session_label_len: usize = 0,
     /// What the icon was drawn for, so it is only made again when that changes.
     icon_key: u64 = 0,
     seen: bool = true,
@@ -53,6 +62,9 @@ pub const Board = struct {
     counts: [4]*gtk.Label = undefined,
     heading: *gtk.Widget = undefined,
     empties: [4]*gtk.Widget = undefined,
+    /// What each column's list holds now, as a hash of its rows in order, so a list is only
+    /// laid out again when its rows or their order change.
+    laid_out: [4]u64 = .{ 0, 0, 0, 0 },
     cards: std.ArrayList(*Card) = .empty,
     refresh_source: c_uint = 0,
     clock: c_uint = 0,
@@ -72,6 +84,19 @@ pub const Board = struct {
         title.as(gtk.Widget).setHexpand(1);
         head.append(title.as(gtk.Widget));
         b.heading = title.as(gtk.Widget);
+        // All cards in one run per column, or under the name of the session each is in.
+        const by = gtk.Box.new(.horizontal, 0);
+        by.as(gtk.Widget).addCssClass("linked");
+        by.as(gtk.Widget).addCssClass("board-grouping");
+        by.as(gtk.Widget).setValign(.center);
+        const all = gtk.ToggleButton.newWithLabel("All");
+        const by_session = gtk.ToggleButton.newWithLabel("By Session");
+        by_session.setGroup(all);
+        (if (settings.current.board_by_session) by_session else all).setActive(1);
+        by.append(all.as(gtk.Widget));
+        by.append(by_session.as(gtk.Widget));
+        _ = gtk.ToggleButton.signals.toggled.connect(by_session, *Board, &groupingToggled, b, .{});
+        head.append(by.as(gtk.Widget));
         const close = icons.button(.close, "Back to the panes", null);
         _ = gtk.Button.signals.clicked.connect(close, *Board, &closeClicked, b, .{});
         head.append(close.as(gtk.Widget));
@@ -155,6 +180,14 @@ pub const Board = struct {
         b.revealer.setRevealChild(@intFromBool(on));
     }
 
+    fn groupingToggled(button: *gtk.ToggleButton, b: *Board) callconv(.c) void {
+        const on = button.getActive() != 0;
+        if (on == settings.current.board_by_session) return;
+        settings.current.board_by_session = on;
+        settings.save();
+        b.refresh();
+    }
+
     fn closeClicked(_: *gtk.Button, b: *Board) callconv(.c) void {
         b.app.showBoard(false);
     }
@@ -187,9 +220,11 @@ pub const Board = struct {
     /// pane that closed loses its card, and a card whose program changed state moves column.
     pub fn refresh(b: *Board) void {
         for (b.cards.items) |c| c.seen = false;
+        var rank: usize = 0;
         for (b.app.hosts.items) |h| {
             const s = h.server;
             for (s.sessions.items) |session| {
+                rank += 1;
                 const v = s.sessionView(session.id) orelse continue;
                 for (v.windows) |w| for (w.layers) |l| for (l.blocks) |blk| {
                     if (!blk.isTerminal()) continue;
@@ -199,6 +234,7 @@ pub const Board = struct {
                     if (!info.has_status and !programs.isAgent(info.program)) continue;
                     const c = b.cardFor(h, session.id, w.id, blk.id) orelse continue;
                     c.seen = true;
+                    c.session_rank = rank;
                     b.fill(c, if (session.label.len > 0) session.label else "session");
                 };
             }
@@ -210,10 +246,11 @@ pub const Board = struct {
                 i += 1;
                 continue;
             }
-            if (c.column) |col| b.lists[@intFromEnum(col)].remove(c.button.as(gtk.Widget));
+            if (c.button.as(gtk.Widget).getParent()) |parent| @as(*gtk.Box, @ptrCast(parent)).remove(c.button.as(gtk.Widget));
             _ = b.cards.swapRemove(i);
             c.free();
         }
+        b.layout();
         var totals = [_]usize{ 0, 0, 0, 0 };
         for (b.cards.items) |c| if (c.column) |col| {
             totals[@intFromEnum(col)] += 1;
@@ -306,7 +343,7 @@ pub const Board = struct {
     }
 
     /// Writes a card's text from what its pane reports, and puts it in the column for it.
-    fn fill(b: *Board, c: *Card, session_label: []const u8) void {
+    fn fill(_: *Board, c: *Card, session_label: []const u8) void {
         const s = c.host.server;
         const info = s.blockInfo(c.block_id);
         var buf: [320]u8 = undefined;
@@ -342,13 +379,19 @@ pub const Board = struct {
         if (shows_progress) c.progress.setFraction(@as(f64, @floatFromInt(info.?.progress.?)) / 100.0);
 
         const folder: ?[]const u8 = if (info) |i| (if (i.folder) |f| programs.shortFolder(&buf, f) else null) else null;
-        const where = if (folder) |f|
+        // Under its session's name a card only says where in it; otherwise the session too.
+        const where = if (settings.current.board_by_session)
+            zt(&zbuf, folder orelse "")
+        else if (folder) |f|
             std.fmt.bufPrintSentinel(&zbuf, "{s} · {s}", .{ session_label, f }, 0) catch ""
         else
             zt(&zbuf, session_label);
         setLabel(c.where, where);
+        c.session_label_len = @min(session_label.len, c.session_label.len);
+        @memcpy(c.session_label[0..c.session_label_len], session_label[0..c.session_label_len]);
 
         const since_us: i64 = if (info) |i| i.since else 0;
+        c.since_us = since_us;
         if (col == .idle or since_us == 0) setLabel(c.since, "") else {
             const mins = @divTrunc(glib.getMonotonicTime() - since_us, 60 * std.time.us_per_s);
             const text = if (mins < 1)
@@ -372,19 +415,68 @@ pub const Board = struct {
         }
 
         if (c.column != col) {
-            const w = c.button.as(gtk.Widget);
-            if (c.column) |old| {
-                b.lists[@intFromEnum(old)].remove(w);
-                // Arriving in a new column, the card comes in with a small move; the cards a
-                // freshly opened board starts with just appear.
-                w.removeCssClass("arrived");
-                w.addCssClass("arrived");
-            }
-            // What needs you longest, or has just finished, sits at the top.
-            b.lists[@intFromEnum(col)].prepend(w);
+            // Arriving in a new column, the card comes in with a small move; the cards a
+            // freshly opened board starts with just appear.
+            c.moved = c.column != null;
             c.column = col;
+            const w = c.button.as(gtk.Widget);
             inline for (.{ "idle", "running", "attention", "done" }, 0..) |name, k| {
                 if (k == @intFromEnum(col)) w.addCssClass(name) else w.removeCssClass(name);
+            }
+        }
+    }
+
+    /// Puts each column's cards in order: the latest change first, and with grouping on,
+    /// under the name of the session each is in, sessions in the sidebar's order. A column
+    /// whose rows are already right is left alone, so nothing under the pointer flickers.
+    fn layout(b: *Board) void {
+        const grouped = settings.current.board_by_session;
+        const Order = struct {
+            fn before(by_session: bool, x: *Card, y: *Card) bool {
+                if (by_session and x.session_rank != y.session_rank) return x.session_rank < y.session_rank;
+                if (x.since_us != y.since_us) return x.since_us > y.since_us;
+                return @intFromPtr(x) < @intFromPtr(y);
+            }
+        };
+        var sorted: std.ArrayList(*Card) = .empty;
+        defer sorted.deinit(gpa);
+        for (0..4) |k| {
+            sorted.clearRetainingCapacity();
+            for (b.cards.items) |c| if (c.column) |col| {
+                if (@intFromEnum(col) == k) sorted.append(gpa, c) catch {};
+            };
+            std.mem.sort(*Card, sorted.items, grouped, Order.before);
+            var hasher = std.hash.Wyhash.init(@intFromBool(grouped));
+            for (sorted.items) |c| {
+                hasher.update(std.mem.asBytes(&c));
+                if (grouped) hasher.update(c.session_label[0..c.session_label_len]);
+            }
+            const sig = hasher.final() | 1;
+            const list = b.lists[k];
+            if (sig != b.laid_out[k]) {
+                b.laid_out[k] = sig;
+                while (list.as(gtk.Widget).getFirstChild()) |child| list.remove(child);
+                var last_rank: usize = 0;
+                for (sorted.items) |c| {
+                    if (grouped and c.session_rank != last_rank) {
+                        last_rank = c.session_rank;
+                        var zbuf: [97]u8 = undefined;
+                        const name = gtk.Label.new(zt(&zbuf, c.session_label[0..c.session_label_len]).ptr);
+                        name.setXalign(0);
+                        name.setEllipsize(.end);
+                        name.as(gtk.Widget).addCssClass("board-session");
+                        list.append(name.as(gtk.Widget));
+                    }
+                    list.append(c.button.as(gtk.Widget));
+                }
+            }
+            for (sorted.items) |c| {
+                const w = c.button.as(gtk.Widget);
+                if (c.moved) {
+                    w.removeCssClass("arrived");
+                    w.addCssClass("arrived");
+                    c.moved = false;
+                }
             }
         }
     }

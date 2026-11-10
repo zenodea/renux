@@ -54,6 +54,9 @@ const css =
     \\.board-column-head { padding: 0 6px 2px 4px; }
     \\.board-column-title { font-weight: 700; }
     \\.board-count { color: @compy_secondary; font-size: 0.9em; }
+    \\.board-session { font-size: 0.82em; font-weight: 600; color: @compy_secondary; margin: 6px 0 -2px 6px; }
+    \\.board-session:first-child { margin-top: 0; }
+    \\.board-grouping button { min-height: 26px; padding: 0 12px; font-size: 0.88em; }
     \\.board-empty { color: @compy_secondary; font-size: 0.9em; margin-top: 18px; }
     \\.board-card { background-color: @view_bg_color; border-radius: 11px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @compy_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.05); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
@@ -442,10 +445,10 @@ pub const App = struct {
         a.board_button.as(gtk.Widget).addCssClass("flat");
         a.board_button.as(gtk.Widget).setValign(.center);
         _ = gtk.ToggleButton.signals.toggled.connect(a.board_button, *App, &boardToggled, a, .{});
-        footer.append(a.board_button.as(gtk.Widget));
         const spacer = gtk.Box.new(.horizontal, 0);
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
+        footer.append(a.board_button.as(gtk.Widget));
         a.foot_session = icons.button(.new_session, "New session", "app.new-session").as(gtk.Widget);
         footer.append(a.foot_session);
         a.foot_host = icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget);

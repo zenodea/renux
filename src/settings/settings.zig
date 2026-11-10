@@ -87,6 +87,8 @@ pub const Settings = struct {
     /// Colors 16 to 255 made from the theme's own 16, so they match it.
     extended_palette: bool = false,
     copy_animation: bool = true,
+    /// The agent board lists each column's cards under their sessions' names.
+    board_by_session: bool = false,
     /// Link schemes, such as vscode, that open their app without asking.
     trusted_schemes: std.ArrayList([]u8) = .empty,
     tab_position: TabPosition = .left,
