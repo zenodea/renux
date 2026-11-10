@@ -102,6 +102,20 @@ const css =
     \\.palette { padding: 12px; }
     \\.palette-category { color: @compy_secondary; font-size: 0.85em; }
     \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
+    \\.activity-panel { background-color: @popover_bg_color; border-radius: 12px; box-shadow: 0 10px 34px alpha(black, 0.42), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
+    \\.activity-head { padding: 12px 12px 6px 16px; }
+    \\.activity-title { font-weight: 700; font-size: 1.05em; }
+    \\.activity-head button { min-height: 24px; padding: 0 10px; font-size: 0.85em; }
+    \\.activity-idle { margin: 0 0 6px 12px; font-size: 0.9em; color: @compy_secondary; }
+    \\.activity-list { background: none; padding: 0 6px 8px 6px; }
+    \\.activity-heading { font-size: 0.8em; font-weight: 600; color: @compy_secondary; margin: 10px 0 2px 8px; }
+    \\.activity-row { border-radius: 9px; padding: 6px 8px; }
+    \\.activity-row:hover { background-color: alpha(@window_fg_color, 0.06); }
+    \\.activity-name { font-weight: 500; }
+    \\.activity-detail { font-size: 0.85em; color: @compy_secondary; }
+    \\.activity-row.blocked .activity-detail { color: @warning_color; }
+    \\.activity-row.failed .activity-detail { color: @error_color; }
+    \\.activity-unread { min-width: 8px; min-height: 8px; border-radius: 99px; background-color: @accent_bg_color; }
     \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
     \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
     \\.hint-desc { font-size: 0.92em; }
@@ -154,6 +168,7 @@ pub const App = struct {
     mode_chip: *gtk.Label = undefined,
     /// The keys that can follow a prefix or work in a key mode, while one is waiting.
     hints: *gtk.Box = undefined,
+    activity: *@import("activity.zig").Activity = undefined,
     /// A pane being floated so it can be minimized.
     minimize_next: ?[]u8 = null,
     rows: std.ArrayList(?Row) = .empty,
@@ -342,6 +357,11 @@ pub const App = struct {
         a.hints.as(gtk.Widget).setVisible(0);
         a.hints.as(gtk.Widget).setCanTarget(0);
         layered.addOverlay(a.hints.as(gtk.Widget));
+        a.activity = @import("activity.zig").Activity.create(a);
+        a.activity.widget().setMarginTop(6);
+        a.activity.widget().setMarginBottom(8);
+        a.activity.widget().setMarginEnd(8);
+        layered.addOverlay(a.activity.widget());
         mode_app = a;
         termview.on_mode_changed = modeChanged;
         termview.on_chord_changed = chordChanged;
@@ -573,6 +593,7 @@ pub const App = struct {
             .view => {
                 if (here) a.ensureSelection();
                 a.rebuildSidebar();
+                a.activity.changed();
                 if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
                     a.showSelected();
                     a.finishMinimize();
@@ -582,6 +603,7 @@ pub const App = struct {
                 const block = session_id orelse return;
                 h.workspace.blockChanged(block);
                 a.refreshRows();
+                a.activity.changed();
             },
             .alert => a.showAlert(h),
             .keymap => {},
@@ -1056,6 +1078,23 @@ pub const App = struct {
         };
     }
 
+    /// Shows a pane wherever it is: its host, session and window, with the keyboard in it.
+    pub fn jumpTo(a: *App, h: *Host, session_id: []const u8, window_id: []const u8, block_id: []const u8) void {
+        a.selectHost(h);
+        a.auto_picked = false;
+        setSlot(&a.session_id, session_id);
+        setSlot(&a.window_id, window_id);
+        h.server.focusWindow(session_id, window_id);
+        h.server.focusBlock(session_id, block_id);
+        h.server.clearAttention(block_id);
+        a.showSelected();
+        a.rebuildSidebar();
+        if (a.workspace) |w| {
+            w.focus(block_id);
+            w.grabFocus();
+        }
+    }
+
     fn rowActivated(_: *gtk.ListBox, row: *gtk.ListBoxRow, a: *App) callconv(.c) void {
         if (a.rebuilding) return;
         const index: usize = @intCast(row.getIndex());
@@ -1139,8 +1178,16 @@ pub const App = struct {
             a.toast("Config reloaded");
             return true;
         }
-        if (std.mem.eql(u8, action, "client.sidebar.activity.toggle")) {
-            a.toast("Compy has no activity sidebar yet");
+        if (std.mem.eql(u8, action, "client.sidebar.activity.toggle") or std.mem.eql(u8, action, "pane.view_activity")) {
+            a.activity.toggle();
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.sidebar.activity.by_priority")) {
+            a.activity.setGrouping(.priority);
+            return true;
+        }
+        if (std.mem.eql(u8, action, "client.sidebar.activity.by_session")) {
+            a.activity.setGrouping(.session);
             return true;
         }
         if (std.mem.eql(u8, action, "session.new")) return a.did(newSession);
@@ -1356,6 +1403,10 @@ pub const App = struct {
         if (eql(u8, name, "minimize_all_floating")) return a.minimizeAllFloating();
         if (eql(u8, name, "new_floating")) return a.newFloatingPane();
         if (eql(u8, name, "rename")) return a.renamePaneAction();
+        if (eql(u8, name, "view_activity")) {
+            a.activity.toggle();
+            return true;
+        }
         if (eql(u8, name, "copy_id")) {
             const t = a.target() orelse return false;
             const z = gpa.dupeSentinel(u8, t[2], 0) catch return false;
