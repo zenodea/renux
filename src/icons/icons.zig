@@ -8,7 +8,7 @@ const rsvg = @import("rsvg");
 const table = @import("ui_icons.zig");
 const draw_util = @import("../util/draw.zig");
 
-pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, palette, interface, keyboard, search, bell, up, down, right, new_session, add_host, filter, minimize };
+pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, palette, interface, keyboard, search, bell, up, down, right, new_session, add_host, filter, minimize, board };
 
 pub fn image(kind: Kind, size: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();

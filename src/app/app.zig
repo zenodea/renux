@@ -48,6 +48,23 @@ const css =
     \\.pick-card { padding: 5px 5px 7px 5px; border-radius: 13px; font-weight: 400; color: @compy_secondary; transition: box-shadow 140ms ease-out, background-color 140ms ease-out; }
     \\.pick-card:checked { background-color: alpha(@accent_bg_color, 0.12); box-shadow: inset 0 0 0 2px @accent_bg_color; color: @window_fg_color; font-weight: 700; }
     \\.settings-sample-row { padding: 12px; }
+    \\.board { background-color: @window_bg_color; padding: 14px 14px 12px 14px; }
+    \\.board-title { font-weight: 700; font-size: 1.15em; margin-left: 4px; }
+    \\.board-column { background-color: alpha(@window_fg_color, 0.035); border-radius: 14px; padding: 10px 8px 8px 8px; }
+    \\.board-column-head { padding: 0 6px 2px 4px; }
+    \\.board-column-title { font-weight: 700; }
+    \\.board-count { color: @compy_secondary; font-size: 0.9em; }
+    \\.board-idle-mark { min-width: 28px; min-height: 28px; margin: 1px; border-radius: 99px; background-color: alpha(@window_fg_color, 0.16); }
+    \\.board-empty { color: @compy_secondary; font-size: 0.9em; margin-top: 18px; }
+    \\.board-card { background-color: @view_bg_color; border-radius: 11px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @compy_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
+    \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.05); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
+    \\.board-card.attention { box-shadow: inset 0 0 0 1px alpha(@warning_color, 0.6), 0 1px 4px alpha(black, 0.12); }
+    \\.board-card-title { font-weight: 600; }
+    \\.board-card-message { color: @compy_secondary; font-size: 0.92em; }
+    \\.board-card-meta { color: @compy_secondary; font-size: 0.82em; }
+    \\.board-card-progress { margin: 2px 0; }
+    \\.board-card.arrived { animation: board-arrive 320ms cubic-bezier(0.2, 0.9, 0.3, 1.1); }
+    \\@keyframes board-arrive { from { opacity: 0; transform: translateY(10px) scale(0.96); } to { opacity: 1; transform: none; } }
     \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
@@ -261,6 +278,7 @@ pub const App = struct {
     foot_more: *gtk.Widget = undefined,
     /// Session rows show only their menu, which then holds what their other buttons did.
     narrow_rows: bool = false,
+    board: *@import("../ui/board.zig").Board = undefined,
     config_timer: c_uint = 0,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
@@ -414,6 +432,7 @@ pub const App = struct {
         a.filter_menu = gio.Menu.new();
         a.filter_button.setMenuModel(a.filter_menu.as(gio.MenuModel));
         footer.append(a.filter_button.as(gtk.Widget));
+        footer.append(icons.button(.board, "Agent board", "app.board").as(gtk.Widget));
         const spacer = gtk.Box.new(.horizontal, 0);
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
@@ -467,7 +486,14 @@ pub const App = struct {
         a.tab_strip.as(gtk.Widget).addCssClass("tab-strip");
         a.tab_strip.as(gtk.Widget).setVisible(0);
         card.append(a.tab_strip.as(gtk.Widget));
-        card.append(a.stack.as(gtk.Widget));
+        // The agent board lies over the panes while it is open.
+        a.board = @import("../ui/board.zig").Board.create(a);
+        a.board.widget().setCanTarget(0);
+        const body = gtk.Overlay.new();
+        body.setChild(a.stack.as(gtk.Widget));
+        body.addOverlay(a.board.widget());
+        body.as(gtk.Widget).setVexpand(1);
+        card.append(body.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
 
         const split = adw.OverlaySplitView.new();
@@ -704,6 +730,16 @@ pub const App = struct {
         return 0;
     }
 
+    fn toggleBoard(a: *App) void {
+        a.showBoard(!a.board.shown());
+    }
+
+    /// Shows the agent board over the panes, or goes back to them.
+    pub fn showBoard(a: *App, on: bool) void {
+        a.board.show(on);
+        if (!on) if (a.workspace) |ws| ws.grabFocus();
+    }
+
     fn fullscreenChanged(_: *gtk.Window, _: *gobject.ParamSpec, _: ?*anyopaque) callconv(.c) void {
         @import("warm.zig").again();
     }
@@ -752,6 +788,12 @@ pub const App = struct {
         if (focus) |f| inline for (.{ gtk.Popover, adw.Dialog }) |T| {
             if (f.getAncestor(T.getGObjectType()) != null) return 0;
         };
+        // The board is over the panes: Escape goes back to them, and nothing is typed into a
+        // pane that can't be seen.
+        if (a.board.shown()) {
+            if (keyval == 0xff1b) a.showBoard(false);
+            return 1;
+        }
         // Find in the pane: Command+F on a Mac, Ctrl+Shift+F elsewhere, as terminals have it.
         const K = @import("../terminal/keys.zig");
         const mods = K.modsFromGdk(@bitCast(state));
@@ -909,6 +951,7 @@ pub const App = struct {
         // Nothing may still point at the host once it is freed: the activity panel's rows and
         // any open palette, Go to Anything or folder browser let go of it first.
         a.activity.hostRemoved();
+        a.board.hostRemoved();
         @import("../ui/palette.zig").serverGone(h.server);
         @import("../ui/goto.zig").hostRemoved(h.server);
         // The workspace goes while its widget and the server are still there, since freeing it
@@ -1001,6 +1044,7 @@ pub const App = struct {
                 const shown = if (here) a.ensureSelection() else false;
                 a.rebuildSidebar();
                 a.activity.changed();
+                a.board.changed();
                 if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
                     if (!shown) a.showSelected();
                     a.finishMinimize();
@@ -1012,6 +1056,7 @@ pub const App = struct {
                 h.workspace.blockChanged(block);
                 a.refreshRows();
                 a.activity.changed();
+                a.board.changed();
                 a.updateBadge();
                 if (h.server.blockInfo(block)) |info| if (info.folder) |f| {
                     var pbuf: [1024]u8 = undefined;
@@ -2812,6 +2857,7 @@ pub const App = struct {
             .{ "add-host", addHostDialog, "" },
             .{ "pane-float-focused", floatPane, "" },
             .{ "find", openFind, "" },
+            .{ "board", toggleBoard, "" },
             .{ "prompt-prev", promptPrev, "" },
             .{ "prompt-next", promptNext, "" },
             .{ "find-next", findNext, "" },

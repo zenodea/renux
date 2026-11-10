@@ -32,6 +32,7 @@ KINDS = [
     ("add_host", "add_to_queue", ""),
     ("filter", "filter_list", ""),
     ("minimize", "remove", ""),
+    ("board", "view_kanban", ""),
 ]
 
 folder = sys.argv[1]

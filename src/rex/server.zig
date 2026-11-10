@@ -65,6 +65,8 @@ pub const BlockInfo = struct {
     status_app: ?[]u8 = null,
     status_kind: ?[]u8 = null,
     message: ?[]u8 = null,
+    /// The program's own short name for what it is doing, such as a task's name.
+    task: ?[]u8 = null,
     program: ?[]u8 = null,
     folder: ?[]u8 = null,
     title: ?[]u8 = null,
@@ -72,11 +74,13 @@ pub const BlockInfo = struct {
     progress: ?i32 = null,
     /// Finished, failed, needs you, or rang the bell, and not looked at since.
     attention: bool = false,
+    /// When the status last changed, on the monotonic clock, for "blocked for 4 min"; 0 if never.
+    since: i64 = 0,
     /// Whether the details were read from the server; events keep them current after that.
     details: enum { unread, reading, read } = .unread,
 
     fn deinit(b: *BlockInfo) void {
-        inline for (.{ "status_app", "status_kind", "message", "program", "folder", "title" }) |f| {
+        inline for (.{ "status_app", "status_kind", "message", "task", "program", "folder", "title" }) |f| {
             if (@field(b, f)) |v| gpa.free(v);
             @field(b, f) = null;
         }
@@ -548,12 +552,15 @@ pub const Server = struct {
     fn setStatus(_: *Server, b: *BlockInfo, record: ?json.Value) void {
         const r = record orelse return;
         const state = json.str(r, "state") orelse return;
+        const was = if (b.has_status) b.status else .other;
         b.has_status = true;
         b.status = if (eql(state, "working")) .working else if (eql(state, "blocked")) .blocked else if (eql(state, "done")) .done else if (eql(state, "error")) .failed else .other;
         setStr(&b.status_app, json.str(r, "effective_app") orelse json.str(r, "app"));
         setStr(&b.status_kind, json.str(r, "kind"));
         setStr(&b.message, json.str(r, "msg"));
+        setStr(&b.task, json.str(r, "title"));
         if (json.int(r, "progress")) |p| b.progress = @intCast(std.math.clamp(p, 0, 100));
+        if (b.status != was or b.since == 0) b.since = glib.getMonotonicTime();
     }
 
     /// An interpreter's script says more than its name, so node running claude counts as claude.
