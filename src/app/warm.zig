@@ -28,6 +28,16 @@ pub fn start(win: *gtk.Window) void {
     _ = glib.timeoutAdd(700, &begin, null);
 }
 
+/// Runs the samples again. Going into or out of full screen can leave the window with a new
+/// drawing context that has none of the programs built for the old one, and the next dialog
+/// would then stall while they are all built at once; this rebuilds them quietly instead.
+/// Where the context was kept, every sample is already built and this costs next to nothing.
+pub fn again() void {
+    if (window == null) return;
+    step = 0;
+    _ = glib.timeoutAdd(900, &begin, null);
+}
+
 fn begin(_: ?*anyopaque) callconv(.c) c_int {
     _ = glib.idleAdd(&one, null);
     return 0;

@@ -348,6 +348,13 @@ pub const App = struct {
         a.window = adw.ApplicationWindow.new(a.app.as(gtk.Application));
         const win = a.window.as(gtk.Window);
         win.setDefaultSize(1180, 760);
+        // Development: COMPY_SIZE=WIDTHxHEIGHT starts the window at another size.
+        if (build_options.dev) if (std.c.getenv("COMPY_SIZE")) |size| {
+            var parts = std.mem.splitScalar(u8, std.mem.span(size), 'x');
+            const w = std.fmt.parseInt(c_int, parts.first(), 10) catch 1180;
+            const h = std.fmt.parseInt(c_int, parts.next() orelse "760", 10) catch 760;
+            win.setDefaultSize(w, h);
+        };
         win.setTitle("Compy");
         win.as(gtk.Widget).addCssClass("compy");
 
@@ -549,6 +556,7 @@ pub const App = struct {
         const dev_shot = build_options.dev and std.c.getenv("COMPY_SHOT") != null;
         if (dev_shot) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
         @import("warm.zig").start(win.as(gtk.Window));
+        _ = gobject.Object.signals.notify.connect(win, ?*anyopaque, &fullscreenChanged, null, .{ .detail = "fullscreened" });
         a.watchConfig();
         // The sidebar's buttons are fitted again once the window's corner has its real width.
         _ = glib.idleAdd(&refitSidebar, a);
@@ -694,6 +702,10 @@ pub const App = struct {
             a.themeChanged();
         }
         return 0;
+    }
+
+    fn fullscreenChanged(_: *gtk.Window, _: *gobject.ParamSpec, _: ?*anyopaque) callconv(.c) void {
+        @import("warm.zig").again();
     }
 
     fn refitSidebar(data: ?*anyopaque) callconv(.c) c_int {
