@@ -510,7 +510,7 @@ pub const Workspace = struct {
             } else false;
             if (still) continue;
             const id = gpa.dupe(u8, m.layer_id) catch continue;
-            ws.restored.append(gpa, .{ .layer_id = id, .rect = ws.chipRect(m.layer_id) }) catch gpa.free(id);
+            ws.restored.append(gpa, .{ .layer_id = id, .rect = ws.chipSpot(m.layer_id) }) catch gpa.free(id);
         }
     }
 
@@ -524,21 +524,34 @@ pub const Workspace = struct {
         for (ws.backdrops.items) |bd| if (std.mem.eql(u8, bd.layer_id, p.layer_id)) bd.widget.addCssClass("to-tray");
     }
 
-    /// A chip's look to lay over a card: the same icon, name and shape as the chip in the tray.
+    /// A chip's look to lay over a card. It is built exactly as the chip in the tray is, a
+    /// button with the same parts and style, so nothing shifts or changes weight at the
+    /// moment the real chip takes over.
     fn chipFace(ws: *Workspace, block_id: []const u8, opacity: f64) *gtk.Widget {
-        const face = gtk.Box.new(.horizontal, 6);
-        const w = face.as(gtk.Widget);
-        w.addCssClass("tray-chip");
-        w.addCssClass("chip-face");
-        w.setCanTarget(0);
-        face.append(blockicon.create(ws.server, block_id, 14));
+        const button = gtk.Button.new();
+        const w = button.as(gtk.Widget);
+        const line = gtk.Box.new(.horizontal, 6);
+        line.append(blockicon.create(ws.server, block_id, 14));
         var buf: [256]u8 = undefined;
         const label = gtk.Label.new(chipTitle(ws.server, block_id, &buf).ptr);
         label.setEllipsize(.middle);
-        label.setXalign(0);
-        face.append(label.as(gtk.Widget));
+        label.setMaxWidthChars(32);
+        line.append(label.as(gtk.Widget));
+        button.setChild(line.as(gtk.Widget));
+        w.addCssClass("tray-chip");
+        w.addCssClass("chip-face");
+        w.setCanTarget(0);
+        w.setFocusable(0);
         w.setOpacity(opacity);
         return w;
+    }
+
+    /// Where a card on its way to or from the tray lines up with a chip: the chip's place,
+    /// a pixel wider all round for the card's own (unseen) border, so the chip's look on
+    /// the card sits exactly where the chip does.
+    fn chipSpot(ws: *Workspace, layer_id: []const u8) [4]f64 {
+        const r = ws.chipRect(layer_id);
+        return .{ r[0] - 1, r[1] - 1, r[2] + 2, r[3] + 2 };
     }
 
     /// A card has become its chip: the chip shows from here on.
@@ -1614,7 +1627,7 @@ pub const Workspace = struct {
                 // To the tray: the card itself becomes the chip, moving with the same spring
                 // as every other card. Once it has settled onto the chip's place the chip
                 // takes over, and the card is done.
-                const still = springStep(&l.cur, &l.vel, ws.chipRect(layer), dt, decay);
+                const still = springStep(&l.cur, &l.vel, ws.chipSpot(layer), dt, decay);
                 l.alpha = if (still) 0 else 1;
                 if (still) ws.showChip(layer);
             } else {
@@ -1806,7 +1819,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         l.frame.setOpacity(@max(0, l.alpha));
         if (l.to_layer) |layer| {
             // The chip's look comes through as the card nears the chip's size.
-            if (l.face) |face| face.setOpacity(faceShown(l.cur[2], l.from_w, ws.chipRect(layer)[2]));
+            if (l.face) |face| face.setOpacity(faceShown(l.cur[2], l.from_w, ws.chipSpot(layer)[2]));
             // Its terminal is frozen, so the card can take the shrinking size itself.
             allocateAt(l.frame, .{ l.cur[0], l.cur[1], @max(8, l.cur[2]), @max(8, l.cur[3]) });
             continue;

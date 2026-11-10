@@ -95,7 +95,7 @@ const css =
     \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
-    \\.chip-face { box-shadow: none; border-radius: 10px; }
+    \\.chip-face { box-shadow: none; }
     \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
     \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
     \\window.tight .content .workspace { margin: 7px 0 0 0; }
@@ -3227,8 +3227,8 @@ pub const App = struct {
         // After the highlight's own rules, which these must win over: a card on its way to
         // the tray has no outline or highlight, only the shadow a floating card casts.
         const to_tray =
-            \\.pane-card.to-tray, .pane-card.to-tray.focused { border-color: transparent; box-shadow: none; transition: none; }
-            \\.pane-card.floating.to-tray, .pane-card.floating.to-tray.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
+            \\.pane-card.to-tray, .pane-card.to-tray.focused { border-color: transparent; box-shadow: none; transition: none; border-radius: 10px; }
+            \\.pane-card.floating.to-tray, .pane-card.floating.to-tray.focused { box-shadow: 0 2px 10px alpha(black, 0.3); transition: box-shadow 240ms ease-out; }
             \\.layer-card.to-tray, .layer-card.to-tray.focused { border-color: transparent; transition: none; }
         ;
         const css_text = std.fmt.allocPrintSentinel(gpa, "{s}\n{s}\n{s}\n{s}", .{ look_text, highlight, sidebar_text, to_tray }, 0) catch return;
