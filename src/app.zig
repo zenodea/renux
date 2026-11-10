@@ -636,7 +636,7 @@ pub const App = struct {
 
     /// Whether the sidebar's edge can be dragged, and the width it has while it can't.
     const sidebar_resizable = false;
-    const sidebar_standard: f64 = 250;
+    const sidebar_standard: f64 = 260;
 
     fn refitSidebar(data: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(data.?));
