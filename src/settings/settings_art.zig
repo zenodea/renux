@@ -364,10 +364,12 @@ fn drawStatus(_: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, dat
         },
         .idle => {
             // A crescent moon: a disc with a bite out of it, in the mark's own color.
-            cr.arc(cx - r * 0.06, cy + r * 0.04, r * 0.5, 0, 2 * std.math.pi);
+            // The bite leaves the crescent's weight down and to the left of the disc's middle,
+            // so the disc sits up and to the right by as much, and the crescent reads centered.
+            cr.arc(cx + r * 0.07, cy - r * 0.02, r * 0.5, 0, 2 * std.math.pi);
             cr.fill();
             rgb(cr, 0x8a8f98, 1);
-            cr.arc(cx + r * 0.2, cy - r * 0.16, r * 0.42, 0, 2 * std.math.pi);
+            cr.arc(cx + r * 0.33, cy - r * 0.22, r * 0.42, 0, 2 * std.math.pi);
             cr.fill();
         },
         .done => {

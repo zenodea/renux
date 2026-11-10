@@ -644,7 +644,10 @@ pub const App = struct {
             @import("../main.zig").claimToggle();
             _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
         }
-        if (build_options.dev and std.c.getenv("RENUX_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
+        if (build_options.dev and std.c.getenv("RENUX_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| {
+            FrameLog.watch(clock);
+            FrameLog.watchPointer(win.as(gtk.Widget));
+        };
         if (!settings.current.welcomed and !dev_shot) @import("manage.zig").openWelcome(a);
         a.applyLook();
         _ = gobject.Object.signals.notify.connect(win, *App, &activeChanged, a, .{ .detail = "is-active" });
@@ -4296,6 +4299,21 @@ const FrameLog = struct {
     var work_total: i64 = 0;
     var worst_work: i64 = 0;
 
+    /// Pointer movements since the last line. Each one takes a turn of the frame clock to
+    /// deliver, so a pointer crossing the window shows as frames with next to no work in them.
+    var moves: u32 = 0;
+
+    fn moved(_: *gtk.EventControllerMotion, _: f64, _: f64, _: ?*anyopaque) callconv(.c) void {
+        moves += 1;
+    }
+
+    fn watchPointer(win: *gtk.Widget) void {
+        const motion = gtk.EventControllerMotion.new();
+        motion.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.EventControllerMotion.signals.motion.connect(motion, ?*anyopaque, &moved, null, .{});
+        win.addController(motion.as(gtk.EventController));
+    }
+
     fn watch(clock: *gdk.FrameClock) void {
         _ = gdk.FrameClock.signals.update.connect(clock, ?*anyopaque, &began, null, .{});
         _ = gdk.FrameClock.signals.layout.connect(clock, ?*anyopaque, &began, null, .{});
@@ -4346,18 +4364,20 @@ const FrameLog = struct {
     }
 
     fn flush(clock: *gdk.FrameClock) void {
-        if (frames > 1) std.log.info("frames: {d} in {d} ms, worst gap {d:.1} ms, work avg {d:.1} ms worst {d:.1} ms, refresh {d:.1} ms, ticking: panes {d} scroll {d} corner {}", .{
+        if (frames > 1) std.log.info("frames: {d} in {d} ms, worst gap {d:.1} ms, work avg {d:.1} ms worst {d:.1} ms, refresh {d:.1} ms, pointer moves {d}, ticking: panes {d} scroll {d} corner {}", .{
             frames,
             @divTrunc(last_end - window_start, 1000),
             @as(f64, @floatFromInt(worst_gap)) / 1000,
             @as(f64, @floatFromInt(@divTrunc(work_total, frames))) / 1000,
             @as(f64, @floatFromInt(worst_work)) / 1000,
             @as(f64, @floatFromInt(refresh(clock))) / 1000,
+            moves,
             @import("../ui/workspace.zig").ticking,
             termview.scroll_ticking,
             if (shot_app) |a| a.corner_tick != 0 else false,
         });
         frames = 0;
+        moves = 0;
         worst_gap = 0;
         work_total = 0;
         worst_work = 0;
