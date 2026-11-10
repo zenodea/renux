@@ -19,7 +19,12 @@ const aliases = std.StaticStringMap([]const u8).initComptime(.{
     .{ "javac", "java" },         .{ "clang++", "clang" },        .{ "gcc", "clang" },
     .{ "g++", "clang" },          .{ "nix-shell", "nix" },        .{ "redis-server", "redis" },
     .{ "redis-cli", "redis" },    .{ "mysqld", "mysql" },         .{ "xcodebuild", "xcode" },
-    .{ "hx", "helix" },
+    .{ "hx", "helix" },                .{ "cargo", "rust" },          .{ "rustc", "rust" },
+    .{ "rustup", "rust" },             .{ "irb", "ruby" },            .{ "gem", "ruby" },
+    .{ "bundle", "ruby" },             .{ "rake", "ruby" },           .{ "erl", "erlang" },
+    .{ "dune", "ocaml" },              .{ "opam", "ocaml" },          .{ "composer", "php" },
+    .{ "scp", "ssh" },                 .{ "sftp", "ssh" },            .{ "mosh", "ssh" },
+    .{ "codex-cli", "codex" },         .{ "btop", "htop" },           .{ "top", "htop" },
 });
 
 /// Simple Icons names for programs whose icon is named differently.
@@ -27,7 +32,7 @@ const slugs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "node", "nodedotjs" },         .{ "bash", "gnubash" },        .{ "copilot", "githubcopilot" },
     .{ "gemini", "googlegemini" },    .{ "kube", "kubernetes" },     .{ "mistral", "mistralai" },
     .{ "nix", "nixos" },              .{ "postgres", "postgresql" }, .{ "brew", "homebrew" },
-    .{ "clang", "cplusplus" },        .{ "java", "openjdk" },
+    .{ "clang", "cplusplus" },        .{ "java", "openjdk" },        .{ "fish", "fishshell" },
 });
 
 /// The icon for what a block runs: its own status report wins, then its script, then its process
@@ -154,6 +159,12 @@ test "program names map to icons" {
     try std.testing.expectEqualStrings("claude", iconFor(null, "node/claude.js").?.slug);
     try std.testing.expectEqualStrings("nodedotjs", iconFor(null, "node").?.slug);
     try std.testing.expectEqualStrings("claude", iconFor("Claude", "node").?.slug);
+    try std.testing.expectEqualStrings("neovim", iconFor(null, "nvim").?.slug);
+    try std.testing.expectEqualStrings("codex", iconFor("codex", "node").?.slug);
+    try std.testing.expectEqualStrings("rust", iconFor(null, "cargo").?.slug);
+    try std.testing.expectEqualStrings("fishshell", iconFor(null, "-fish").?.slug);
+    try std.testing.expectEqualStrings("lazygit", iconFor(null, "lazygit").?.slug);
+    try std.testing.expectEqualStrings("ssh", iconFor(null, "mosh").?.slug);
     try std.testing.expect(iconFor(null, "weird-thing") == null);
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("~/compy", shortFolder(&buf, "file://mac.local/Users/someone/compy"));

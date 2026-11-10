@@ -1,0 +1,19 @@
+# The tile color behind each icon in this folder, as RRGGBB.
+neovim 57A143
+rust 000000
+zig F7A41D
+fishshell 34C534
+htop 009020
+opencode 000000
+ruby CC342D
+php 777BB4
+perl 0073A1
+erlang A90533
+ocaml EC6813
+nginx 009639
+gradle 02303A
+cmake 064F8C
+codex 3D4451
+lazygit 8A63D2
+yazi E8A33D
+ssh 5E6B7A

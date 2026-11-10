@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Builds src/program_icons.zig from the Android app's Simple Icons drawables (CC0).
+"""Builds src/program_icons.zig from the Android app's Simple Icons drawables (CC0) and the
+Linux app's own extra icons in linux/data/program-icons.
 
 Each entry keeps the icon's SVG path and brand color, so both apps show the same logos.
 Run from the repo root: python3 linux/scripts/gen-program-icons.py
@@ -20,11 +21,24 @@ lines = [
     "",
     "pub const icons = [_]Icon{",
 ]
-for slug, color in sorted(colors.items()):
+entries = {}
+for slug, color in colors.items():
     xml = (drawables / f"prog_{slug}.xml").read_text()
-    paths = re.findall(r'android:pathData="([^"]+)"', xml)
-    data = " ".join(paths).replace("\\", "\\\\").replace('"', '\\"')
+    entries[slug] = (color, " ".join(re.findall(r'android:pathData="([^"]+)"', xml)))
+
+# Icons only the Linux app has: one SVG each in data/program-icons, with its tile color in
+# colors.txt. See the README there for where they come from.
+extra = root / "linux/data/program-icons"
+for line in (extra / "colors.txt").read_text().splitlines():
+    if not line.strip() or line.startswith("#"):
+        continue
+    slug, color = line.split()
+    svg = (extra / f"{slug}.svg").read_text()
+    entries[slug] = ("FF" + color.upper(), " ".join(re.findall(r'<path[^>]*\bd="([^"]+)"', svg)))
+
+for slug, (color, path) in sorted(entries.items()):
+    data = path.replace("\\", "\\\\").replace('"', '\\"')
     lines.append(f'    .{{ .slug = "{slug}", .color = 0x{color}, .path = "{data}" }},')
 lines += ["};", ""]
 (root / "linux/src/program_icons.zig").write_text("\n".join(lines))
-print(f"{len(colors)} icons")
+print(f"{len(entries)} icons")
