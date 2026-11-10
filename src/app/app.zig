@@ -847,21 +847,22 @@ pub const App = struct {
         if (a.corner_tick == 0) a.corner_tick = a.window.as(gtk.Widget).addTickCallback(&cornerTick, a, null);
     }
 
-    /// Tabs above the panes start after the window's corner when it covers them.
+    /// Tabs above the panes start after the window's corner when it covers them, and so does
+    /// the agent board's heading when there are no tabs above it.
     fn tabsRoom(a: *App) void {
         const strip = a.tab_strip.as(gtk.Widget);
-        const want: c_int = if (strip.getVisible() == 0) 0 else blk: {
-            // Measured from the card the strip sits in, never from the strip itself: its own
-            // place moves with the very margin being set, and measuring that fed each answer
-            // into the next until the window was too wide for the screen to draw.
-            var x: f64 = 0;
-            var y: f64 = 0;
-            const root = a.card.getRoot() orelse return;
-            if (a.card.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) == 0) return;
-            const room = std.math.clamp(a.cornerRight() + 4 - x, 0, 400);
-            break :blk @intFromFloat(@round(room));
-        };
+        // Measured from the card the strip sits in, never from the strip itself: its own
+        // place moves with the very margin being set, and measuring that fed each answer
+        // into the next until the window was too wide for the screen to draw.
+        var x: f64 = 0;
+        var y: f64 = 0;
+        const root = a.card.getRoot() orelse return;
+        if (a.card.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) == 0) return;
+        const room: c_int = @intFromFloat(@round(std.math.clamp(a.cornerRight() + 4 - x, 0, 400)));
+        const tabs_above = strip.getVisible() != 0;
+        const want: c_int = if (tabs_above) room else 0;
         if (strip.getMarginStart() != want) strip.setMarginStart(want);
+        a.board.setInset(if (tabs_above) 0 else room);
     }
 
     /// Where the corner's buttons end, in window coordinates.

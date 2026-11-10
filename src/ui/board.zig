@@ -51,6 +51,7 @@ pub const Board = struct {
     revealer: *gtk.Revealer,
     lists: [4]*gtk.Box = undefined,
     counts: [4]*gtk.Label = undefined,
+    heading: *gtk.Widget = undefined,
     empties: [4]*gtk.Widget = undefined,
     cards: std.ArrayList(*Card) = .empty,
     refresh_source: c_uint = 0,
@@ -70,6 +71,7 @@ pub const Board = struct {
         title.setXalign(0);
         title.as(gtk.Widget).setHexpand(1);
         head.append(title.as(gtk.Widget));
+        b.heading = title.as(gtk.Widget);
         const close = icons.button(.close, "Back to the panes", null);
         _ = gtk.Button.signals.clicked.connect(close, *Board, &closeClicked, b, .{});
         head.append(close.as(gtk.Widget));
@@ -116,6 +118,14 @@ pub const Board = struct {
         page.append(columns.as(gtk.Widget));
         b.revealer.setChild(page.as(gtk.Widget));
         return b;
+    }
+
+    /// Moves the heading clear of the window's corner buttons, which lie over the board's
+    /// top left while the sidebar is hidden or narrower than they are.
+    pub fn setInset(b: *Board, px: c_int) void {
+        // The board has its own padding, which already covers part of the way.
+        const want = @max(0, px - 14);
+        if (b.heading.getMarginStart() != want) b.heading.setMarginStart(want);
     }
 
     pub fn widget(b: *Board) *gtk.Widget {
