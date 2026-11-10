@@ -82,7 +82,9 @@ pub const Palette = struct {
         _ = gtk.SearchEntry.signals.stop_search.connect(p.entry, *Palette, &stop, p, .{});
         _ = adw.Dialog.signals.closed.connect(p.dialog, *Palette, &closed, p, .{});
 
-        for (server.actions) |a| p.add(a.title, a.category, a.keys, a.keywords, a.name, true, null);
+        // An action without a title is a call a program makes, such as reading a terminal's
+        // screen, not a command for a person to run; those stay out of the list.
+        for (server.actions) |a| if (!std.mem.eql(u8, a.title, a.name)) p.add(a.title, a.category, a.keys, a.keywords, a.name, true, null);
         for (local, 0..) |l, i| p.add(l.title, "Compy", "", l.words, l.action, false, i);
 
         p.filter("");
