@@ -58,9 +58,8 @@ const css =
     \\.sidebar-footer { padding: 8px 12px 12px 12px; }
     \\.sidebar-footer > * { margin-left: 2px; }
     \\.filter-pill { border-radius: 99px; min-height: 30px; padding: 0 8px; transition: background-color 140ms ease-out, color 140ms ease-out; }
-    \\.filter-pill.filtered { padding: 0 12px 0 9px; background-color: alpha(@accent_bg_color, 0.16); color: @accent_color; box-shadow: inset 0 0 0 1px alpha(@accent_bg_color, 0.35); }
+    \\.filter-pill.filtered { background-color: alpha(@accent_bg_color, 0.16); color: @accent_color; box-shadow: inset 0 0 0 1px alpha(@accent_bg_color, 0.35); }
     \\.filter-pill.filtered:hover { background-color: alpha(@accent_bg_color, 0.24); }
-    \\.filter-pill.filtered label { font-weight: 600; font-size: 0.9em; }
     \\.window-card.alone { margin-left: 8px; }
     \\.content .workspace { margin: 6px 8px 8px 0; }
     \\.content.alone .workspace { margin: 6px 8px 8px 8px; }
@@ -372,6 +371,8 @@ pub const App = struct {
         pill.append(a.filter_label.as(gtk.Widget));
         a.filter_button.setChild(pill.as(gtk.Widget));
         a.filter_button.as(gtk.Widget).addCssClass("filter-pill");
+        // Plain like the buttons beside it until a host is picked; then it lights up.
+        a.filter_button.as(gtk.Widget).addCssClass("flat");
         a.filter_button.as(gtk.Widget).setTooltipText("Show one host or all of them");
         a.filter_menu = gio.Menu.new();
         a.filter_button.setMenuModel(a.filter_menu.as(gio.MenuModel));
@@ -977,6 +978,7 @@ pub const App = struct {
         if (s.sessionView(sid) == null) return;
         const w = a.shownWindow();
         ws.show(sid, w);
+        s.readyTerminals(sid, if (w) |shown| shown.id else null);
         a.selectSidebarRow();
         a.rebuildTabs();
         // Panes have no place until they're laid out, so the corner's room is measured again,
@@ -1368,15 +1370,15 @@ pub const App = struct {
             item.setActionAndTargetValue("app.filter", glib.Variant.newString(h.page.ptr));
             a.filter_menu.appendItem(item);
         }
-        // Just the icon until a host is picked; then its name, so the narrowing is plain to see.
+        // Always just the icon: lit while the sidebar is narrowed to a host, whose name the
+        // tooltip gives, and plain otherwise.
+        a.filter_label.as(gtk.Widget).setVisible(0);
         if (a.filter) |f| {
-            const z = gpa.dupeSentinel(u8, f.label, 0) catch return;
-            defer gpa.free(z);
-            a.filter_label.setText(z.ptr);
-            a.filter_label.as(gtk.Widget).setVisible(1);
+            var tip: [160]u8 = undefined;
+            if (std.fmt.bufPrintSentinel(&tip, "Showing only {s}", .{f.label}, 0)) |z| a.filter_button.as(gtk.Widget).setTooltipText(z.ptr) else |_| {}
             a.filter_button.as(gtk.Widget).addCssClass("filtered");
         } else {
-            a.filter_label.as(gtk.Widget).setVisible(0);
+            a.filter_button.as(gtk.Widget).setTooltipText("Show one host or all of them");
             a.filter_button.as(gtk.Widget).removeCssClass("filtered");
         }
     }
