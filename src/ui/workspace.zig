@@ -1800,6 +1800,11 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         const target = ws.paneRect(p);
         if (p.fresh) {
             p.fresh = false;
+            // The terminal's room in the settled card: the card less its border and title row.
+            var title_min: c_int = 0;
+            var title_h: c_int = 0;
+            if (p.title_row.getVisible() != 0) p.title_row.measure(.vertical, -1, &title_min, &title_h, null, null);
+            p.term.presize(target[2] - 2, target[3] - 2 - @as(f64, @floatFromInt(title_h)));
             if (ws.snap or resized) {
                 p.cur = target;
                 p.alpha = 1;

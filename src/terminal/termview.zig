@@ -583,6 +583,19 @@ pub const TermView = struct {
         v.size_timer = glib.timeoutAdd(size_debounce_ms, &applySize, v);
     }
 
+    /// Tells the server a new pane's size straight away, from the room its card will have
+    /// once it has settled. Left to the usual wait, the size arrived a moment after the shell
+    /// had started drawing its prompt, and the shell drew the prompt a second time.
+    pub fn presize(v: *TermView, width: f64, height: f64) void {
+        if (v.frozen or v.sent_cols != 0 or v.cell_w <= 0 or v.cell_h <= 0) return;
+        const fit_cols = @floor((width - 2 * pad_x) / v.cell_w);
+        const fit_rows = @floor((height - 2 * pad_y) / v.cell_h);
+        if (!(fit_cols >= 2 and fit_rows >= 1)) return;
+        v.want_cols = @intFromFloat(@min(fit_cols, 65535));
+        v.want_rows = @intFromFloat(@min(fit_rows, 65535));
+        v.sendSize();
+    }
+
     fn applySize(data: ?*anyopaque) callconv(.c) c_int {
         const v: *TermView = @ptrCast(@alignCast(data.?));
         v.size_timer = 0;
@@ -598,6 +611,7 @@ pub const TermView = struct {
         if (v.server.control == null) return;
         v.sent_cols = v.want_cols;
         v.sent_rows = v.want_rows;
+        if (perf_log) std.log.info("size: {s} is {d}x{d}", .{ v.block_id[v.block_id.len -| 6 ..], v.want_cols, v.want_rows });
         v.server.fitBlock(v.session_id, v.block_id, v.want_cols, v.want_rows, @intFromFloat(@round(v.cell_w)), @intFromFloat(v.cell_h));
     }
 
