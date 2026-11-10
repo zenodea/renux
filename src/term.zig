@@ -32,6 +32,24 @@ pub const Cell = struct {
     bg: u32 = 0,
 };
 
+/// A Kitty graphics image on screen: which image, where, how big, and which part of it.
+pub const Image = struct {
+    id: u32 = 0,
+    generation: u64 = 0,
+    above_text: bool = false,
+    z: i32 = 0,
+    col: i32 = 0,
+    row: i32 = 0,
+    off_x: u32 = 0,
+    off_y: u32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    sx: u32 = 0,
+    sy: u32 = 0,
+    sw: u32 = 0,
+    sh: u32 = 0,
+};
+
 pub const Frame = struct {
     cols: u16 = 0,
     rows: u16 = 0,
@@ -70,6 +88,9 @@ pub const Term = struct {
     rows: c.GhosttyRenderStateRowIterator = null,
     cells: c.GhosttyRenderStateRowCells = null,
     frame: Frame = .{},
+    image_iter: c.GhosttyRenderStateImageIterator = null,
+    /// Kitty graphics images on screen, as of the last render.
+    images: std.ArrayList(Image) = .empty,
 
     pub fn create(cols: u16, rows: u16) ?*Term {
         var t: c.GhosttyTerminal = null;
@@ -101,11 +122,77 @@ pub const Term = struct {
         _ = c.ghostty_render_state_new(null, &self.rs);
         _ = c.ghostty_render_state_row_iterator_new(null, &self.rows);
         _ = c.ghostty_render_state_row_cells_new(null, &self.cells);
+        _ = c.ghostty_render_state_image_iterator_new(null, &self.image_iter);
+        // Kitty graphics stay off until there's room to keep the images.
+        var limit: u64 = 256 * 1024 * 1024;
+        _ = c.ghostty_terminal_set(t, c.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &limit);
         return self;
+    }
+
+    /// Installs the decoder for PNG images that programs send, once for every terminal.
+    pub fn setPngDecoder(f: c.GhosttySysDecodePngFn) void {
+        _ = c.ghostty_sys_set(c.GHOSTTY_SYS_OPT_DECODE_PNG, @ptrCast(@constCast(f)));
+    }
+
+    pub const ghosttyAlloc = c.ghostty_alloc;
+    pub const SysImage = c.GhosttySysImage;
+    pub const Allocator = c.GhosttyAllocator;
+
+    /// An image's pixels, borrowed until the terminal next changes.
+    pub const Pixels = struct { width: u32, height: u32, format: c_int, data: []const u8 };
+
+    pub fn imagePixels(self: *Term, id: u32) ?Pixels {
+        var graphics: c.GhosttyKittyGraphics = null;
+        if (c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, @ptrCast(&graphics)) != c.GHOSTTY_SUCCESS or graphics == null) return null;
+        const img = c.ghostty_kitty_graphics_image(graphics, id);
+        if (img == null) return null;
+        var w: u32 = 0;
+        var h: u32 = 0;
+        var format: c.GhosttyKittyImageFormat = 0;
+        var ptr: [*c]const u8 = null;
+        var len: usize = 0;
+        if (c.ghostty_kitty_graphics_image_get(img, c.GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &w) != c.GHOSTTY_SUCCESS) return null;
+        _ = c.ghostty_kitty_graphics_image_get(img, c.GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &h);
+        _ = c.ghostty_kitty_graphics_image_get(img, c.GHOSTTY_KITTY_IMAGE_DATA_FORMAT, &format);
+        _ = c.ghostty_kitty_graphics_image_get(img, c.GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR, @ptrCast(&ptr));
+        _ = c.ghostty_kitty_graphics_image_get(img, c.GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN, &len);
+        if (ptr == null or w == 0 or h == 0) return null;
+        return .{ .width = w, .height = h, .format = @intCast(format), .data = ptr[0..len] };
+    }
+
+    fn readImages(self: *Term) void {
+        self.images.clearRetainingCapacity();
+        if (self.image_iter == null) return;
+        if (c.ghostty_render_state_get(self.rs, c.GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR, @ptrCast(&self.image_iter)) != c.GHOSTTY_SUCCESS) return;
+        while (c.ghostty_render_state_image_iterator_next(self.image_iter)) {
+            var im: Image = .{};
+            var protocol: c.GhosttyImageProtocol = 0;
+            var layer: c.GhosttyRenderStateImageLayer = 0;
+            const keys = [_]c.GhosttyRenderStateImageData{
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL,         c.GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION, c.GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_Z,                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,     c.GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,    c.GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,     c.GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y,         c.GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH,
+                c.GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+            };
+            var values = [_]?*anyopaque{
+                &protocol, &im.id,     &im.generation, &layer, &im.z, &im.col, &im.row, &im.off_x,
+                &im.off_y, &im.width, &im.height,     &im.sx,  &im.sy, &im.sw,  &im.sh,
+            };
+            _ = c.ghostty_render_state_image_get_multi(self.image_iter, keys.len, &keys, @ptrCast(&values), null);
+            if (protocol != c.GHOSTTY_IMAGE_PROTOCOL_KITTY) continue;
+            im.above_text = layer == c.GHOSTTY_RENDER_STATE_IMAGE_LAYER_ABOVE_TEXT;
+            self.images.append(gpa, im) catch return;
+        }
     }
 
     pub fn destroy(self: *Term) void {
         if (self.search != null) c.ghostty_search_free(self.search);
+        if (self.image_iter != null) c.ghostty_render_state_image_iterator_free(self.image_iter);
+        self.images.deinit(gpa);
         c.ghostty_render_state_row_cells_free(self.cells);
         c.ghostty_render_state_row_iterator_free(self.rows);
         c.ghostty_render_state_free(self.rs);
@@ -326,6 +413,7 @@ pub const Term = struct {
         var dirty: c.GhosttyRenderStateDirty = c.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
         _ = c.ghostty_render_state_get(self.rs, c.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
         if (!force and dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE) return false;
+        self.readImages();
 
         const f = &self.frame;
         var cols: u16 = 0;

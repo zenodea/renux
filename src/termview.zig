@@ -214,6 +214,8 @@ pub const TermView = struct {
     spacing: f64 = 0,
     /// Floating panes stay solid when terminals are see-through, so what's below doesn't show.
     floating: bool = false,
+    /// Textures of the Kitty images this pane shows, by image and generation.
+    textures: std.ArrayList(TextureEntry) = .empty,
     /// Whether this pane has the window's keyboard focus, for fading the others.
     active_pane: bool = true,
     /// The background the program last drew with, to tell the frame when it changes.
@@ -425,6 +427,8 @@ pub const TermView = struct {
         }
         v.canvas.view = null;
         v.dropRows();
+        for (v.textures.items) |e| e.texture.as(gobject.Object).unref();
+        v.textures.deinit(gpa);
         v.rows_cache.deinit(gpa);
         if (v.layout) |l| l.as(gobject.Object).unref();
         if (v.stream()) |st| st.removeListener(v);
@@ -561,6 +565,10 @@ pub const TermView = struct {
     }
 
     pub fn enablePerfLog() void {
+        if (!png_decoder_set) {
+            png_decoder_set = true;
+            term_mod.Term.setPngDecoder(&decodePng);
+        }
         perf_log = std.c.getenv("COMPY_PERF") != null;
     }
 
@@ -699,6 +707,27 @@ pub const TermView = struct {
         }
         // Escape always leaves a mode, even one without a binding for it.
         if (keyval == 0xff1b) setKeyMode("");
+    }
+
+    fn textureFor(v: *TermView, t: *term_mod.Term, im: term_mod.Image) ?*gdk.Texture {
+        const key = imageKey(im);
+        for (v.textures.items) |e| if (e.key == key) return e.texture;
+        const px = t.imagePixels(im.id) orelse return null;
+        const tex = makeTexture(px) orelse return null;
+        // Textures no image on screen uses any more go, so old frames don't pile up.
+        var i: usize = 0;
+        while (i < v.textures.items.len) {
+            const e = v.textures.items[i];
+            const used = for (t.images.items) |o| {
+                if (imageKey(o) == e.key) break true;
+            } else false;
+            if (used) i += 1 else {
+                e.texture.as(gobject.Object).unref();
+                _ = v.textures.swapRemove(i);
+            }
+        }
+        v.textures.append(gpa, .{ .key = key, .texture = tex }) catch {};
+        return tex;
     }
 
     pub fn selectAll(v: *TermView) void {
@@ -1347,6 +1376,98 @@ fn rgba(color: u32, alpha: f64) gdk.RGBA {
     };
 }
 
+// Kitty graphics images.
+
+/// Draws the images on one side of the text: under it, or over it. Each image's texture is
+/// made once per image and generation, which changes when a program sends new pixels.
+fn drawImages(v: *TermView, sn: *gtk.Snapshot, t: *term.Term, above: bool, frac: f64) void {
+    for (t.images.items) |im| {
+        if (im.above_text != above or im.sw == 0 or im.sh == 0 or im.width == 0 or im.height == 0) continue;
+        const tex = v.textureFor(t, im) orelse continue;
+        const x = pad_x + @as(f64, @floatFromInt(im.col)) * v.cell_w + @as(f64, @floatFromInt(im.off_x));
+        const y = pad_y + frac + @as(f64, @floatFromInt(im.row)) * v.cell_h + @as(f64, @floatFromInt(im.off_y));
+        const dw: f64 = @floatFromInt(im.width);
+        const dh: f64 = @floatFromInt(im.height);
+        // The source rectangle fills the destination, so the whole image is scaled to match.
+        const scale_x = dw / @as(f64, @floatFromInt(im.sw));
+        const scale_y = dh / @as(f64, @floatFromInt(im.sh));
+        const full_w = @as(f64, @floatFromInt(tex.getWidth())) * scale_x;
+        const full_h = @as(f64, @floatFromInt(tex.getHeight())) * scale_y;
+        sn.pushClip(&.{ .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(dw), .f_height = @floatCast(dh) } });
+        sn.appendTexture(tex, &.{
+            .f_origin = .{ .f_x = @floatCast(x - @as(f64, @floatFromInt(im.sx)) * scale_x), .f_y = @floatCast(y - @as(f64, @floatFromInt(im.sy)) * scale_y) },
+            .f_size = .{ .f_width = @floatCast(full_w), .f_height = @floatCast(full_h) },
+        });
+        sn.pop();
+    }
+}
+
+const TextureEntry = struct { key: u64, texture: *gdk.Texture };
+
+fn imageKey(im: term.Image) u64 {
+    return (@as(u64, im.id) << 32) ^ im.generation;
+}
+
+/// Turns an image's pixels into a texture: RGBA as it is, the other formats into RGBA first.
+fn makeTexture(px: term.Term.Pixels) ?*gdk.Texture {
+    const n: usize = @as(usize, px.width) * px.height;
+    const pixels = gpa.alloc(u8, n * 4) catch return null;
+    defer gpa.free(pixels);
+    switch (px.format) {
+        1, 2 => if (px.data.len >= n * 4) @memcpy(pixels, px.data[0 .. n * 4]) else return null, // RGBA, or a decoded PNG
+        0 => { // RGB
+            if (px.data.len < n * 3) return null;
+            for (0..n) |i| {
+                pixels[i * 4] = px.data[i * 3];
+                pixels[i * 4 + 1] = px.data[i * 3 + 1];
+                pixels[i * 4 + 2] = px.data[i * 3 + 2];
+                pixels[i * 4 + 3] = 255;
+            }
+        },
+        3 => { // gray with alpha
+            if (px.data.len < n * 2) return null;
+            for (0..n) |i| {
+                @memset(pixels[i * 4 .. i * 4 + 3], px.data[i * 2]);
+                pixels[i * 4 + 3] = px.data[i * 2 + 1];
+            }
+        },
+        4 => { // gray
+            if (px.data.len < n) return null;
+            for (0..n) |i| {
+                @memset(pixels[i * 4 .. i * 4 + 3], px.data[i]);
+                pixels[i * 4 + 3] = 255;
+            }
+        },
+        else => return null,
+    }
+    const bytes = glib.Bytes.new(pixels.ptr, pixels.len);
+    defer bytes.unref();
+    return gdk.MemoryTexture.new(@intCast(px.width), @intCast(px.height), .r8g8b8a8, bytes, @as(usize, px.width) * 4).as(gdk.Texture);
+}
+
+/// A PNG that a program sends, decoded with GDK into the RGBA the terminal stores.
+fn decodePng(_: ?*anyopaque, allocator: [*c]const term.Term.Allocator, data: [*c]const u8, len: usize, out: [*c]term.Term.SysImage) callconv(.c) bool {
+    const bytes = glib.Bytes.new(data, len);
+    defer bytes.unref();
+    const tex = gdk.Texture.newFromBytes(bytes, null) orelse return false;
+    defer tex.as(gobject.Object).unref();
+    const w: usize = @intCast(tex.getWidth());
+    const h: usize = @intCast(tex.getHeight());
+    const buf = term.Term.ghosttyAlloc(allocator, w * h * 4);
+    if (buf == null) return false;
+    const dl = gdk.TextureDownloader.new(tex);
+    defer dl.free();
+    dl.setFormat(.r8g8b8a8);
+    dl.downloadInto(@ptrCast(buf), w * 4);
+    out.*.width = @intCast(w);
+    out.*.height = @intCast(h);
+    out.*.data = buf;
+    out.*.data_len = w * h * 4;
+    return true;
+}
+
+var png_decoder_set = false;
+
 fn fillRect(sn: *gtk.Snapshot, color: u32, alpha: f64, x: f64, y: f64, w: f64, h: f64) void {
     const c = rgba(color, alpha);
     sn.appendColor(&c, &.{ .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
@@ -1588,12 +1709,14 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         t.scroll(1);
         _ = t.render(true);
     }
+    drawImages(v, sn, t, false, frac);
     var y: usize = 0;
     while (y < f.rows) : (y += 1) {
         const top = pad_y + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
         if (top > h) break;
         placeRow(sn, rowNode(v, y, f, y, f_font), top);
     }
+    drawImages(v, sn, t, true, frac);
 
     // Search matches, over the text.
     if (t.finding()) {
