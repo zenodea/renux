@@ -279,6 +279,10 @@ fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
 
 fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const p = page();
+    const tabs = group(p, "Tabs", "Each session's windows, as tabs in the sidebar or above the panes");
+    segments(ctx, tabs, "Tabs", settings.TabPosition, &settings.current.tab_position, &.{ "Left", "Right", "Above" }, App.tabsChanged);
+    switchRow(ctx, tabs, "Fill available space", "Tabs above the panes share the width", &settings.current.tab_fill, App.tabsChanged);
+    switchRow(ctx, tabs, "Show each process", "A tab lists every program in its window", &settings.current.tab_processes, App.tabsChanged);
     const look = group(p, "Appearance", null);
     segments(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, App.themeChanged);
     const panes = group(p, "Panes", null);

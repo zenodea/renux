@@ -288,7 +288,8 @@ pub const Workspace = struct {
                 var x: f64 = 0;
                 var y: f64 = 0;
                 // The title starts 13 pixels in: the card's border and the title's padding.
-                if (p.frame.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) != 0) room = @max(0, corner_right + 6 - (x + 13));
+                // Only a pane whose title is level with the corner; tabs above push panes down.
+                if (p.frame.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) != 0 and y < 30) room = @max(0, corner_right + 6 - (x + 13));
             };
             const want: c_int = @intFromFloat(@round(room));
             if (p.title_row.getMarginStart() != want) p.title_row.setMarginStart(want);

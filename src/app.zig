@@ -116,6 +116,20 @@ const css =
     \\.activity-row.blocked .activity-detail { color: @warning_color; }
     \\.activity-row.failed .activity-detail { color: @error_color; }
     \\.activity-unread { min-width: 8px; min-height: 8px; border-radius: 99px; background-color: @accent_bg_color; }
+    \\.tab-strip { padding: 0 8px 0 0; min-height: 52px; }
+    \\.tab-strip > * { margin-top: 11px; margin-bottom: 5px; }
+    \\window.tabs-above .content .workspace { margin-top: 0; }
+    \\.content.alone .tab-strip { padding-left: 8px; }
+    \\.tab { border-radius: 9px; min-height: 30px; padding: 0 4px 0 10px; color: @compy_secondary; }
+    \\.tab:hover { background-color: alpha(@window_fg_color, 0.05); }
+    \\.tab.active { background-color: alpha(@window_fg_color, 0.10); color: @window_fg_color; }
+    \\.tab .tab-close { opacity: 0; min-width: 20px; min-height: 20px; }
+    \\.tab:hover .tab-close, .tab.active .tab-close { opacity: 0.55; }
+    \\window.tabs-above .compy-sidebar list > row.session-pick { min-height: 28px; margin-top: 2px; border-radius: 8px; }
+    \\window.tabs-above .compy-sidebar list > row.session-pick:selected { background-color: alpha(@window_fg_color, 0.09); }
+    \\window.tabs-above .compy-sidebar row.session-pick .session-heading { font-size: 0.95em; color: @window_fg_color; }
+    \\window.sidebar-end .content .workspace { margin: 6px 0 8px 8px; }
+    \\window.sidebar-end .content.alone .workspace { margin: 6px 8px 8px 8px; }
     \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
     \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
     \\.hint-desc { font-size: 0.92em; }
@@ -168,6 +182,8 @@ pub const App = struct {
     mode_chip: *gtk.Label = undefined,
     /// The keys that can follow a prefix or work in a key mode, while one is waiting.
     hints: *gtk.Box = undefined,
+    /// The session's windows as tabs above the panes, when tabs go there.
+    tab_strip: *gtk.Box = undefined,
     activity: *@import("activity.zig").Activity = undefined,
     /// A pane being floated so it can be minimized.
     minimize_next: ?[]u8 = null,
@@ -311,6 +327,10 @@ pub const App = struct {
 
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).addCssClass("content");
+        a.tab_strip = gtk.Box.new(.horizontal, 4);
+        a.tab_strip.as(gtk.Widget).addCssClass("tab-strip");
+        a.tab_strip.as(gtk.Widget).setVisible(0);
+        card.append(a.tab_strip.as(gtk.Widget));
         card.append(a.find_bar.as(gtk.Widget));
         card.append(a.stack.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
@@ -371,6 +391,7 @@ pub const App = struct {
 
         a.addActions();
         a.setTight(settings.current.tight);
+        a.tabsChanged();
         themes.active = themes.resolve(settings.current.theme);
         @import("workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
@@ -450,15 +471,41 @@ pub const App = struct {
 
     /// Tells the panes how much of their top-left the corner covers.
     fn cornerChanged(a: *App) void {
-        @import("workspace.zig").corner_right = @floatFromInt(a.corner.getWidth());
+        @import("workspace.zig").corner_right = a.cornerRight();
+        a.tabsRoom();
         if (a.workspace) |ws| ws.cornerChanged();
         // The sidebar slides in or out over a few frames; the title follows it on each one.
         a.corner_until = glib.getMonotonicTime() + 600_000;
         if (a.corner_tick == 0) a.corner_tick = a.window.as(gtk.Widget).addTickCallback(&cornerTick, a, null);
     }
 
+    /// Tabs above the panes start after the window's corner when it covers them.
+    fn tabsRoom(a: *App) void {
+        const strip = a.tab_strip.as(gtk.Widget);
+        var x: f64 = 0;
+        var y: f64 = 0;
+        const root = strip.getRoot() orelse return;
+        if (strip.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) == 0) return;
+        const margin: f64 = @floatFromInt(strip.getMarginStart());
+        const room = @max(0, a.cornerRight() + 4 - (x - margin));
+        const want: c_int = @intFromFloat(@round(room));
+        if (strip.getMarginStart() != want) strip.setMarginStart(want);
+    }
+
+    /// Where the corner's buttons end, in window coordinates.
+    fn cornerRight(a: *App) f64 {
+        const width: f64 = @floatFromInt(a.corner.getWidth());
+        const root = a.corner.getRoot() orelse return width;
+        var x: f64 = 0;
+        var y: f64 = 0;
+        if (a.corner.translateCoordinates(root.as(gtk.Widget), width, 0, &x, &y) == 0) return width;
+        return x;
+    }
+
     fn cornerTick(_: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(data.?));
+        @import("workspace.zig").corner_right = a.cornerRight();
+        a.tabsRoom();
         if (a.workspace) |ws| ws.cornerChanged();
         if (glib.getMonotonicTime() < a.corner_until) return 1;
         a.corner_tick = 0;
@@ -735,6 +782,93 @@ pub const App = struct {
         const w = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow();
         ws.show(sid, w);
         a.selectSidebarRow();
+        a.rebuildTabs();
+        // Panes have no place until they're laid out, so the corner's room is measured again.
+        a.cornerChanged();
+    }
+
+    /// The tabs above the panes: one per window of the shown session, then a new-tab button.
+    fn rebuildTabs(a: *App) void {
+        const strip = a.tab_strip.as(gtk.Widget);
+        while (strip.getFirstChild()) |c| a.tab_strip.remove(c);
+        const above = settings.current.tab_position == .above;
+        strip.setVisible(@intFromBool(above));
+        if (!above) return;
+        const h = a.current orelse return;
+        const s = h.server;
+        const sid = a.session_id orelse return;
+        const v = s.sessionView(sid) orelse return;
+        const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow();
+        for (v.windows) |*w| {
+            const tab = gtk.Button.new();
+            tab.as(gtk.Widget).addCssClass("tab");
+            tab.as(gtk.Widget).addCssClass("flat");
+            if (shown == w) tab.as(gtk.Widget).addCssClass("active");
+            const line = gtk.Box.new(.horizontal, 7);
+            line.append(rowTile(s, w));
+            var tbuf: [256]u8 = undefined;
+            const title = if (settings.current.tab_processes) processList(h, &tbuf, w) else rowTitle(h, &tbuf, w, v);
+            const label = gtk.Label.new(title.ptr);
+            label.setEllipsize(.end);
+            label.setXalign(0);
+            label.as(gtk.Widget).setHexpand(1);
+            line.append(label.as(gtk.Widget));
+            var abuf: [600]u8 = undefined;
+            const ids = std.fmt.bufPrintSentinel(&abuf, "{s} {s}", .{ sid, w.id }, 0) catch continue;
+            const close = icons.button(.close, "Close tab", "app.close-window");
+            close.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(ids.ptr));
+            close.as(gtk.Widget).addCssClass("tab-close");
+            line.append(close.as(gtk.Widget));
+            tab.setChild(line.as(gtk.Widget));
+            tab.as(gtk.Actionable).setActionName("app.show-window");
+            tab.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(ids.ptr));
+            if (settings.current.tab_fill) tab.as(gtk.Widget).setHexpand(1) else tab.as(gtk.Widget).setSizeRequest(180, -1);
+            a.tab_strip.append(tab.as(gtk.Widget));
+        }
+        const add = icons.button(.plus, "New tab", "app.new-window");
+        add.as(gtk.Widget).addCssClass("tab-new");
+        a.tab_strip.append(add.as(gtk.Widget));
+    }
+
+    /// Every program in a window, such as "zsh · nvim · claude", for tabs that show them all.
+    fn processList(h: *Host, buf: []u8, w: *const view.Window) [:0]const u8 {
+        var n: usize = 0;
+        for (w.layers) |l| for (l.blocks) |b| {
+            const info = h.server.blockInfo(b.id) orelse continue;
+            const prog = (if (info.has_status) info.status_app else null) orelse info.program orelse continue;
+            const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
+            const sep: []const u8 = if (n > 0) " · " else "";
+            if (n + sep.len + name.len + 1 >= buf.len) break;
+            @memcpy(buf[n .. n + sep.len], sep);
+            n += sep.len;
+            @memcpy(buf[n .. n + name.len], name);
+            n += name.len;
+        };
+        if (n == 0) return std.fmt.bufPrintSentinel(buf, "Window", .{}, 0) catch "";
+        buf[n] = 0;
+        return buf[0..n :0];
+    }
+
+    fn showWindowAction(a: *App, session_id: []const u8, window_id: []const u8) void {
+        const s = a.server orelse return;
+        a.auto_picked = false;
+        setSlot(&a.session_id, session_id);
+        setSlot(&a.window_id, window_id);
+        s.focusWindow(session_id, window_id);
+        a.showSelected();
+        if (a.workspace) |w| w.grabFocus();
+    }
+
+    /// Applies where tabs go: the sidebar's side, and the strip above the panes.
+    pub fn tabsChanged(a: *App) void {
+        const pos = settings.current.tab_position;
+        a.split.setSidebarPosition(if (pos == .right) .end else .start);
+        const w = a.window.as(gtk.Widget);
+        if (pos == .right) w.addCssClass("sidebar-end") else w.removeCssClass("sidebar-end");
+        if (pos == .above) w.addCssClass("tabs-above") else w.removeCssClass("tabs-above");
+        a.rebuildSidebar();
+        a.rebuildTabs();
+        a.cornerChanged();
     }
 
     fn rebuildSidebar(a: *App) void {
@@ -754,6 +888,7 @@ pub const App = struct {
             a.addSessions(h);
         }
         a.selectSidebarRow();
+        a.rebuildTabs();
     }
 
     fn rebuildFilterMenu(a: *App) void {
@@ -944,6 +1079,7 @@ pub const App = struct {
             fold.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
             fold.as(gtk.Widget).addCssClass("session-tool");
             if (collapsed) fold.as(gtk.Widget).addCssClass("folded");
+            if (settings.current.tab_position == .above) fold.as(gtk.Widget).setVisible(0);
             head.append(fold.as(gtk.Widget));
             const head_row = gtk.ListBoxRow.new();
             head_row.setChild(head.as(gtk.Widget));
@@ -951,6 +1087,14 @@ pub const App = struct {
             head_row.setSelectable(0);
             head_row.as(gtk.Widget).addCssClass("session-row");
             a.sidebar.append(head_row.as(gtk.Widget));
+            if (settings.current.tab_position == .above) {
+                // Tabs above the panes hold the windows; the sidebar picks the session.
+                head_row.setActivatable(1);
+                head_row.setSelectable(1);
+                head_row.as(gtk.Widget).addCssClass("session-pick");
+                a.rows.append(gpa, .{ .host = h, .session_id = gpa.dupe(u8, session.id) catch continue, .window_id = gpa.dupe(u8, "") catch continue }) catch {};
+                continue;
+            }
             a.rows.append(gpa, null) catch {};
             if (collapsed) continue;
             const v = s.sessionView(session.id) orelse continue;
@@ -1068,7 +1212,8 @@ pub const App = struct {
         const v = s.sessionView(sid) orelse return;
         const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return;
         for (a.rows.items, 0..) |r, i| if (r) |row| {
-            if (row.host == here and std.mem.eql(u8, row.session_id, sid) and std.mem.eql(u8, row.window_id, shown.id)) {
+            const matches = if (row.window_id.len == 0) true else std.mem.eql(u8, row.window_id, shown.id);
+            if (row.host == here and std.mem.eql(u8, row.session_id, sid) and matches) {
                 const was = a.rebuilding;
                 a.rebuilding = true;
                 a.sidebar.selectRow(a.sidebar.getRowAtIndex(@intCast(i)));
@@ -1102,6 +1247,7 @@ pub const App = struct {
         const r = a.rows.items[index] orelse return;
         a.selectHost(r.host);
         a.auto_picked = false;
+        if (r.window_id.len == 0) return a.showSession(r.session_id);
         setSlot(&a.session_id, r.session_id);
         setSlot(&a.window_id, r.window_id);
         if (a.server) |s| s.focusWindow(r.session_id, r.window_id);
@@ -1264,9 +1410,10 @@ pub const App = struct {
             return true;
         }
         if (is(action, "client.tab_style.toggle")) {
-            settings.current.show_headers = !settings.current.show_headers;
+            // Between tabs in the sidebar and tabs above the panes, like Rex.
+            settings.current.tab_position = if (settings.current.tab_position == .above) .left else .above;
             settings.save();
-            a.headersChanged();
+            a.tabsChanged();
             return true;
         }
         if (is(action, "client.notice.dismiss")) return true;
@@ -1775,7 +1922,7 @@ pub const App = struct {
             _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
             a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
         }
-        inline for (.{ .{ "close-window", closeWindowAction }, .{ "rename-window", renameWindowAction }, .{ "show-block", showBlockAction } }) |e| {
+        inline for (.{ .{ "close-window", closeWindowAction }, .{ "rename-window", renameWindowAction }, .{ "show-block", showBlockAction }, .{ "show-window", showWindowAction } }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
                 fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {

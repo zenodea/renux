@@ -7,6 +7,8 @@ const gpa = std.heap.c_allocator;
 
 pub const ColorScheme = enum { auto, light, dark };
 pub const CursorStyle = enum { program, block, bar, underline };
+/// Where a session's windows show as tabs: in the sidebar on the left or right, or above the panes.
+pub const TabPosition = enum { left, right, above };
 
 pub const Host = struct { label: []u8, url: []u8 };
 
@@ -34,6 +36,11 @@ pub const Settings = struct {
     sidebar_width: f64 = 250,
     /// After a prefix such as ctrl+a, list the keys that can follow.
     key_hints: bool = true,
+    tab_position: TabPosition = .left,
+    /// Tabs above the panes share the width between them.
+    tab_fill: bool = true,
+    /// A tab lists every program in its window, not just the focused one.
+    tab_processes: bool = false,
     alerts: bool = true,
     alert_blocked: bool = true,
     alert_error: bool = true,
@@ -121,6 +128,9 @@ pub fn load() void {
     s.blur = boolean(kf, "blur", true);
     s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
     s.key_hints = boolean(kf, "key-hints", true);
+    s.tab_position = enumOf(TabPosition, kf, "tab-position", .left);
+    s.tab_fill = boolean(kf, "tab-fill", true);
+    s.tab_processes = boolean(kf, "tab-processes", false);
     s.alerts = boolean(kf, "alerts", true);
     s.alert_blocked = boolean(kf, "alert-blocked", true);
     s.alert_error = boolean(kf, "alert-error", true);
@@ -220,10 +230,12 @@ pub fn save() void {
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
         .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
-        .{ "key-hints", s.key_hints },
+        .{ "key-hints", s.key_hints },         .{ "tab-fill", s.tab_fill },
+        .{ "tab-processes", s.tab_processes },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
     kf.setString("compy", "cursor-style", @tagName(s.cursor_style));
+    kf.setString("compy", "tab-position", @tagName(s.tab_position));
     kf.setDouble("compy", "cursor-width", s.cursor_width);
     kf.setDouble("compy", "line-height", s.line_height);
     kf.setDouble("compy", "letter-spacing", s.letter_spacing);
