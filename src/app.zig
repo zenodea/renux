@@ -244,6 +244,8 @@ pub const App = struct {
     /// The sidebar's buttons that give way as it gets narrow; see `fitSidebar`.
     head_more: *gtk.Widget = undefined,
     header_room: *gtk.Widget = undefined,
+    side_header: *gtk.Widget = undefined,
+    side_root: *gtk.Widget = undefined,
     head_search: *gtk.Widget = undefined,
     foot_session: *gtk.Widget = undefined,
     foot_host: *gtk.Widget = undefined,
@@ -370,6 +372,7 @@ pub const App = struct {
         // As wide as the corner while the sidebar has that much room; see `fitSidebar`.
         a.header_room = header_room.as(gtk.Widget);
         side_header.packStart(header_room.as(gtk.Widget));
+        a.side_header = side_header.as(gtk.Widget);
         a.head_more = menuButton(appMenu(), "More").as(gtk.Widget);
         side_header.packEnd(a.head_more);
         a.head_search = icons.button(.search, "Commands", "app.palette").as(gtk.Widget);
@@ -494,6 +497,7 @@ pub const App = struct {
         handle.as(gtk.Widget).addController(handle_drag.as(gtk.EventController));
         side_overlay.addOverlay(handle.as(gtk.Widget));
         split.setSidebar(side_overlay.as(gtk.Widget));
+        a.side_root = side_overlay.as(gtk.Widget);
         split.setContent(card.as(gtk.Widget));
         a.setSidebarWidth(settings.current.sidebar_width);
         _ = gobject.Object.signals.notify.connect(split, *App, &sidebarShown, a, .{ .detail = "show-sidebar" });
@@ -605,6 +609,10 @@ pub const App = struct {
         a.split.setMinSidebarWidth(w);
         a.split.setSidebarWidthFraction(1);
         a.fitSidebar(w);
+        // The split view gives a sidebar no more than its contents ask for, whatever the
+        // maximum says, so the sidebar asks for exactly the width picked. Without this it sat
+        // at its header's width and jumped whenever that changed.
+        a.side_root.setSizeRequest(@intFromFloat(w), -1);
         a.cornerChanged();
     }
 
@@ -613,19 +621,33 @@ pub const App = struct {
     /// menu moving to the footer; then the footer's own buttons and each session's go, all of
     /// which the menus offer too.
     fn fitSidebar(a: *App, width: f64) void {
-        // The header keeps clear of the window's corner buttons, but never holds the sidebar
-        // wider than asked: narrower than the corner, the buttons reach over the first pane,
-        // whose title moves aside for them as it does when the sidebar is hidden.
-        const corner_w: f64 = if (a.corner.getWidth() > 0) @floatFromInt(a.corner.getWidth()) else 170;
-        a.header_room.setSizeRequest(@intFromFloat(@max(0, @min(corner_w, width - 16))), -1);
-        a.head_search.setVisible(@intFromBool(width >= 226));
-        const menu_up = width >= 196;
-        a.head_more.setVisible(@intFromBool(menu_up));
-        a.foot_more.setVisible(@intFromBool(!menu_up));
+        // The header holds a gap as wide as the window's corner buttons, then its own two
+        // buttons. Whatever doesn't fit at this width goes, so the header never holds the
+        // sidebar wider than asked (which made it stick and then jump while being dragged).
+        // Narrower than the corner itself, the corner reaches over the first pane, whose title
+        // moves aside for it as it does when the sidebar is hidden.
+        var min: c_int = 0;
+        var nat: c_int = 0;
+        a.corner.measure(.horizontal, -1, &min, &nat, null, null);
+        const corner_w: f64 = @floatFromInt(nat);
+        // Measured, not guessed: how wide the header is with each set of buttons and no gap.
+        a.header_room.setSizeRequest(0, -1);
+        var room: f64 = 0;
+        var shown: usize = 0;
+        for ([_]usize{ 2, 1, 0 }) |buttons| {
+            a.head_search.setVisible(@intFromBool(buttons == 2));
+            a.head_more.setVisible(@intFromBool(buttons >= 1));
+            a.side_header.measure(.horizontal, -1, &min, &nat, null, null);
+            room = width - @as(f64, @floatFromInt(min));
+            shown = buttons;
+            if (room >= corner_w) break;
+        }
+        a.foot_more.setVisible(@intFromBool(shown == 0));
+        a.header_room.setSizeRequest(@intFromFloat(std.math.clamp(room, 0, corner_w)), -1);
         const roomy = width >= 172;
         a.foot_session.setVisible(@intFromBool(roomy));
         a.foot_host.setVisible(@intFromBool(roomy));
-        const narrow = width < 200;
+        const narrow = width < 190;
         if (narrow != a.narrow_rows) {
             a.narrow_rows = narrow;
             // Rows are built for one or the other, so they are made again.
@@ -3822,6 +3844,9 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             benchWindow(a);
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
+        } else if (std.mem.eql(u8, cmd, "sidebar")) {
+            if (a.split.getSidebar()) |sb| std.log.info("sidebar was {d} wide (asked {d:.0}, min {d:.0}, max {d:.0}, room {d}, header {d})", .{ sb.getWidth(), a.split.getMaxSidebarWidth(), a.split.getMinSidebarWidth(), a.split.getMaxSidebarWidth(), a.header_room.getWidth(), a.side_header.getWidth() });
+            a.setSidebarWidth(std.fmt.parseFloat(f64, it.next() orelse "250") catch 250);
         } else if (std.mem.eql(u8, cmd, "line")) {
             ws.simulateLine();
         } else if (std.mem.eql(u8, cmd, "divider")) {
