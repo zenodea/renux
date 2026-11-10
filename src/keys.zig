@@ -271,8 +271,8 @@ pub const Name = struct {
     }
 };
 
-const us_shifted = "!@#$%^&*()_+{}|:\"<>?~";
-const us_unshifted = "1234567890-=[]\\;',./`";
+pub const us_shifted = "!@#$%^&*()_+{}|:\"<>?~";
+pub const us_unshifted = "1234567890-=[]\\;',./`";
 
 pub fn parseName(name: []const u8) ?Name {
     var n: Name = .{ .mods = 0 };

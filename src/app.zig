@@ -19,6 +19,7 @@ const settings = @import("settings.zig");
 const themes = @import("themes.zig");
 const theme = @import("theme.zig");
 const icons = @import("icons.zig");
+const keys = @import("keys.zig");
 const Palette = @import("palette.zig").Palette;
 
 const gpa = std.heap.c_allocator;
@@ -101,6 +102,9 @@ const css =
     \\.palette { padding: 12px; }
     \\.palette-category { color: @compy_secondary; font-size: 0.85em; }
     \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
+    \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
+    \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
+    \\.hint-desc { font-size: 0.92em; }
     \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
     \\.connect-box { margin: 0 24px; }
 ;
@@ -148,6 +152,8 @@ pub const App = struct {
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
     mode_chip: *gtk.Label = undefined,
+    /// The keys that can follow a prefix or work in a key mode, while one is waiting.
+    hints: *gtk.Box = undefined,
     /// A pane being floated so it can be minimized.
     minimize_next: ?[]u8 = null,
     rows: std.ArrayList(?Row) = .empty,
@@ -328,6 +334,14 @@ pub const App = struct {
         a.mode_chip.as(gtk.Widget).setVisible(0);
         a.mode_chip.as(gtk.Widget).setCanTarget(0);
         layered.addOverlay(a.mode_chip.as(gtk.Widget));
+        a.hints = gtk.Box.new(.vertical, 0);
+        a.hints.as(gtk.Widget).addCssClass("key-hints");
+        a.hints.as(gtk.Widget).setHalign(.center);
+        a.hints.as(gtk.Widget).setValign(.end);
+        a.hints.as(gtk.Widget).setMarginBottom(62);
+        a.hints.as(gtk.Widget).setVisible(0);
+        a.hints.as(gtk.Widget).setCanTarget(0);
+        layered.addOverlay(a.hints.as(gtk.Widget));
         mode_app = a;
         termview.on_mode_changed = modeChanged;
         termview.on_chord_changed = chordChanged;
@@ -2145,8 +2159,176 @@ var mode_app: ?*App = null;
 var start_font_size: c_int = 0;
 
 /// Shows the start of a key sequence, such as "ctrl+a …", until it's finished.
+/// Fills the hint panel with what each key does next, in columns, or hides it.
+fn showHints(a: *App, items: []const termview.Hint) void {
+    const w = a.hints.as(gtk.Widget);
+    while (w.getFirstChild()) |c| a.hints.remove(c);
+    if (items.len == 0 or !settings.current.key_hints) {
+        w.setVisible(0);
+        return;
+    }
+    const grid = gtk.Grid.new();
+    grid.setColumnSpacing(10);
+    grid.setRowSpacing(5);
+    const per_col: usize = @max(6, (items.len + 2) / 3);
+    for (items, 0..) |h, i| {
+        const col: c_int = @intCast((i / per_col) * 3);
+        const row: c_int = @intCast(i % per_col);
+        var kbuf: [48]u8 = undefined;
+        const key = gtk.Label.new(prettyKey(&kbuf, h.key).ptr);
+        key.as(gtk.Widget).addCssClass("hint-key");
+        key.setXalign(1);
+        grid.attach(key.as(gtk.Widget), col, row, 1, 1);
+        var dbuf: [96]u8 = undefined;
+        const desc = gtk.Label.new(describeAction(a, &dbuf, h.action, h.args, h.more).ptr);
+        desc.as(gtk.Widget).addCssClass("hint-desc");
+        desc.setXalign(0);
+        desc.setEllipsize(.end);
+        desc.setMaxWidthChars(22);
+        desc.as(gtk.Widget).setMarginEnd(14);
+        grid.attach(desc.as(gtk.Widget), col + 1, row, 1, 1);
+    }
+    a.hints.append(grid.as(gtk.Widget));
+    w.setVisible(1);
+}
+
+/// Groups hints: panes, then tabs, sessions, the rest of the app, and the config's own actions.
+fn sortHints(items: []termview.Hint) void {
+    const rank = struct {
+        fn of(action: []const u8) u8 {
+            const order = [_][]const u8{ "pane.split", "pane.focus", "pane.resize", "pane.", "client.tab.", "session.", "client." };
+            for (order, 0..) |o, i| if (std.mem.startsWith(u8, action, o)) return @intCast(i);
+            return order.len;
+        }
+        fn less(_: void, x: termview.Hint, y: termview.Hint) bool {
+            const rx = of(x.action);
+            const ry = of(y.action);
+            if (rx != ry) return rx < ry;
+            // Plain keys before ones with ctrl or other modifiers.
+            const mx = std.mem.indexOfScalar(u8, x.key, '+') != null and !std.mem.startsWith(u8, x.key, "shift+");
+            const my = std.mem.indexOfScalar(u8, y.key, '+') != null and !std.mem.startsWith(u8, y.key, "shift+");
+            if (mx != my) return !mx;
+            return std.mem.lessThan(u8, x.key, y.key);
+        }
+    };
+    std.mem.sort(termview.Hint, items, {}, rank.less);
+}
+
+/// A key name as it reads on the keyboard: shift+- is _, shift+n is N, ctrl+a is ⌃A.
+fn prettyKey(buf: []u8, name: []const u8) [:0]const u8 {
+    var rest = name;
+    var n: usize = 0;
+    var shift = false;
+    while (std.mem.indexOfScalar(u8, rest, '+')) |i| {
+        if (i == 0 or i + 1 >= rest.len) break;
+        const m = rest[0..i];
+        if (std.mem.eql(u8, m, "shift")) shift = true else {
+            const sym: []const u8 = if (std.mem.eql(u8, m, "ctrl")) "⌃" else if (std.mem.eql(u8, m, "alt")) "⌥" else if (std.mem.eql(u8, m, "super") or std.mem.eql(u8, m, "cmd")) "⌘" else m;
+            if (n + sym.len >= buf.len) break;
+            @memcpy(buf[n .. n + sym.len], sym);
+            n += sym.len;
+        }
+        rest = rest[i + 1 ..];
+    }
+    var key = rest;
+    var one: [1]u8 = undefined;
+    // Shift folds into the character only when it's the sole modifier, so ctrl+shift+n stays ⌃⇧N.
+    if (shift and n > 0 and rest.len == 1) {
+        if (n + 3 < buf.len) {
+            @memcpy(buf[n .. n + 3], "⇧");
+            n += 3;
+        }
+        shift = false;
+        one[0] = std.ascii.toUpper(rest[0]);
+        key = &one;
+    } else if (shift and rest.len == 1) {
+        if (std.mem.indexOfScalar(u8, keys.us_unshifted, rest[0])) |k| {
+            one[0] = keys.us_shifted[k];
+            key = &one;
+            shift = false;
+        } else if (std.ascii.isLower(rest[0])) {
+            one[0] = std.ascii.toUpper(rest[0]);
+            key = &one;
+            shift = false;
+        }
+    } else if (n > 0 and rest.len == 1) {
+        one[0] = std.ascii.toUpper(rest[0]);
+        key = &one;
+    }
+    if (shift and n + 3 < buf.len) {
+        @memcpy(buf[n .. n + 3], "⇧");
+        n += 3;
+    }
+    const k = key[0..@min(key.len, buf.len - n - 1)];
+    @memcpy(buf[n .. n + k.len], k);
+    buf[n + k.len] = 0;
+    return buf[0 .. n + k.len :0];
+}
+
+/// What a binding does, in words: the action's title from the config if it has one, otherwise
+/// its name made readable, with its arguments, such as "Split right".
+fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8, more: bool) [:0]const u8 {
+    if (more) return std.fmt.bufPrintSentinel(buf, "more…", .{}, 0) catch "";
+    var title: []const u8 = "";
+    if (a.server) |s| for (s.actions) |act| if (std.mem.eql(u8, act.name, action) and act.title.len > 0) {
+        title = act.title;
+    };
+    var name_buf: [64]u8 = undefined;
+    const known = [_][2][]const u8{
+        .{ "pane.split", "Split" },                   .{ "pane.focus", "Focus" },
+        .{ "pane.resize", "Resize" },                 .{ "pane.focus_next", "Next pane" },
+        .{ "pane.focus_previous", "Previous pane" },  .{ "pane.close", "Close pane" },
+        .{ "pane.zoom", "Zoom pane" },                .{ "pane.balance", "Balance panes" },
+        .{ "pane.float", "Float or dock" },           .{ "pane.send_key", "Send" },
+        .{ "client.tab.new", "New tab" },             .{ "client.tab.next", "Next tab" },
+        .{ "client.tab.previous", "Previous tab" },   .{ "client.tab.rename", "Rename tab" },
+        .{ "client.tab.close", "Close tab" },         .{ "client.tab.goto", "Tab" },
+        .{ "client.find.open", "Find" },              .{ "client.mode.enter", "Mode" },
+        .{ "client.config.reload", "Reload config" }, .{ "client.sidebar.toggle", "Sidebar" },
+        .{ "client.sidebar.activity.toggle", "Activity" }, .{ "client.palette.toggle", "Commands" },
+        .{ "session.new", "New session" },            .{ "session.switch", "Switch session" },
+        .{ "session.rename", "Rename session" },      .{ "session.next", "Next session" },
+        .{ "session.previous", "Previous session" },
+    };
+    if (title.len == 0) for (known) |k| if (std.mem.eql(u8, k[0], action)) {
+        title = k[1];
+    };
+    if (title.len == 0) {
+        // pane.focus_next reads "Focus next"; the prefix before the first dot is left off.
+        const base = if (std.mem.indexOfScalar(u8, action, '.')) |i| action[i + 1 ..] else action;
+        const n = @min(base.len, name_buf.len);
+        for (base[0..n], 0..) |c, i| name_buf[i] = if (c == '_' or c == '.') ' ' else c;
+        if (n > 0) name_buf[0] = std.ascii.toUpper(name_buf[0]);
+        title = name_buf[0..n];
+    }
+    // The first plain argument, such as a direction, a tab number or a command.
+    var extra: []const u8 = "";
+    var parsed: ?std.json.Parsed(std.json.Value) = if (args) |t| std.json.parseFromSlice(std.json.Value, gpa, t, .{}) catch null else null;
+    defer if (parsed) |*p| p.deinit();
+    var num_buf: [24]u8 = undefined;
+    if (parsed) |p| if (p.value == .object) {
+        for ([_][]const u8{ "direction", "name", "key", "index", "command" }) |k| {
+            const v = p.value.object.get(k) orelse continue;
+            extra = switch (v) {
+                .string => |t| t,
+                .integer => |i| std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch "",
+                .array => |arr| if (arr.items.len > 0 and arr.items[0] == .string) arr.items[0].string else "",
+                else => "",
+            };
+            if (extra.len > 0) break;
+        }
+    };
+    if (extra.len == 0) return std.fmt.bufPrintSentinel(buf, "{s}", .{title}, 0) catch "";
+    return std.fmt.bufPrintSentinel(buf, "{s} {s}", .{ title, extra }, 0) catch "";
+}
+
 fn chordChanged(pending: []const u8) void {
     const a = mode_app orelse return;
+    var items: std.ArrayList(termview.Hint) = .empty;
+    defer items.deinit(gpa);
+    if (a.server) |s| termview.nextKeys(s.bindings, &items);
+    sortHints(items.items);
+    showHints(a, items.items);
     if (pending.len == 0) {
         modeChanged();
         return;
@@ -2167,8 +2349,16 @@ fn modeChanged() void {
     const mode = termview.keyMode();
     if (mode.len == 0) {
         a.mode_chip.as(gtk.Widget).setVisible(0);
+        showHints(a, &.{});
         return;
     }
+    // A key mode's own keys, such as h j k l to resize.
+    var items: std.ArrayList(termview.Hint) = .empty;
+    defer items.deinit(gpa);
+    if (a.server) |s| for (s.mode_bindings) |b| if (std.mem.eql(u8, b.mode, mode)) {
+        items.append(gpa, .{ .key = b.keys, .action = b.action, .args = b.args, .more = false }) catch break;
+    };
+    showHints(a, items.items);
     var buf: [96]u8 = undefined;
     var upper: [32]u8 = undefined;
     const n = @min(mode.len, upper.len);

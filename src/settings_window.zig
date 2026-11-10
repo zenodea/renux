@@ -560,6 +560,8 @@ fn fontChanged(ctx: *Ctx) void {
 
 fn shortcutsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
+    const hint_group = group(p, "Key Hints", null);
+    switchRow(ctx, hint_group, "Show key sequence hints", "After a prefix such as ctrl+a, list the keys that can follow", &settings.current.key_hints, null);
     const g = group(p, "Key Bindings", "Keys come from your Rex config, written in Lua. Change them there; Compy picks them up when it reconnects.");
     var any = false;
     if (ctx.app.server) |s| for (s.actions) |act| {

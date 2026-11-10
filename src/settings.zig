@@ -32,6 +32,8 @@ pub const Settings = struct {
     blur: bool = true,
     /// The sidebar's width in pixels, set by dragging its edge.
     sidebar_width: f64 = 250,
+    /// After a prefix such as ctrl+a, list the keys that can follow.
+    key_hints: bool = true,
     alerts: bool = true,
     alert_blocked: bool = true,
     alert_error: bool = true,
@@ -118,6 +120,7 @@ pub fn load() void {
     s.terminal_opacity = number(kf, "terminal-opacity", 1, 0.2, 1);
     s.blur = boolean(kf, "blur", true);
     s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
+    s.key_hints = boolean(kf, "key-hints", true);
     s.alerts = boolean(kf, "alerts", true);
     s.alert_blocked = boolean(kf, "alert-blocked", true);
     s.alert_error = boolean(kf, "alert-error", true);
@@ -217,6 +220,7 @@ pub fn save() void {
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
         .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
+        .{ "key-hints", s.key_hints },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
     kf.setString("compy", "cursor-style", @tagName(s.cursor_style));

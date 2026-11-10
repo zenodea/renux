@@ -147,6 +147,33 @@ var chord_len: usize = 0;
 /// Told when a sequence starts or ends, to show what's been typed.
 pub var on_chord_changed: ?*const fn (pending: []const u8) void = null;
 
+/// A key that can come next in the sequence typed so far, and what it runs. `more` means it
+/// starts a longer sequence rather than running something itself.
+pub const Hint = struct { key: []const u8, action: []const u8, args: ?[]const u8, more: bool };
+
+/// The keys that can follow the sequence typed so far, from the config's bindings, each once.
+pub fn nextKeys(binds: []const @import("server.zig").Binding, out: *std.ArrayList(Hint)) void {
+    if (chord_len == 0) return;
+    for (binds) |*b| {
+        if (b.keys.len <= chord_len) continue;
+        var same = true;
+        for (0..chord_len) |i| if (!keys.sameKey(b.keys[i], chord_keys[i][0..chord_lens[i]])) {
+            same = false;
+            break;
+        };
+        if (!same) continue;
+        const key = b.keys[chord_len];
+        const more = b.keys.len > chord_len + 1;
+        const dup = for (out.items) |*h| {
+            if (keys.sameKey(h.key, key)) {
+                if (!more) h.* = .{ .key = key, .action = b.action, .args = b.args, .more = false };
+                break true;
+            }
+        } else false;
+        if (!dup) out.append(gpa, .{ .key = key, .action = b.action, .args = b.args, .more = more }) catch return;
+    }
+}
+
 fn chordChanged() void {
     const f = on_chord_changed orelse return;
     var buf: [180]u8 = undefined;
