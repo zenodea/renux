@@ -15,6 +15,7 @@ const themes = @import("themes.zig");
 const Rgb = @import("theme.zig").Rgb;
 const shortcuts = @import("shortcuts.zig");
 const icons = @import("icons.zig");
+const art = @import("settings_art.zig");
 const App = @import("app.zig").App;
 
 const gpa = std.heap.c_allocator;
@@ -55,6 +56,8 @@ const Ctx = struct {
     font_size: ?*adw.SpinRow = null,
     font_names: std.ArrayList([:0]u8) = .empty,
     font_preview: ?*gtk.Label = null,
+    /// The drawings that follow the settings: each is drawn again when a setting changes.
+    drawings: std.ArrayList(*gtk.Widget) = .empty,
     shortcuts_page: shortcuts.Page,
 
     fn al(ctx: *Ctx) std.mem.Allocator {
@@ -201,8 +204,132 @@ fn Bound(comptime T: type) type {
         fn changed(b: *@This()) void {
             settings.save();
             if (b.after) |f| f(b.ctx.app);
+            redrawArt(b.ctx);
         }
     };
+}
+
+/// Development: the whole of the page showing, including what is scrolled out of sight, for
+/// a screenshot.
+pub fn wholePage() ?*gtk.Widget {
+    const ctx = open_ctx orelse return null;
+    var w = ctx.stack.getVisibleChild() orelse return null;
+    // A preferences page keeps its rows in a scrolled window; what is inside that is the page.
+    var depth: usize = 0;
+    while (depth < 6) : (depth += 1) {
+        if (w.getAncestor(gtk.Viewport.getGObjectType()) == w) return w.getFirstChild();
+        w = w.getFirstChild() orelse return null;
+    }
+    return null;
+}
+
+/// Draws the window's pictures and samples again, after a setting they show changed.
+fn redrawArt(ctx: *Ctx) void {
+    for (ctx.drawings.items) |w| w.queueDraw();
+}
+
+fn keepDrawing(ctx: *Ctx, w: *gtk.Widget) *gtk.Widget {
+    ctx.drawings.append(ctx.al(), w) catch {};
+    return w;
+}
+
+/// A row that holds something of its own instead of a title: a strip of cards, a sample.
+fn plainRow(g: *adw.PreferencesGroup, child: *gtk.Widget) void {
+    const row = adw.PreferencesRow.new();
+    row.as(gtk.ListBoxRow).setActivatable(0);
+    row.as(gtk.Widget).setFocusable(0);
+    row.as(gtk.Widget).addCssClass("settings-plain-row");
+    row.as(gtk.ListBoxRow).setChild(child);
+    g.add(row.as(gtk.Widget));
+}
+
+/// A strip of picture cards under a small heading, to start filling.
+fn cardStrip(g: *adw.PreferencesGroup, title: [:0]const u8) *gtk.Box {
+    const column = gtk.Box.new(.vertical, 8);
+    column.as(gtk.Widget).addCssClass("settings-cards");
+    const heading = gtk.Label.new(title.ptr);
+    heading.setXalign(0);
+    heading.as(gtk.Widget).addCssClass("settings-cards-title");
+    column.append(heading.as(gtk.Widget));
+    const strip = gtk.Box.new(.horizontal, 10);
+    column.append(strip.as(gtk.Widget));
+    plainRow(g, column.as(gtk.Widget));
+    return strip;
+}
+
+/// One card: a drawing with its name under it, lit while it is the one picked.
+fn pickCard(ctx: *Ctx, kind: art.Art, label: [:0]const u8) *gtk.ToggleButton {
+    const b = gtk.ToggleButton.new();
+    const column = gtk.Box.new(.vertical, 6);
+    column.append(keepDrawing(ctx, art.card(kind, 104, 68)));
+    const name = gtk.Label.new(label.ptr);
+    column.append(name.as(gtk.Widget));
+    b.as(gtk.Button).setChild(column.as(gtk.Widget));
+    b.as(gtk.Widget).addCssClass("pick-card");
+    b.as(gtk.Widget).addCssClass("flat");
+    return b;
+}
+
+/// A choice among a few named things, each shown as a picture card.
+fn cards(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, comptime E: type, field: *E, labels: []const [:0]const u8, pictures: []const art.Art, after: *const fn (*App) void) void {
+    const sc = ctx.keep(Bound(E){ .ctx = ctx, .field = field, .after = after }) orelse return;
+    const strip = cardStrip(g, title);
+    var first: ?*gtk.ToggleButton = null;
+    inline for (comptime std.enums.values(E), 0..) |value, i| {
+        const b = pickCard(ctx, pictures[i], labels[i]);
+        if (first) |fb| b.setGroup(fb) else first = b;
+        b.setActive(@intFromBool(field.* == value));
+        const Pick = struct {
+            fn changed(btn: *gtk.ToggleButton, bound: *Bound(E)) callconv(.c) void {
+                if (btn.getActive() == 0 or bound.field.* == value) return;
+                bound.field.* = value;
+                bound.changed();
+            }
+        };
+        _ = gtk.ToggleButton.signals.toggled.connect(b, *Bound(E), &Pick.changed, sc, .{});
+        strip.append(b.as(gtk.Widget));
+    }
+}
+
+/// Two picture cards for an on-or-off setting whose two states each have a name.
+fn boolCards(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, field: *bool, off: [:0]const u8, off_art: art.Art, on: [:0]const u8, on_art: art.Art, after: *const fn (*App) void) void {
+    const sc = ctx.keep(Bound(bool){ .ctx = ctx, .field = field, .after = after }) orelse return;
+    const strip = cardStrip(g, title);
+    const off_card = pickCard(ctx, off_art, off);
+    const on_card = pickCard(ctx, on_art, on);
+    on_card.setGroup(off_card);
+    (if (field.*) on_card else off_card).setActive(1);
+    strip.append(off_card.as(gtk.Widget));
+    strip.append(on_card.as(gtk.Widget));
+    const H = struct {
+        fn changed(btn: *gtk.ToggleButton, bound: *Bound(bool)) callconv(.c) void {
+            const v = btn.getActive() != 0;
+            if (v == bound.field.*) return;
+            bound.field.* = v;
+            bound.changed();
+        }
+    };
+    _ = gtk.ToggleButton.signals.toggled.connect(on_card, *Bound(bool), &H.changed, sc, .{});
+}
+
+/// A live sample of the terminal at the top of a group.
+fn sampleRow(ctx: *Ctx, g: *adw.PreferencesGroup, kind: art.Sample) void {
+    const box = gtk.Box.new(.vertical, 0);
+    box.as(gtk.Widget).addCssClass("settings-sample-row");
+    box.append(keepDrawing(ctx, art.sample(kind)));
+    plainRow(g, box.as(gtk.Widget));
+}
+
+/// A switch with the colored mark of the status it is about.
+fn statusSwitch(ctx: *Ctx, g: *adw.PreferencesGroup, kind: art.Status, title: [:0]const u8, subtitle: [:0]const u8, field: *bool) void {
+    const row = adw.SwitchRow.new();
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    row.as(adw.ActionRow).setSubtitle(subtitle.ptr);
+    row.as(adw.ActionRow).addPrefix(art.status(kind));
+    row.setActive(@intFromBool(field.*));
+    g.add(row.as(gtk.Widget));
+    const t = ctx.keep(Bound(bool){ .ctx = ctx, .field = field, .after = null }) orelse return;
+    _ = gobject.Object.signals.notify.connect(row, *Bound(bool), &toggled, t, .{ .detail = "active" });
 }
 
 /// A button for the end of a row.
@@ -487,7 +614,7 @@ fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
 fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const tabs = group(p, "Tabs", "Each session's windows, as tabs in the sidebar or above the panes");
-    segments(ctx, tabs, "Tabs", settings.TabPosition, &settings.current.tab_position, &.{ "Left", "Right", "Above" }, App.tabsChanged);
+    cards(ctx, tabs, "Tab style", settings.TabPosition, &settings.current.tab_position, &.{ "Left Side", "Right Side", "Above" }, &.{ .tabs_left, .tabs_right, .tabs_above }, App.tabsChanged);
     switchRow(ctx, tabs, "Fill available space", "Tabs above the panes share the width", &settings.current.tab_fill, App.tabsChanged);
     switchRow(ctx, tabs, "Show each process", "A tab lists every program in its window", &settings.current.tab_processes, App.tabsChanged);
     const panes_group = group(p, "Pane Behavior", null);
@@ -505,19 +632,20 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const extras = group(p, "Window", null);
     switchRow(ctx, extras, "Show window on launch", "Off starts Compy hidden; compy --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
     switchRow(ctx, extras, "Trackpad gestures", "Swipe sideways with two fingers to switch tabs", &settings.current.trackpad_gestures, null);
+    numberRow(ctx, extras, "Trackpad scroll speed", "How far text moves for the fingers' movement; 2 is what terminals on a Mac do", &settings.current.scroll_speed, 0.5, 5, 0.25, 2, App.redrawAllPub);
     numberRow(ctx, extras, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
     switchRow(ctx, extras, "Unread badge", "The number of panes that need you, on the Dock or the desktop's launcher", &settings.current.unread_badge, null);
     const go = group(p, "Go to Anything", null);
     switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     const look = group(p, "Appearance", null);
-    segments(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, App.themeChanged);
+    cards(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, &.{ .scheme_auto, .scheme_light, .scheme_dark }, App.themeChanged);
     const panes = group(p, "Panes", null);
     const Tight = struct {
         fn apply(app: *App) void {
             app.setTight(settings.current.tight);
         }
     };
-    boolSegments(ctx, panes, "Pane style", &settings.current.tight, "Comfortable", "Compact", Tight.apply);
+    boolCards(ctx, panes, "Pane style", &settings.current.tight, "Comfortable", .panes_roomy, "Compact", .panes_compact, Tight.apply);
     switchRow(ctx, panes, "Show pane headers", "The title row with the program, folder and pane buttons", &settings.current.show_headers, App.headersChanged);
     switchRow(ctx, panes, "Use color for program icons", "Brand colors for known programs, like Rex's tab icons", &settings.current.brand_icons, App.redrawAll);
     return p.as(gtk.Widget);
@@ -743,6 +871,7 @@ fn themePicked(_: *adw.ActionRow, pick: *ThemePick) callconv(.c) void {
     settings.setString(&settings.current.theme, pick.value);
     for (pick.ctx.theme_checks.items) |c| c.check.setVisible(@intFromBool(c == pick));
     pick.ctx.app.themeChanged();
+    redrawArt(pick.ctx);
 }
 
 fn drawSwatch(_: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, data: ?*anyopaque) callconv(.c) void {
@@ -797,6 +926,7 @@ fn imported(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaqu
 fn terminalPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const g = group(p, "Typography", null);
+    sampleRow(ctx, g, .typography);
     fontRows(ctx, g);
     numberRow(ctx, g, "Line height", "Row height as a multiple of the font's own", &settings.current.line_height, 0.8, 2, 0.05, 2, App.fontChanged);
     numberRow(ctx, g, "Letter spacing", "Extra pixels between characters", &settings.current.letter_spacing, -2, 6, 0.5, 1, App.fontChanged);
@@ -815,16 +945,19 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, look, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
 
     const c = group(p, "Cursor", null);
+    sampleRow(ctx, c, .cursor);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
     numberRow(ctx, c, "Bar width", "In pixels, for the bar and underline cursors. The cursor takes the theme's accent color", &settings.current.cursor_width, 1, 6, 0.5, 1, App.redrawAll);
     switchRow(ctx, c, "Blink", "In the pane with the keyboard", &settings.current.cursor_blink, App.redrawAll);
     numberRow(ctx, c, "Blink interval", "Milliseconds between blinks", &settings.current.cursor_blink_ms, 200, 2000, 50, 0, App.terminalChanged);
     colorPicker(ctx, c, "Cursor text color", "The character under a block cursor", &settings.current.cursor_text_color, "Default", App.redrawAllPub);
 
+    const sel = group(p, "Selection", null);
+    sampleRow(ctx, sel, .selection);
+    colorPicker(ctx, sel, "Background", "Selected text swaps its colors unless one is picked", &settings.current.selection_bg, "Theme", App.redrawAllPub);
+    colorPicker(ctx, sel, "Foreground", null, &settings.current.selection_fg, "Theme", App.redrawAllPub);
     const colors = group(p, "Colors and Bell", null);
     switchRow(ctx, colors, "Improve text contrast", "Adjust text that would be hard to read against its background", &settings.current.improve_contrast, App.redrawAll);
-    colorPicker(ctx, colors, "Selection background", "Selected text swaps its colors unless one is picked", &settings.current.selection_bg, "Default", App.redrawAllPub);
-    colorPicker(ctx, colors, "Selection foreground", null, &settings.current.selection_fg, "Default", App.redrawAllPub);
     switchRow(ctx, colors, "Extended theme palette", "Make colors 16 to 255 from the theme's own colors", &settings.current.extended_palette, App.terminalChanged);
     switchRow(ctx, colors, "Flash on bell", "Briefly light up a pane when its program rings the bell", &settings.current.visual_bell, null);
     const paste = group(p, "Copy and Paste", null);
@@ -902,6 +1035,8 @@ fn fontRows(ctx: *Ctx, g: *adw.PreferencesGroup) void {
     preview_row.as(gtk.ListBoxRow).setChild(preview.as(gtk.Widget));
     g.add(preview_row.as(gtk.Widget));
     ctx.font_preview = preview;
+    // The sample at the top of the group shows the font now; this line is kept out of sight.
+    if (preview.as(gtk.Widget).getAncestor(gtk.ListBoxRow.getGObjectType())) |row| row.setVisible(0);
     showPreview(ctx);
 
     _ = gobject.Object.signals.notify.connect(family, *Ctx, &familyChanged, ctx, .{ .detail = "selected" });
@@ -951,6 +1086,7 @@ fn fontChanged(ctx: *Ctx) void {
     settings.setString(&settings.current.font, font);
     showPreview(ctx);
     ctx.app.fontChanged();
+    redrawArt(ctx);
 }
 
 // Shortcuts.
@@ -972,9 +1108,9 @@ fn notificationsPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, g, "Show system notifications", "Only while you're looking elsewhere", &st.alerts, null);
     switchRow(ctx, g, "Play sounds", null, &st.sound, null);
     const which = group(p, "Notify When", null);
-    switchRow(ctx, which, "Blocked", "A program needs your permission, an answer or a password", &st.alert_blocked, null);
-    switchRow(ctx, which, "Error", "A program failed", &st.alert_error, null);
-    switchRow(ctx, which, "Done", "A program finished", &st.alert_done, null);
+    statusSwitch(ctx, which, .blocked, "Blocked", "A program needs your permission, an answer or a password", &st.alert_blocked);
+    statusSwitch(ctx, which, .failed, "Error", "A program failed", &st.alert_error);
+    statusSwitch(ctx, which, .done, "Done", "A program finished", &st.alert_done);
     const sys = group(p, "Terminal Notifications", null);
     switchRow(ctx, sys, "Notifications from programs", "Programs can send notifications with OSC 9 or OSC 777", &st.terminal_notifications, null);
     return p.as(gtk.Widget);

@@ -42,6 +42,12 @@ const css =
     \\.hover-chip { font-size: 0.8em; font-weight: 600; padding: 1px 8px; border-radius: 7px; background-color: alpha(@window_fg_color, 0.1); color: @compy_secondary; }
     \\.hover-chip.blocked { color: @warning_color; }
     \\.hover-chip.failed { color: @error_color; }
+    \\.settings-plain-row { padding: 0; }
+    \\.settings-cards { padding: 12px 12px 10px 12px; }
+    \\.settings-cards-title { font-size: 0.9em; color: @compy_secondary; margin-left: 4px; }
+    \\.pick-card { padding: 5px 5px 7px 5px; border-radius: 13px; font-weight: 400; color: @compy_secondary; transition: box-shadow 140ms ease-out, background-color 140ms ease-out; }
+    \\.pick-card:checked { background-color: alpha(@accent_bg_color, 0.12); box-shadow: inset 0 0 0 2px @accent_bg_color; color: @window_fg_color; font-weight: 700; }
+    \\.settings-sample-row { padding: 12px; }
     \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
@@ -4104,6 +4110,20 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
     const texture = renderer.renderTexture(node, null);
     defer texture.as(gobject.Object).unref();
     _ = texture.saveToPng(path);
+    // The settings page showing, whole, with what is scrolled out of sight.
+    if (@import("settings_window.zig").wholePage()) |pw| {
+        const pp = gtk.WidgetPaintable.new(pw);
+        defer pp.as(gobject.Object).unref();
+        const ps = gtk.Snapshot.new();
+        pp.as(gdk.Paintable).snapshot(ps.as(gdk.Snapshot), @floatFromInt(pw.getWidth()), @floatFromInt(pw.getHeight()));
+        if (ps.freeToNode()) |pn| {
+            defer pn.unref();
+            const pt = renderer.renderTexture(pn, null);
+            defer pt.as(gobject.Object).unref();
+            var pbuf: [1024]u8 = undefined;
+            if (std.fmt.bufPrintSentinel(&pbuf, "{s}.page.png", .{std.mem.span(path)}, 0)) |page_path| _ = pt.saveToPng(page_path.ptr) else |_| {}
+        }
+    }
     // A hover card is a window of its own, so it gets a picture of its own beside the first.
     if (@import("hovercard.zig").visibleCard()) |cw| {
         const cp = gtk.WidgetPaintable.new(cw);
