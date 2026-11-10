@@ -218,6 +218,9 @@ pub const App = struct {
     balance_window: [64]u8 = undefined,
     balance_window_len: usize = 0,
     theme_for: ?@import("stream.zig").Colors = null,
+    /// The terminal options last applied, so a change to one redoes only that one's work.
+    applied_text: TextSetup = .{},
+    applied_extended: bool = false,
     /// Each pane's folder as last seen, hashed, to tell a move from a repeat.
     block_folders: std.AutoHashMapUnmanaged(u64, u64) = .empty,
 
@@ -239,6 +242,8 @@ pub const App = struct {
         settings.load();
         termview.pad_x = settings.current.pad_x;
         termview.pad_y = settings.current.pad_y;
+        a.applied_text = TextSetup.now();
+        a.applied_extended = settings.current.extended_palette;
         termview.font = termview.Font.init(gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch "Monospace 11");
         const provider = gtk.CssProvider.new();
         provider.loadFromString(css);
@@ -2799,16 +2804,42 @@ pub const App = struct {
         termview.pad_y = settings.current.pad_y;
         // The cursor's blink starts over at the new interval the next time it's drawn.
         termview.blinkReset();
-        for (a.hosts.items) |h| {
-            var it = h.server.streams.valueIterator();
-            while (it.next()) |st| st.*.hostColorsChanged();
+        // Each option does only its own work: the made-up palette recolors the terminals; padding,
+        // ligatures and smoothing set each pane's text up again, which also refits it; and the
+        // rest (faces, colors) only draws again, since rows are cached by those options. None of
+        // them changes the font itself.
+        if (a.applied_extended != settings.current.extended_palette) {
+            a.applied_extended = settings.current.extended_palette;
+            for (a.hosts.items) |h| {
+                var it = h.server.streams.valueIterator();
+                while (it.next()) |st| st.*.hostColorsChanged();
+            }
         }
-        a.fontChanged();
-        a.redrawAllPub();
+        if (!std.meta.eql(a.applied_text, TextSetup.now())) a.metricsChanged();
+        a.redrawAll();
     }
 
-    pub fn redrawAllPub(a: *App) void {
+    /// The options a pane's text setup depends on, besides the font.
+    const TextSetup = struct {
+        pad_x: f64 = 0,
+        pad_y: f64 = 0,
+        ligatures: bool = true,
+        smoothing: bool = true,
+
+        fn now() TextSetup {
+            const st = &settings.current;
+            return .{ .pad_x = st.pad_x, .pad_y = st.pad_y, .ligatures = st.ligatures, .smoothing = st.font_smoothing };
+        }
+    };
+
+    /// How text is set up in each pane changed, so every pane measures and refits, once.
+    fn metricsChanged(a: *App) void {
+        a.applied_text = TextSetup.now();
         for (a.hosts.items) |h| h.workspace.fontChanged();
+    }
+
+    /// Draws every pane again, for options that change how rows look but not their size.
+    pub fn redrawAllPub(a: *App) void {
         a.redrawAll();
     }
 
