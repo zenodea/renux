@@ -12,6 +12,9 @@ pub const TabPosition = enum { left, right, above };
 
 pub const Host = struct { label: []u8, url: []u8 };
 
+/// A key sequence set in Compy for an action, over the config's own. Empty keys unbind it.
+pub const Shortcut = struct { keys: []u8, action: []u8, args: []u8 };
+
 pub const Settings = struct {
     font: []u8,
     tight: bool = false,
@@ -60,7 +63,26 @@ pub const Settings = struct {
     /// Folders panes were in lately, newest first, for Go to Anything.
     recent_paths: std.ArrayList([]u8) = .empty,
     recent_paths_shown: bool = true,
+    shortcuts: std.ArrayList(Shortcut) = .empty,
 };
+
+/// Sets (or, with `keys` null, removes) Compy's own shortcut for an action and its arguments.
+pub fn setShortcut(action: []const u8, args: []const u8, keys: ?[]const u8) void {
+    const list = &current.shortcuts;
+    for (list.items, 0..) |sc, i| if (std.mem.eql(u8, sc.action, action) and std.mem.eql(u8, sc.args, args)) {
+        gpa.free(sc.keys);
+        gpa.free(sc.action);
+        gpa.free(sc.args);
+        _ = list.orderedRemove(i);
+        break;
+    };
+    if (keys) |k| list.append(gpa, .{
+        .keys = gpa.dupe(u8, k) catch return,
+        .action = gpa.dupe(u8, action) catch return,
+        .args = gpa.dupe(u8, args) catch return,
+    }) catch {};
+    save();
+}
 
 /// Puts a folder first among the recent ones, keeping at most 30.
 pub fn addRecentPath(path: []const u8) void {
@@ -160,6 +182,20 @@ pub fn load() void {
     s.paste_warning = boolean(kf, "paste-warning", true);
     s.copy_on_select = boolean(kf, "copy-on-select", true);
     s.recent_paths_shown = boolean(kf, "recent-paths", true);
+    {
+        // Each one is "keys<TAB>action<TAB>args".
+        var n: usize = 0;
+        if (kf.getStringList("shortcuts", "bindings", &n, null)) |list| {
+            defer glib.strfreev(@ptrCast(list));
+            for (0..n) |i| if (std.mem.span(list[i])) |line| {
+                var parts = std.mem.splitScalar(u8, line, '\t');
+                const k = parts.next() orelse continue;
+                const act = parts.next() orelse continue;
+                const args = parts.next() orelse "";
+                s.shortcuts.append(gpa, .{ .keys = gpa.dupe(u8, k) catch continue, .action = gpa.dupe(u8, act) catch continue, .args = gpa.dupe(u8, args) catch continue }) catch {};
+            };
+        }
+    }
     {
         var n: usize = 0;
         if (kf.getStringList("paths", "recent", &n, null)) |list| {
@@ -300,6 +336,14 @@ pub fn save() void {
         recent.append(gpa, z.ptr) catch return;
     }
     kf.setStringList("paths", "recent", @ptrCast(recent.items.ptr), recent.items.len);
+    var shortcut_lines: std.ArrayList(?[*:0]const u8) = .empty;
+    defer shortcut_lines.deinit(gpa);
+    for (s.shortcuts.items) |sc| {
+        const z = std.fmt.allocPrintSentinel(gpa, "{s}\t{s}\t{s}", .{ sc.keys, sc.action, sc.args }, 0) catch return;
+        owned.append(gpa, z) catch return;
+        shortcut_lines.append(gpa, z.ptr) catch return;
+    }
+    kf.setStringList("shortcuts", "bindings", @ptrCast(shortcut_lines.items.ptr), shortcut_lines.items.len);
 
     const d = dir() orelse return;
     defer gpa.free(d);

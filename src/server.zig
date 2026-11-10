@@ -124,7 +124,11 @@ pub const Server = struct {
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
     actions: []Action = &.{},
     mode_bindings: []ModeBinding = &.{},
+    /// The keys in effect: the config's, with Compy's own shortcuts in place of theirs.
     bindings: []Binding = &.{},
+    /// The config's keys as the server sent them.
+    config_bindings: []Binding = &.{},
+    overrides_arena: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(std.heap.c_allocator),
     hosts_arena: std.heap.ArenaAllocator = .init(gpa),
     /// The other hosts this server knows, from the last hosts.list.
     listed_hosts: []ListedHost = &.{},
@@ -1197,9 +1201,36 @@ pub const Server = struct {
             };
             binds.append(a, .{ .keys = seq.items, .action = a.dupe(u8, action) catch continue, .args = args, .lua = lua }) catch {};
         }
-        s.bindings = binds.items;
+        s.config_bindings = binds.items;
+        s.applyShortcuts();
         if (std.c.getenv("COMPY_DEBUG") != null) log.info("keymap: {d} actions, {d} bindings, {d} in modes", .{ s.actions.len, json.array(payload, "bindings").len, modes.items.len });
         s.notify(.keymap, null);
+    }
+
+    /// Puts Compy's own shortcuts over the config's: an action with one loses the config's keys.
+    pub fn applyShortcuts(s: *Server) void {
+        _ = s.overrides_arena.reset(.retain_capacity);
+        const a = s.overrides_arena.allocator();
+        const mine = @import("settings.zig").current.shortcuts.items;
+        var out: std.ArrayList(Binding) = .empty;
+        for (s.config_bindings) |b| {
+            const replaced = for (mine) |sc| {
+                if (eql(sc.action, b.action) and eql(sc.args, b.args orelse "")) break true;
+            } else false;
+            if (!replaced) out.append(a, b) catch return;
+        }
+        for (mine) |sc| {
+            if (sc.keys.len == 0) continue;
+            var seq: std.ArrayList([]const u8) = .empty;
+            var it = std.mem.tokenizeScalar(u8, sc.keys, ' ');
+            while (it.next()) |k| seq.append(a, a.dupe(u8, k) catch return) catch return;
+            var lua = false;
+            for (s.config_bindings) |b| if (eql(b.action, sc.action)) {
+                lua = b.lua;
+            };
+            out.append(a, .{ .keys = seq.items, .action = a.dupe(u8, sc.action) catch return, .args = if (sc.args.len > 0) a.dupe(u8, sc.args) catch null else null, .lua = lua }) catch return;
+        }
+        s.bindings = out.items;
     }
 
     /// Asks the server which other hosts it knows; the answer arrives as a `hosts` change.

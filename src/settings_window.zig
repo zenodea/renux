@@ -73,7 +73,9 @@ pub fn open(app: *App) void {
     split.setContent(adw.NavigationPage.new(content.as(gtk.Widget), "Settings"));
     split.setMinSidebarWidth(200);
     d.setChild(split.as(gtk.Widget));
-    ctx.list.selectRow(ctx.list.getRowAtIndex(0));
+    // Development: COMPY_SETTINGS_PAGE opens on a page by its number.
+    const first: c_int = if (std.c.getenv("COMPY_SETTINGS_PAGE")) |n| std.fmt.parseInt(c_int, std.mem.span(n), 10) catch 0 else 0;
+    ctx.list.selectRow(ctx.list.getRowAtIndex(first));
     d.present(app.window.as(gtk.Widget));
 }
 
@@ -568,29 +570,7 @@ fn shortcutsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const hint_group = group(p, "Key Hints", null);
     switchRow(ctx, hint_group, "Show key sequence hints", "After a prefix such as ctrl+a, list the keys that can follow", &settings.current.key_hints, null);
-    const g = group(p, "Key Bindings", "Keys come from your Rex config, written in Lua. Change them there; Compy picks them up when it reconnects.");
-    var any = false;
-    if (ctx.app.server) |s| for (s.actions) |act| {
-        if (act.keys.len == 0) continue;
-        any = true;
-        const row = adw.ActionRow.new();
-        const t = gpa.dupeSentinel(u8, act.title, 0) catch continue;
-        row.as(adw.PreferencesRow).setTitle(t.ptr);
-        if (act.description.len > 0) {
-            const d = gpa.dupeSentinel(u8, act.description, 0) catch continue;
-            row.setSubtitle(d.ptr);
-        }
-        const keys = gtk.Label.new((gpa.dupeSentinel(u8, act.keys, 0) catch continue).ptr);
-        keys.as(gtk.Widget).addCssClass("palette-keys");
-        keys.as(gtk.Widget).setValign(.center);
-        row.addSuffix(keys.as(gtk.Widget));
-        g.add(row.as(gtk.Widget));
-    };
-    if (!any) {
-        const row = adw.ActionRow.new();
-        row.as(adw.PreferencesRow).setTitle("No bound actions on this server");
-        g.add(row.as(gtk.Widget));
-    }
+    @import("shortcuts.zig").build(ctx.app, p);
     return p.as(gtk.Widget);
 }
 

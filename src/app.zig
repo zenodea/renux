@@ -135,6 +135,8 @@ const css =
     \\.goto-path { font-family: monospace; font-size: 0.9em; color: @compy_secondary; margin: 0 4px; }
     \\.goto-kind { font-size: 0.75em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 7px; }
     \\.goto-row { padding: 6px 8px; }
+    \\.record-box { padding: 24px; }
+    \\.record-keys { font-family: monospace; font-size: 1.6em; font-weight: 700; color: @accent_color; min-height: 40px; }
     \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
     \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
     \\.hint-desc { font-size: 0.92em; }
@@ -1525,6 +1527,10 @@ pub const App = struct {
         return false;
     }
 
+    pub fn toastText(a: *App, text: [:0]const u8) void {
+        a.toast(text);
+    }
+
     fn toast(a: *App, text: [:0]const u8) void {
         a.toasts.addToast(adw.Toast.new(text.ptr));
     }
@@ -2584,7 +2590,7 @@ fn sortHints(items: []termview.Hint) void {
 }
 
 /// A key name as it reads on the keyboard: shift+- is _, shift+n is N, ctrl+a is ⌃A.
-fn prettyKey(buf: []u8, name: []const u8) [:0]const u8 {
+pub fn prettyKey(buf: []u8, name: []const u8) [:0]const u8 {
     var rest = name;
     var n: usize = 0;
     var shift = false;
@@ -2636,7 +2642,7 @@ fn prettyKey(buf: []u8, name: []const u8) [:0]const u8 {
 
 /// What a binding does, in words: the action's title from the config if it has one, otherwise
 /// its name made readable, with its arguments, such as "Split right".
-fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8, more: bool) [:0]const u8 {
+pub fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8, more: bool) [:0]const u8 {
     if (more) return std.fmt.bufPrintSentinel(buf, "more…", .{}, 0) catch "";
     var title: []const u8 = "";
     if (a.server) |s| for (s.actions) |act| if (std.mem.eql(u8, act.name, action) and act.title.len > 0) {
@@ -2675,13 +2681,25 @@ fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8, mor
     var parsed: ?std.json.Parsed(std.json.Value) = if (args) |t| std.json.parseFromSlice(std.json.Value, gpa, t, .{}) catch null else null;
     defer if (parsed) |*p| p.deinit();
     var num_buf: [24]u8 = undefined;
+    var cmd_buf: [64]u8 = undefined;
     if (parsed) |p| if (p.value == .object) {
         for ([_][]const u8{ "direction", "name", "key", "index", "command" }) |k| {
             const v = p.value.object.get(k) orelse continue;
             extra = switch (v) {
                 .string => |t| t,
                 .integer => |i| std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch "",
-                .array => |arr| if (arr.items.len > 0 and arr.items[0] == .string) arr.items[0].string else "",
+                .array => |arr| blk: {
+                    // A command reads whole, such as "lodestar settings".
+                    var n: usize = 0;
+                    for (arr.items) |item| if (item == .string) {
+                        const sep: usize = if (n > 0) 1 else 0;
+                        if (n + sep + item.string.len > cmd_buf.len) break;
+                        if (sep == 1) cmd_buf[n] = ' ';
+                        @memcpy(cmd_buf[n + sep .. n + sep + item.string.len], item.string);
+                        n += sep + item.string.len;
+                    };
+                    break :blk cmd_buf[0..n];
+                },
                 else => "",
             };
             if (extra.len > 0) break;
