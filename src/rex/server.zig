@@ -148,6 +148,8 @@ pub const Server = struct {
     listed_hosts: []ListedHost = &.{},
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
     performer: ?Performer = null,
+    /// Room for the folder a new pane starts in, while its request is written.
+    cwd_buf: [2048]u8 = undefined,
     /// Terminals kept live though their panes are off screen, oldest first. See `parkTerminal`.
     parked: std.ArrayList(*Stream) = .empty,
 
@@ -1223,7 +1225,56 @@ pub const Server = struct {
         s.act(session_id, "session.zoom_block", .{ .session_id = session_id, .block_id = block_id, .zoom = zoom });
     }
 
-    const shell_layout = .{ .block = .{ .flavor = "com.superlogical.terminal.shell" } };
+    const ShellLayout = struct {
+        block: struct {
+            flavor: []const u8 = "com.superlogical.terminal.shell",
+            options: ?struct { cwd: []const u8 } = null,
+        } = .{},
+    };
+    const shell_layout: ShellLayout = .{};
+
+    /// A new shell that starts in the folder the pane `near` is in, as a new pane beside
+    /// one is expected to; in its home folder when that pane's folder isn't known.
+    fn shellIn(s: *Server, near: ?[]const u8) ShellLayout {
+        const info = s.blocks.getPtr(near orelse return .{}) orelse return .{};
+        const folder = folderPath(&s.cwd_buf, info.folder orelse return .{}) orelse return .{};
+        return .{ .block = .{ .options = .{ .cwd = folder } } };
+    }
+
+    /// The path in what a shell reports as its folder, which is a URL such as
+    /// `file://host/Users/me/my%20work`: without the host, and with `%20` and the like read
+    /// back into characters. Null when there is no usable path in it.
+    pub fn folderPath(buf: []u8, pwd: []const u8) ?[]const u8 {
+        var path = pwd;
+        if (std.mem.startsWith(u8, path, "file://")) {
+            path = path["file://".len..];
+            path = path[std.mem.indexOfScalar(u8, path, '/') orelse return null ..];
+        }
+        if (path.len == 0 or path[0] != '/') return null;
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < path.len) : (i += 1) {
+            if (n == buf.len) return null;
+            if (path[i] == '%' and i + 2 < path.len) {
+                if (std.fmt.parseInt(u8, path[i + 1 .. i + 3], 16)) |byte| {
+                    buf[n] = byte;
+                    n += 1;
+                    i += 2;
+                    continue;
+                } else |_| {}
+            }
+            buf[n] = path[i];
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    /// The pane with the keyboard in a window of a session, or in the session's shown window.
+    fn focusedIn(s: *Server, session_id: []const u8, window_id: ?[]const u8) ?[]const u8 {
+        const v = s.views.get(session_id) orelse return null;
+        const w = (if (window_id) |id| v.window(id) else null) orelse v.activeWindow() orelse return null;
+        return w.focused_block_id;
+    }
 
     /// Splits the pane showing `anchor_id`, putting a new shell beside it or below it.
     pub fn newSplit(s: *Server, session_id: []const u8, anchor_id: []const u8, horizontal: bool, before: bool) void {
@@ -1232,7 +1283,7 @@ pub const Server = struct {
             .anchor_id = anchor_id,
             .direction = if (horizontal) "horizontal" else "vertical",
             .side = if (before) "before" else "after",
-            .layout = shell_layout,
+            .layout = s.shellIn(anchor_id),
             .focus = true,
         });
     }
@@ -1268,7 +1319,7 @@ pub const Server = struct {
 
     /// A new shell in its own floating layer of the shown window.
     pub fn newFloating(s: *Server, session_id: []const u8, window_id: []const u8, bounds: view.Rect) void {
-        s.act(session_id, "session.new_layer", .{ .session_id = session_id, .window_id = window_id, .bounds = layerBounds(bounds), .layout = shell_layout, .focus = true });
+        s.act(session_id, "session.new_layer", .{ .session_id = session_id, .window_id = window_id, .bounds = layerBounds(bounds), .layout = s.shellIn(s.focusedIn(session_id, window_id)), .focus = true });
     }
 
     /// Moves a window just before another in the session's order, or to the end.
@@ -1320,7 +1371,7 @@ pub const Server = struct {
     }
 
     pub fn newWindow(s: *Server, session_id: []const u8) void {
-        s.act(session_id, "session.new_window", .{ .session_id = session_id, .layout = shell_layout });
+        s.act(session_id, "session.new_window", .{ .session_id = session_id, .layout = s.shellIn(s.focusedIn(session_id, null)) });
     }
 
     pub fn renameWindow(s: *Server, session_id: []const u8, window_id: []const u8, label: []const u8) void {
@@ -1533,7 +1584,7 @@ pub const Server = struct {
             s.call(method, payload, void, {}, acted);
             return;
         }
-        const encoded = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch return;
+        const encoded = std.json.Stringify.valueAlloc(gpa, payload, .{ .emit_null_optional_fields = false }) catch return;
         const p: Pending = .{
             .method = gpa.dupe(u8, method) catch return gpa.free(encoded),
             .payload = encoded,
@@ -1637,4 +1688,13 @@ test "a binding's arguments are read as JSON text" {
     try std.testing.expectEqualStrings("{\"n\":1}", text);
     try std.testing.expectEqual(@as(?[]const u8, null), argsText(std.testing.allocator, items[1]));
     try std.testing.expectEqual(@as(?[]const u8, null), argsText(std.testing.allocator, items[2]));
+}
+
+test "a reported folder becomes a path" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("/usr/share/zsh", Server.folderPath(&buf, "file://host.local/usr/share/zsh").?);
+    try std.testing.expectEqualStrings("/Users/me/my work", Server.folderPath(&buf, "file://h/Users/me/my%20work").?);
+    try std.testing.expectEqualStrings("/tmp", Server.folderPath(&buf, "/tmp").?);
+    try std.testing.expect(Server.folderPath(&buf, "file://hostonly") == null);
+    try std.testing.expect(Server.folderPath(&buf, "") == null);
 }
