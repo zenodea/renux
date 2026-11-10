@@ -51,7 +51,7 @@ const css =
     \\.settings-sample-row { padding: 12px; }
     \\.board { background-color: @compy_shell; padding: 14px 14px 12px 14px; }
     \\.board-title { font-weight: 700; font-size: 1.15em; margin-left: 4px; }
-    \\.board-column { background-color: alpha(@window_fg_color, 0.035); border-radius: 14px; padding: 10px 8px 8px 8px; }
+    \\.board-column { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; padding: 10px 8px 8px 8px; }
     \\.board-column-head { padding: 0 6px 2px 4px; }
     \\.board-column-title { font-weight: 700; }
     \\.board-count { color: @compy_secondary; font-size: 0.9em; }
@@ -67,8 +67,8 @@ const css =
     \\.board-session:first-child { margin-top: 0; }
     \\.board-grouping button { min-height: 26px; padding: 0 12px; font-size: 0.88em; }
     \\.board-empty { color: @compy_secondary; font-size: 0.9em; margin-top: 18px; }
-    \\.board-card { background-color: @view_bg_color; border-radius: 11px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @compy_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
-    \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.05); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
+    \\.board-card { background-color: mix(@view_bg_color, @window_fg_color, 0.05); border-radius: 10px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @compy_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
+    \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.09); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
     \\.board-card.attention { box-shadow: inset 0 0 0 1px alpha(@warning_color, 0.6), 0 1px 4px alpha(black, 0.12); }
     \\.board-card-title { font-weight: 600; }
     \\.board-card-message { color: @compy_secondary; font-size: 0.92em; }
@@ -81,7 +81,7 @@ const css =
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
     \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
     \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
-    \\.compy-sidebar list > row { border-radius: 8px; min-height: 30px; padding: 0 5px 0 8px; margin: 0; }
+    \\.compy-sidebar list > row { border-radius: 8px; min-height: 30px; padding: 0 5px 0 8px; margin: 0 0 3px 0; }
     \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
     \\.compy-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
     \\.compy-sidebar .row-title { font-size: 0.95em; }
