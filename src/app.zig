@@ -38,12 +38,12 @@ const css =
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
     \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
     \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
-    \\.compy-sidebar list > row { border-radius: 8px; min-height: 28px; padding: 0 4px 0 8px; margin: 0; }
+    \\.compy-sidebar list > row { border-radius: 8px; min-height: 30px; padding: 0 5px 0 8px; margin: 0; }
     \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
     \\.compy-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
     \\.compy-sidebar .row-title { font-size: 0.95em; }
     \\.row-more { opacity: 0; }
-    \\.row-more, .row-more > button { min-height: 22px; min-width: 22px; padding: 0; }
+    \\.row-more, .row-more > button { min-height: 20px; min-width: 24px; padding: 0; margin: 0; border-radius: 6px; }
     \\row:hover .row-more, row:selected .row-more { opacity: 0.6; }
     \\.session-heading { font-size: 0.82em; color: @compy_secondary; }
     \\.compy-sidebar list > row.session-row { min-height: 22px; margin-top: 8px; padding: 0 2px 0 8px; background: none; }
@@ -81,9 +81,10 @@ const css =
     \\.pane-card.focused .pane-tools, .pane-card:hover .pane-tools { opacity: 1; }
     \\.icon-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; opacity: 0.5; }
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
-    \\.find-bar { padding: 8px 8px 0 0; }
-    \\.content.alone .find-bar { padding-left: 8px; }
-    \\.find-count { color: @compy_secondary; font-size: 0.9em; min-width: 52px; }
+    \\.find-bar { margin: 16px 22px 18px 18px; padding: 4px 5px 4px 6px; min-width: 300px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
+    \\.find-bar entry { background: none; box-shadow: none; outline: none; border: none; min-height: 28px; padding-left: 6px; }
+    \\.find-bar entry > image:first-child { opacity: 0; margin: 0 -10px 0 -10px; }
+    \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
@@ -120,10 +121,10 @@ const css =
     \\.tab-strip > * { margin-top: 11px; margin-bottom: 5px; }
     \\window.tabs-above .content .workspace { margin-top: 0; }
     \\.content.alone .tab-strip { padding-left: 8px; }
-    \\.tab { border-radius: 9px; min-height: 30px; padding: 0 4px 0 10px; color: @compy_secondary; }
+    \\.tab { border-radius: 9px; min-height: 30px; padding: 0 5px 0 10px; color: @compy_secondary; }
     \\.tab:hover { background-color: alpha(@window_fg_color, 0.05); }
     \\.tab.active { background-color: alpha(@window_fg_color, 0.10); color: @window_fg_color; }
-    \\.tab .tab-close { opacity: 0; min-width: 20px; min-height: 20px; }
+    \\.tab .tab-close { opacity: 0; min-width: 20px; min-height: 20px; padding: 0; margin: 0; border-radius: 6px; }
     \\.tab:hover .tab-close, .tab.active .tab-close { opacity: 0.55; }
     \\window.tabs-above .compy-sidebar list > row.session-pick { min-height: 28px; margin-top: 2px; border-radius: 8px; }
     \\window.tabs-above .compy-sidebar list > row.session-pick:selected { background-color: alpha(@window_fg_color, 0.09); }
@@ -403,12 +404,14 @@ pub const App = struct {
         _ = a.stack.addNamed(a.status.as(gtk.Widget), "status");
         _ = a.stack.addNamed(a.connectPage(), "connect");
 
-        // Find, under the title.
-        const find_row = gtk.Box.new(.horizontal, 4);
+        // Find: a small bar that floats over the panes' top right corner, as in Rex.
+        const find_row = gtk.Box.new(.horizontal, 2);
         find_row.as(gtk.Widget).addCssClass("find-bar");
         a.find_entry = gtk.SearchEntry.new();
         a.find_entry.as(gtk.Widget).setHexpand(1);
-        a.find_entry.setPlaceholderText("Find in pane");
+        a.find_entry.setPlaceholderText("Find");
+        // Matches follow the typing at once.
+        a.find_entry.setSearchDelay(0);
         _ = gtk.SearchEntry.signals.search_changed.connect(a.find_entry, *App, &findChanged, a, .{});
         _ = gtk.SearchEntry.signals.activate.connect(a.find_entry, *App, &findNextSignal, a, .{});
         _ = gtk.SearchEntry.signals.next_match.connect(a.find_entry, *App, &findNextSignal, a, .{});
@@ -423,7 +426,17 @@ pub const App = struct {
         find_row.append(icons.button(.close, "Close find", "app.find-close").as(gtk.Widget));
         a.find_bar = gtk.Revealer.new();
         a.find_bar.setChild(find_row.as(gtk.Widget));
-        a.find_bar.setTransitionType(.slide_down);
+        a.find_bar.setTransitionType(.crossfade);
+        a.find_bar.setTransitionDuration(120);
+        a.find_bar.as(gtk.Widget).setHalign(.end);
+        a.find_bar.as(gtk.Widget).setValign(.start);
+
+        // Keys belong to the highlighted pane wherever the keyboard happens to sit: on a button
+        // just clicked, a sidebar row, another pane, or nowhere after a pane closed.
+        const stray = gtk.EventControllerKey.new();
+        stray.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.EventControllerKey.signals.key_pressed.connect(stray, *App, &strayKey, a, .{});
+        win.as(gtk.Widget).addController(stray.as(gtk.EventController));
 
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).addCssClass("content");
@@ -437,8 +450,11 @@ pub const App = struct {
         a.tab_strip.as(gtk.Widget).addCssClass("tab-strip");
         a.tab_strip.as(gtk.Widget).setVisible(0);
         card.append(a.tab_strip.as(gtk.Widget));
-        card.append(a.find_bar.as(gtk.Widget));
-        card.append(a.stack.as(gtk.Widget));
+        const body = gtk.Overlay.new();
+        body.setChild(a.stack.as(gtk.Widget));
+        body.addOverlay(a.find_bar.as(gtk.Widget));
+        body.as(gtk.Widget).setVexpand(1);
+        card.append(body.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
 
         const split = adw.OverlaySplitView.new();
@@ -581,6 +597,37 @@ pub const App = struct {
     fn sidebarDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
         settings.current.sidebar_width = a.split.getMaxSidebarWidth();
         settings.save();
+    }
+
+    /// A key pressed while the keyboard isn't in the highlighted pane goes to that pane, which
+    /// takes the keyboard back, so a prefix such as ctrl+a always works. Text fields, menus and
+    /// dialogs keep their keys.
+    fn strayKey(ctl: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: gdk.ModifierType, a: *App) callconv(.c) c_int {
+        const ws = a.workspace orelse return 0;
+        const tv = ws.focusedView() orelse return 0;
+        const pane = tv.widget();
+        if (pane.getMapped() == 0) return 0;
+        const focus = a.window.as(gtk.Root).getFocus();
+        if (focus) |f| inline for (.{ gtk.Popover, adw.Dialog }) |T| {
+            if (f.getAncestor(T.getGObjectType()) != null) return 0;
+        };
+        // Find in the pane: Command+F on a Mac, Ctrl+Shift+F elsewhere, as terminals have it.
+        const K = @import("keys.zig");
+        const mods = K.modsFromGdk(@bitCast(state));
+        const find_mods: u4 = if (builtin.os.tag == .macos) K.super else K.ctrl | K.shift;
+        if ((keyval == 'f' or keyval == 'F') and mods == find_mods) {
+            a.openFind();
+            return 1;
+        }
+        if (focus) |f| {
+            if (f == pane) return 0;
+            inline for (.{ gtk.Text, gtk.TextView }) |T| {
+                if (f.getAncestor(T.getGObjectType()) != null) return 0;
+            }
+        }
+        if (@import("keys.zig").isModifier(keyval)) return 0;
+        _ = pane.grabFocus();
+        return ctl.forward(pane);
     }
 
     fn sidebarShown(split: *adw.OverlaySplitView, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
@@ -1348,6 +1395,8 @@ pub const App = struct {
                 line.append(item.as(gtk.Widget));
                 const more = menuButton(windowMenu(session.id, w.id), "Window");
                 more.as(gtk.Widget).addCssClass("row-more");
+                // Its hover highlight keeps clear of the row's own edge, above, below and beside.
+                more.as(gtk.Widget).setValign(.center);
                 line.append(more.as(gtk.Widget));
                 const row = gtk.ListBoxRow.new();
                 row.setChild(line.as(gtk.Widget));
@@ -2895,9 +2944,9 @@ pub const App = struct {
     fn showFindCount(a: *App, index: ?usize) void {
         var buf: [32]u8 = undefined;
         const text = if (a.find_total == 0)
-            std.fmt.bufPrintSentinel(&buf, "None", .{}, 0) catch ""
+            std.fmt.bufPrintSentinel(&buf, "0/0", .{}, 0) catch ""
         else
-            std.fmt.bufPrintSentinel(&buf, "{d} of {d}", .{ (index orelse 0) + 1, a.find_total }, 0) catch "";
+            std.fmt.bufPrintSentinel(&buf, "{d}/{d}", .{ (index orelse 0) + 1, a.find_total }, 0) catch "";
         a.find_count.setText(text.ptr);
     }
 
