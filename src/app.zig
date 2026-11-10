@@ -140,6 +140,8 @@ const css =
     \\.welcome-icon { color: @accent_color; margin-bottom: 6px; }
     \\.diagnostics-text { font-family: monospace; font-size: 0.92em; }
     \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
+    \\.key-hints, .mode-chip { opacity: 0; transform: translateY(8px); transition: opacity 120ms ease-in, transform 120ms ease-in; }
+    \\.key-hints.shown, .mode-chip.shown { opacity: 1; transform: none; transition: opacity 140ms ease-out, transform 200ms cubic-bezier(0.2, 0.9, 0.3, 1); }
     \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
     \\.hint-desc { font-size: 0.92em; }
     \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
@@ -464,7 +466,8 @@ pub const App = struct {
         a.mode_chip.as(gtk.Widget).setHalign(.center);
         a.mode_chip.as(gtk.Widget).setValign(.end);
         a.mode_chip.as(gtk.Widget).setMarginBottom(18);
-        a.mode_chip.as(gtk.Widget).setVisible(0);
+        // The chip and the hints are always there, see-through until their `shown` class fades
+        // and slides them in; hiding fades them out the same way with what they last showed.
         a.mode_chip.as(gtk.Widget).setCanTarget(0);
         layered.addOverlay(a.mode_chip.as(gtk.Widget));
         a.hints = gtk.Box.new(.vertical, 0);
@@ -472,7 +475,6 @@ pub const App = struct {
         a.hints.as(gtk.Widget).setHalign(.center);
         a.hints.as(gtk.Widget).setValign(.end);
         a.hints.as(gtk.Widget).setMarginBottom(62);
-        a.hints.as(gtk.Widget).setVisible(0);
         a.hints.as(gtk.Widget).setCanTarget(0);
         layered.addOverlay(a.hints.as(gtk.Widget));
         a.activity = @import("activity.zig").Activity.create(a);
@@ -3225,11 +3227,9 @@ var start_font_size: c_int = 0;
 /// Fills the hint panel with what each key does next, in columns, or hides it.
 fn showHints(a: *App, items: []const termview.Hint) void {
     const w = a.hints.as(gtk.Widget);
+    // Hiding keeps the keys it showed while it fades out; they go when it's next filled.
+    if (items.len == 0 or !settings.current.key_hints) return w.removeCssClass("shown");
     while (w.getFirstChild()) |c| a.hints.remove(c);
-    if (items.len == 0 or !settings.current.key_hints) {
-        w.setVisible(0);
-        return;
-    }
     const grid = gtk.Grid.new();
     grid.setColumnSpacing(10);
     grid.setRowSpacing(5);
@@ -3252,7 +3252,7 @@ fn showHints(a: *App, items: []const termview.Hint) void {
         grid.attach(desc.as(gtk.Widget), col + 1, row, 1, 1);
     }
     a.hints.append(grid.as(gtk.Widget));
-    w.setVisible(1);
+    w.addCssClass("shown");
 }
 
 /// Groups hints: panes, then tabs, sessions, the rest of the app, and the config's own actions.
@@ -3411,7 +3411,7 @@ fn chordChanged(pending: []const u8) void {
     var buf: [200]u8 = undefined;
     const text = std.fmt.bufPrintSentinel(&buf, "{s} …", .{pending}, 0) catch return;
     a.mode_chip.setText(text.ptr);
-    a.mode_chip.as(gtk.Widget).setVisible(1);
+    a.mode_chip.as(gtk.Widget).addCssClass("shown");
 }
 
 fn freeData(data: ?*anyopaque) callconv(.c) void {
@@ -3423,7 +3423,7 @@ fn modeChanged() void {
     const a = mode_app orelse return;
     const mode = termview.keyMode();
     if (mode.len == 0) {
-        a.mode_chip.as(gtk.Widget).setVisible(0);
+        a.mode_chip.as(gtk.Widget).removeCssClass("shown");
         showHints(a, &.{});
         return;
     }
@@ -3440,7 +3440,7 @@ fn modeChanged() void {
     for (mode[0..n], 0..) |ch, i| upper[i] = std.ascii.toUpper(ch);
     const text = std.fmt.bufPrintSentinel(&buf, "{s} · Esc to leave", .{upper[0..n]}, 0) catch return;
     a.mode_chip.setText(text.ptr);
-    a.mode_chip.as(gtk.Widget).setVisible(1);
+    a.mode_chip.as(gtk.Widget).addCssClass("shown");
 }
 
 const SplitOf = struct { id: []const u8, rect: view.Rect, ratio: f64, before: *const view.Node, after: *const view.Node };
