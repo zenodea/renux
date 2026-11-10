@@ -147,13 +147,19 @@ pub const Server = struct {
 
     pub fn destroy(s: *Server) void {
         s.wanted = false;
+        s.observer = null;
+        s.performer = null;
         if (s.retry_timer != 0) _ = glib.Source.remove(s.retry_timer);
+        // Closing the connection fails every call still waiting, and their handlers use the server.
+        // So it closes first, while all of the server is still here, and nothing is torn down
+        // until it has. `attempt` is the connection whether it is still opening or in use.
+        const c = s.attempt orelse s.control;
+        s.attempt = null;
+        s.control = null;
+        if (c) |open| open.close();
         var it = s.streams.valueIterator();
         while (it.next()) |st| st.*.destroy();
         s.streams.deinit(gpa);
-        s.attempt = null;
-        if (s.control) |c| c.close();
-        s.control = null;
         var vit = s.views.valueIterator();
         while (vit.next()) |v| v.*.destroy();
         s.views.deinit(gpa);
@@ -166,6 +172,8 @@ pub const Server = struct {
         s.alert_text.deinit(gpa);
         s.alert_session.deinit(gpa);
         s.alert_block.deinit(gpa);
+        s.clipboard_text.deinit(gpa);
+        s.overrides_arena.deinit();
         freeKeys(&s.fetching);
         freeKeys(&s.attached);
         s.clearSessions();

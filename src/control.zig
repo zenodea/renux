@@ -71,16 +71,20 @@ pub const Control = struct {
     welcomed: bool = false,
     /// The socket closed by itself and is already gone.
     socket_done: bool = false,
+    /// The owner closed or abandoned this control. Its memory is freed from the main loop, never
+    /// inside the call that dropped it, so a callback may drop the control it was called by.
+    dead: bool = false,
 
     pub fn open(url: []const u8, label: []const u8, version: []const u8, reconnect_token: ?[]const u8, listener: Listener) !*Control {
         const c = try gpa.create(Control);
-        c.* = .{
-            .socket = undefined,
-            .listener = listener,
-            .label = try gpa.dupe(u8, label[0..@min(label.len, 48)]),
-            .version = try gpa.dupe(u8, version),
-            .token = if (reconnect_token) |t| try gpa.dupe(u8, t) else null,
-        };
+        errdefer gpa.destroy(c);
+        const own_label = try gpa.dupe(u8, label[0..@min(label.len, 48)]);
+        errdefer gpa.free(own_label);
+        const own_version = try gpa.dupe(u8, version);
+        errdefer gpa.free(own_version);
+        const own_token = if (reconnect_token) |t| try gpa.dupe(u8, t) else null;
+        errdefer if (own_token) |t| gpa.free(t);
+        c.* = .{ .socket = undefined, .listener = listener, .label = own_label, .version = own_version, .token = own_token };
         c.socket = try ws.Socket.open(.{ .url = url, .path = "/api/control", .protocol = protocol }, .{
             .ctx = c,
             .on_open = onOpen,
@@ -98,14 +102,20 @@ pub const Control = struct {
     pub fn callTimeout(c: *Control, method: []const u8, payload: anytype, timeout_ms: c_uint, cb: Callback) void {
         const id = c.next_id;
         c.next_id += 1;
+        // Every call ends in exactly one answer to `cb`, so make room for it before sending.
+        const not_sent: Result = .{ .err = .{ .code = "disconnected", .message = "Not connected to the server" } };
+        const p = gpa.create(Pending) catch return cb.func(cb.ctx, not_sent);
+        c.pending.ensureUnusedCapacity(gpa, 1) catch {
+            gpa.destroy(p);
+            return cb.func(cb.ctx, not_sent);
+        };
         if (!c.send(id, method, payload)) {
-            cb.func(cb.ctx, .{ .err = .{ .code = "disconnected", .message = "Not connected to the server" } });
-            return;
+            gpa.destroy(p);
+            return cb.func(cb.ctx, not_sent);
         }
-        const p = gpa.create(Pending) catch return;
         p.* = .{ .control = c, .id = id, .cb = cb };
         p.timer = glib.timeoutAdd(timeout_ms, &timedOut, p);
-        c.pending.put(gpa, id, p) catch {};
+        c.pending.putAssumeCapacity(id, p);
     }
 
     /// Sends a request without waiting. Requests go out in order, which keeps typing in order.
@@ -128,29 +138,42 @@ pub const Control = struct {
             return false;
         };
         defer gpa.free(text);
-        if (c.socket_done) return false;
+        if (c.socket_done or c.dead) return false;
         return c.socket.sendText(text);
     }
 
     /// Ends the client on the server at once.
     pub fn close(c: *Control) void {
+        if (c.dead) return;
+        c.dead = true;
         if (!c.socket_done) c.socket.close();
         c.destroy();
     }
 
     /// Drops the connection without a close frame, so the server keeps the client for a resume.
     pub fn abandon(c: *Control) void {
+        if (c.dead) return;
+        c.dead = true;
         if (!c.socket_done) c.socket.abandon();
         c.destroy();
     }
 
+    /// Fails what's still waiting now; the socket is closed, so nothing else can arrive.
     fn destroy(c: *Control) void {
+        c.failAll("disconnected", "Not connected to the server");
+        _ = glib.idleAdd(&free, c);
+    }
+
+    fn free(data: ?*anyopaque) callconv(.c) c_int {
+        const c: *Control = @ptrCast(@alignCast(data.?));
+        // A callback failed above may have tried another call; `send` refused it, so this is empty.
         c.failAll("disconnected", "Not connected to the server");
         c.pending.deinit(gpa);
         gpa.free(c.label);
         gpa.free(c.version);
         if (c.token) |t| gpa.free(t);
         gpa.destroy(c);
+        return 0;
     }
 
     fn failAll(c: *Control, code: []const u8, message: []const u8) void {
@@ -242,5 +265,7 @@ fn onClose(ctx: *anyopaque, code: u16, reason: []const u8) void {
     // The socket is finished; the owner decides whether to drop this control.
     c.socket_done = true;
     c.failAll("disconnected", reason);
+    // A failed call may already have made the owner drop this control; it has heard enough then.
+    if (c.dead) return;
     c.listener.on_closed(c.listener.ctx, c, reason, code);
 }
