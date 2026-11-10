@@ -66,7 +66,7 @@ fn fromOutput(text: []const u8) Status {
 
 pub fn parse(text: []const u8) Status {
     var st: Status = .{};
-    var parsed = std.json.parseFromSlice(json.Value, gpa, text, .{}) catch return .{ .problem = "Tailscale gave an answer Compy couldn't read" };
+    var parsed = std.json.parseFromSlice(json.Value, gpa, text, .{}) catch return .{ .problem = "Tailscale gave an answer Renux couldn't read" };
     defer parsed.deinit();
     const root = parsed.value;
     st.running = std.mem.eql(u8, json.str(root, "BackendState") orelse "", "Running");

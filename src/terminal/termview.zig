@@ -44,7 +44,7 @@ pub const Font = struct {
 
     pub fn init(name: [:0]const u8) Font {
         const desc = pango.FontDescription.fromString(name.ptr);
-        // Nerd Font icons fall back to the symbols that come with Compy, unless the font has them.
+        // Nerd Font icons fall back to the symbols that come with Renux, unless the font has them.
         if (fonts.registered) if (desc.getFamily()) |fam| {
             const family = std.mem.span(fam);
             if (std.mem.indexOf(u8, family, "Nerd") == null) {
@@ -100,7 +100,7 @@ pub var term_opacity: f64 = 1;
 /// text isn't laid out again at every step of the drag, and take the new size once at the end.
 pub var hold_sizes: bool = false;
 
-/// How many panes are animating a scroll, for COMPY_PERF.
+/// How many panes are animating a scroll, for RENUX_PERF.
 pub var scroll_ticking: u32 = 0;
 
 /// The terminal's own widget. It draws through GTK's snapshot, so text goes to the GPU's glyph
@@ -113,7 +113,7 @@ const Canvas = extern struct {
     const Self = @This();
 
     pub const getGObjectType = gobject.ext.defineClass(Self, .{
-        .name = "CompyTerminal",
+        .name = "RenuxTerminal",
         .classInit = &Class.init,
     });
 
@@ -437,7 +437,7 @@ pub const TermView = struct {
         v.updateTitle();
     }
 
-    /// The pane's title, as Rex shows it: a shell as "zsh ~/compy", anything else by the title it
+    /// The pane's title, as Rex shows it: a shell as "zsh ~/renux", anything else by the title it
     /// set, then by what runs and where.
     pub fn title(v: *TermView, out: []u8) []const u8 {
         const info = v.server.blockInfo(v.block_id);
@@ -676,13 +676,13 @@ pub const TermView = struct {
     }
 
     /// Start-up: lets terminals decode the PNGs programs send as images, and turns on the timing
-    /// log when COMPY_PERF is set.
+    /// log when RENUX_PERF is set.
     pub fn enablePerfLog() void {
         if (!png_decoder_set) {
             png_decoder_set = true;
             term_mod.Term.setPngDecoder(&decodePng);
         }
-        perf_log = @import("build_options").dev and std.c.getenv("COMPY_PERF") != null;
+        perf_log = @import("build_options").dev and std.c.getenv("RENUX_PERF") != null;
     }
 
     /// A key press, from the keyboard or the development script.
@@ -804,7 +804,7 @@ pub const TermView = struct {
             if (std.mem.startsWith(u8, action, prefix)) break true;
         } else false;
         if (!local) return v.server.runAction(v.session_id, v.block_id, action, args);
-        if (!v.server.performLocal(v.session_id, action, args)) v.server.notifyMessage("Compy can't do that action yet");
+        if (!v.server.performLocal(v.session_id, action, args)) v.server.notifyMessage("Renux can't do that action yet");
     }
 
     fn modeKey(v: *TermView, keyval: c_uint, mods: u4) void {
@@ -1416,7 +1416,7 @@ pub const TermView = struct {
     fn menuCopyOutput(v: *TermView) void {
         const t = v.term() orelse return;
         if (!t.selectOutputAt(v.menu_cell[0], v.menu_cell[1])) {
-            v.server.notifyMessage("Your shell doesn't mark command output, so Compy can't find it");
+            v.server.notifyMessage("Your shell doesn't mark command output, so Renux can't find it");
             return;
         }
         v.copySelection(false);
@@ -1680,7 +1680,7 @@ fn layoutOnBaseline(sn: *gtk.Snapshot, layout: *pango.Layout, color: gdk.RGBA, x
 var perf_total: i64 = 0;
 var perf_count: i64 = 0;
 var perf_log = false;
-/// With COMPY_PERF: when the last key was pressed and when the server's answer arrived.
+/// With RENUX_PERF: when the last key was pressed and when the server's answer arrived.
 var key_at: i64 = 0;
 var echo_at: i64 = 0;
 

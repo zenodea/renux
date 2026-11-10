@@ -147,7 +147,7 @@ pub fn programName(process: []const u8) []const u8 {
     return std.mem.trimStart(u8, process[0 .. std.mem.indexOfScalar(u8, process, '/') orelse process.len], "-");
 }
 
-/// What runs in a pane and where, such as "zsh ~/compy": the program's name, then its folder
+/// What runs in a pane and where, such as "zsh ~/renux": the program's name, then its folder
 /// when one is known. A pane that reported nothing is a shell.
 pub fn displayTitle(buf: []u8, process: ?[]const u8, folder: ?[]const u8) []const u8 {
     const name = programName(process orelse "shell");
@@ -156,7 +156,7 @@ pub fn displayTitle(buf: []u8, process: ?[]const u8, folder: ?[]const u8) []cons
     return std.fmt.bufPrint(buf, "{s} {s}", .{ name, shortFolder(&folder_buf, f) }) catch name;
 }
 
-/// The folder part of a reported directory, shortened under a home directory: `~/compy`.
+/// The folder part of a reported directory, shortened under a home directory: `~/renux`.
 pub fn shortFolder(buf: []u8, pwd: []const u8) []const u8 {
     var path = pwd;
     if (std.mem.startsWith(u8, path, "file://")) {
@@ -191,7 +191,7 @@ test "program names map to icons" {
     try std.testing.expect(!isAgent("nvim"));
     try std.testing.expect(!isAgent(null));
     var buf: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("~/compy", shortFolder(&buf, "file://mac.local/Users/someone/compy"));
+    try std.testing.expectEqualStrings("~/renux", shortFolder(&buf, "file://mac.local/Users/someone/renux"));
     try std.testing.expectEqualStrings("~", shortFolder(&buf, "/home/someone"));
     try std.testing.expectEqualStrings("/etc", shortFolder(&buf, "/etc"));
 }
@@ -200,7 +200,7 @@ test "titles name the program and its folder" {
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("zsh", programName("-zsh"));
     try std.testing.expectEqualStrings("node", programName("node/claude.js"));
-    try std.testing.expectEqualStrings("zsh ~/compy", displayTitle(&buf, "-zsh", "/home/someone/compy"));
+    try std.testing.expectEqualStrings("zsh ~/renux", displayTitle(&buf, "-zsh", "/home/someone/renux"));
     try std.testing.expectEqualStrings("claude", displayTitle(&buf, "claude", null));
     try std.testing.expectEqualStrings("shell /etc", displayTitle(&buf, null, "/etc"));
     // A title too long for the buffer falls back to the name alone.

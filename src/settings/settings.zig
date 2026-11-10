@@ -1,4 +1,4 @@
-//! Compy's settings, kept in ~/.config/compy/settings.ini. Everything here only changes this
+//! Renux's settings, kept in ~/.config/renux/settings.ini. Everything here only changes this
 //! app; nothing is sent to a Rex server.
 const std = @import("std");
 const glib = @import("glib");
@@ -16,7 +16,7 @@ pub const PaddingColor = enum { terminal, theme };
 
 pub const Host = struct { label: []u8, url: []u8 };
 
-/// A key sequence set in Compy for an action, over the config's own. Empty keys unbind it.
+/// A key sequence set in Renux for an action, over the config's own. Empty keys unbind it.
 pub const Shortcut = struct { keys: []u8, action: []u8, args: []u8 };
 
 pub const Settings = struct {
@@ -47,7 +47,7 @@ pub const Settings = struct {
     key_hints: bool = true,
     /// Whether the welcome pages have been seen.
     welcomed: bool = false,
-    /// Show the window at launch; off starts hidden until `compy --toggle`.
+    /// Show the window at launch; off starts hidden until `renux --toggle`.
     show_on_launch: bool = true,
     /// Two-finger swipes sideways switch tabs.
     trackpad_gestures: bool = true,
@@ -58,7 +58,7 @@ pub const Settings = struct {
     focus_follows_mouse: bool = false,
     /// How much panes without the keyboard fade, 0 to 0.6.
     fade_inactive: f64 = 0,
-    /// Fade every pane while Compy isn't the active window.
+    /// Fade every pane while Renux isn't the active window.
     fade_inactive_window: bool = false,
     /// The pane with the keyboard shows a colored border.
     highlight_border: bool = true,
@@ -122,7 +122,7 @@ pub const Settings = struct {
     shortcuts: std.ArrayList(Shortcut) = .empty,
 };
 
-/// Sets (or, with `keys` null, removes) Compy's own shortcut for an action and its arguments.
+/// Sets (or, with `keys` null, removes) Renux's own shortcut for an action and its arguments.
 pub fn setShortcut(action: []const u8, args: []const u8, keys: ?[]const u8) void {
     const list = &current.shortcuts;
     for (list.items, 0..) |sc, i| if (std.mem.eql(u8, sc.action, action) and std.mem.eql(u8, sc.args, args)) {
@@ -155,7 +155,7 @@ pub var current: Settings = undefined;
 
 const log = std.log.scoped(.settings);
 
-/// Set when settings.ini is there but can't be read or written. Compy then leaves the file
+/// Set when settings.ini is there but can't be read or written. Renux then leaves the file
 /// alone, so a slip made editing it by hand costs nothing; the Settings window shows this.
 pub var problem: ?[:0]const u8 = null;
 
@@ -167,14 +167,14 @@ fn configDir() []const u8 {
 }
 
 fn dir() ?[:0]u8 {
-    return std.fmt.allocPrintSentinel(gpa, "{s}/compy", .{configDir()}, 0) catch null;
+    return std.fmt.allocPrintSentinel(gpa, "{s}/renux", .{configDir()}, 0) catch null;
 }
 
 fn file() ?[:0]u8 {
-    return std.fmt.allocPrintSentinel(gpa, "{s}/compy/settings.ini", .{configDir()}, 0) catch null;
+    return std.fmt.allocPrintSentinel(gpa, "{s}/renux/settings.ini", .{configDir()}, 0) catch null;
 }
 
-// Every field of `Settings` that isn't a list is one key of the [compy] group, read and written
+// Every field of `Settings` that isn't a list is one key of the [renux] group, read and written
 // from the field itself: its name with dashes is the key, its type says how it is stored and its
 // default is the one in the struct. So a new setting is declared once, there. Only what a field
 // can't say lives here: keys that differ from the name, the range of each number and the
@@ -242,14 +242,14 @@ fn textOf(comptime name: []const u8) []const u8 {
 
 fn str(kf: *glib.KeyFile, key: [*:0]const u8, default: []const u8) []u8 {
     // Out of memory leaves it empty, which every use takes and `gpa.free` accepts.
-    const v = kf.getString("compy", key, null) orelse return gpa.dupe(u8, default) catch &.{};
+    const v = kf.getString("renux", key, null) orelse return gpa.dupe(u8, default) catch &.{};
     defer glib.free(v);
     return gpa.dupe(u8, std.mem.span(v)) catch &.{};
 }
 
 fn boolean(kf: *glib.KeyFile, key: [*:0]const u8, default: bool) bool {
     var err: ?*glib.Error = null;
-    const v = kf.getBoolean("compy", key, &err);
+    const v = kf.getBoolean("renux", key, &err);
     if (err) |e| {
         e.free();
         return default;
@@ -259,7 +259,7 @@ fn boolean(kf: *glib.KeyFile, key: [*:0]const u8, default: bool) bool {
 
 fn number(kf: *glib.KeyFile, key: [*:0]const u8, default: f64, min: f64, max: f64) f64 {
     var err: ?*glib.Error = null;
-    const v = kf.getDouble("compy", key, &err);
+    const v = kf.getDouble("renux", key, &err);
     if (err) |e| {
         e.free();
         return default;
@@ -268,7 +268,7 @@ fn number(kf: *glib.KeyFile, key: [*:0]const u8, default: f64, min: f64, max: f6
 }
 
 fn enumOf(comptime E: type, kf: *glib.KeyFile, key: [*:0]const u8, default: E) E {
-    const v = kf.getString("compy", key, null) orelse return default;
+    const v = kf.getString("renux", key, null) orelse return default;
     defer glib.free(v);
     return std.meta.stringToEnum(E, std.mem.span(v)) orelse default;
 }
@@ -300,12 +300,12 @@ fn writeScalars(kf: *glib.KeyFile, s: *const Settings) error{OutOfMemory}!void {
             []u8 => {
                 const z = try gpa.dupeSentinel(u8, v, 0);
                 defer gpa.free(z);
-                kf.setString("compy", key, z.ptr);
+                kf.setString("renux", key, z.ptr);
             },
-            bool => kf.setBoolean("compy", key, @intFromBool(v)),
-            f64 => kf.setDouble("compy", key, v),
-            u32 => kf.setDouble("compy", key, @floatFromInt(v)),
-            else => kf.setString("compy", key, @tagName(v)),
+            bool => kf.setBoolean("renux", key, @intFromBool(v)),
+            f64 => kf.setDouble("renux", key, v),
+            u32 => kf.setDouble("renux", key, @floatFromInt(v)),
+            else => kf.setString("renux", key, @tagName(v)),
         }
     }
 }
@@ -356,7 +356,7 @@ fn toKeyFile(s: *const Settings) error{OutOfMemory}!*glib.KeyFile {
 
 const Read = enum { ok, missing, broken };
 
-/// Reads settings.ini into `kf`, keeping its comments and the keys Compy doesn't know.
+/// Reads settings.ini into `kf`, keeping its comments and the keys Renux doesn't know.
 fn readFile(kf: *glib.KeyFile) Read {
     const f = file() orelse return .missing;
     defer gpa.free(f);
@@ -373,12 +373,64 @@ const unreadable = "settings.ini can't be read, so changes made now aren't saved
 const unwritable = "settings.ini can't be written, so changes made now aren't saved.";
 
 /// What this process last read from or wrote to the file. A save writes only the keys that
-/// differ from it, so the changes another Compy window made in the meantime stay.
+/// differ from it, so the changes another Renux window made in the meantime stay.
 var base: ?*glib.KeyFile = null;
 var dirty = false;
 var timer: c_uint = 0;
 
+/// The app was first called Compy and kept its files in ~/.config/compy under a [compy] group.
+/// A person who has those and nothing under the new name keeps them: the folder is renamed,
+/// custom themes and all, and the group with it.
+fn adoptOldName() void {
+    const new = dir() orelse return;
+    defer gpa.free(new);
+    if (glib.fileTest(new.ptr, .{ .exists = true }) != 0) return;
+    const old = std.fmt.allocPrintSentinel(gpa, "{s}/compy", .{configDir()}, 0) catch return;
+    defer gpa.free(old);
+    if (glib.fileTest(old.ptr, .{ .is_dir = true }) == 0) return;
+    if (std.c.rename(old.ptr, new.ptr) != 0) return;
+    const f = file() orelse return;
+    defer gpa.free(f);
+    var contents: [*]u8 = undefined;
+    var len: usize = 0;
+    if (glib.fileGetContents(f.ptr, &contents, &len, null) == 0) return;
+    defer glib.free(contents);
+    const text = std.mem.replaceOwned(u8, gpa, contents[0..len], "[compy]", "[renux]") catch return;
+    defer gpa.free(text);
+    _ = glib.fileSetContents(f.ptr, @ptrCast(text.ptr), @intCast(text.len), null);
+}
+
+test adoptOldName {
+    var tmp_buf: [64]u8 = undefined;
+    const tmp = std.fmt.bufPrintSentinel(&tmp_buf, "/tmp/renux-adopt-{d}", .{std.c.getpid()}, 0) catch unreachable;
+    var path_buf: [128]u8 = undefined;
+    const old = std.fmt.bufPrintSentinel(&path_buf, "{s}/compy", .{tmp}, 0) catch unreachable;
+    _ = glib.mkdirWithParents(old.ptr, 0o700);
+    var ini_buf: [160]u8 = undefined;
+    const old_ini = std.fmt.bufPrintSentinel(&ini_buf, "{s}/settings.ini", .{old}, 0) catch unreachable;
+    const before = "[compy]\nfont-size=17\n";
+    _ = glib.fileSetContents(old_ini.ptr, before, before.len, null);
+    const saved = test_dir;
+    test_dir = tmp;
+    defer test_dir = saved;
+    adoptOldName();
+    const f = file().?;
+    defer gpa.free(f);
+    var contents: [*]u8 = undefined;
+    var len: usize = 0;
+    try std.testing.expect(glib.fileGetContents(f.ptr, &contents, &len, null) != 0);
+    defer glib.free(contents);
+    try std.testing.expectEqualStrings("[renux]\nfont-size=17\n", contents[0..len]);
+    try std.testing.expect(glib.fileTest(old.ptr, .{ .exists = true }) == 0);
+    _ = std.c.unlink(f.ptr);
+    const d = dir().?;
+    defer gpa.free(d);
+    _ = std.c.rmdir(d.ptr);
+    _ = std.c.rmdir(tmp.ptr);
+}
+
 pub fn load() void {
+    adoptOldName();
     const kf = glib.KeyFile.new();
     defer kf.unref();
     problem = if (readFile(kf) == .broken) unreadable else null;
@@ -431,10 +483,10 @@ fn appendShortcut(keys: []const u8, action: []const u8, args: []const u8) void {
     };
 }
 
-/// The first version kept one server address in ~/.config/compy/server.
+/// The first version kept one server address in ~/.config/renux/server.
 fn migrateOldServer() void {
     if (current.hosts.items.len > 0) return;
-    const old = std.fmt.allocPrintSentinel(gpa, "{s}/compy/server", .{configDir()}, 0) catch return;
+    const old = std.fmt.allocPrintSentinel(gpa, "{s}/renux/server", .{configDir()}, 0) catch return;
     defer gpa.free(old);
     var contents: [*]u8 = undefined;
     var len: usize = 0;
@@ -494,7 +546,7 @@ pub fn folder() ?[:0]u8 {
 }
 
 /// Reads the file again after something else wrote it: a script that switches themes, another
-/// Compy window, an editor. Whatever this window has yet to save is written first, so nothing
+/// Renux window, an editor. Whatever this window has yet to save is written first, so nothing
 /// is lost either way. Only plain settings are taken up, not the lists (hosts, shortcuts,
 /// recent folders), which a running window keeps as they are. True if any setting changed.
 pub fn reload() bool {
@@ -543,7 +595,7 @@ fn onTimer(_: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-/// Writes what changed now: as Compy quits, and for changes another window is about to read.
+/// Writes what changed now: as Renux quits, and for changes another window is about to read.
 pub fn flush() void {
     if (timer != 0) {
         _ = glib.Source.remove(timer);
@@ -628,7 +680,7 @@ fn clearForTest() void {
 
 /// A folder of its own for one test's settings.ini, with `text` in the file when given.
 fn testFolder(text: ?[]const u8) ![:0]u8 {
-    const tmp = glib.Dir.makeTmp("compy-test-XXXXXX", null) orelse return error.NoTempFolder;
+    const tmp = glib.Dir.makeTmp("renux-test-XXXXXX", null) orelse return error.NoTempFolder;
     defer glib.free(tmp);
     const root = try gpa.dupeSentinel(u8, std.mem.span(tmp), 0);
     test_dir = root;
@@ -710,12 +762,12 @@ test "every setting comes back as it was saved" {
 }
 
 test "a save keeps what another window wrote, unknown keys and comments" {
-    const root = try testFolder("# mine\n[compy]\ntheme=Nord\nfrom-the-future=1\n");
+    const root = try testFolder("# mine\n[renux]\ntheme=Nord\nfrom-the-future=1\n");
     defer removeTestFolder(root);
     load();
     try std.testing.expectEqualStrings("Nord", current.theme);
     // Another window changes the theme and adds a host while this one is open.
-    try writeTestFile("# mine\n[compy]\ntheme=Dracula\nfrom-the-future=1\n\n[hosts]\nlabels=box;\nurls=http://box:8765;\n");
+    try writeTestFile("# mine\n[renux]\ntheme=Dracula\nfrom-the-future=1\n\n[hosts]\nlabels=box;\nurls=http://box:8765;\n");
     current.tight = true;
     save();
     flush();
@@ -731,7 +783,7 @@ test "a save keeps what another window wrote, unknown keys and comments" {
 }
 
 test "a settings file that can't be read is left alone" {
-    const broken = "[compy\ntheme=Nord\n";
+    const broken = "[renux\ntheme=Nord\n";
     const root = try testFolder(broken);
     defer removeTestFolder(root);
     load();
@@ -744,7 +796,7 @@ test "a settings file that can't be read is left alone" {
     defer gpa.free(text);
     try std.testing.expectEqualStrings(broken, text);
     // Once the file is fixed, the change waiting to be saved goes in.
-    try writeTestFile("[compy]\ntheme=Nord\n");
+    try writeTestFile("[renux]\ntheme=Nord\n");
     flush();
     try std.testing.expect(problem == null);
     const fixed = try readTestFile();

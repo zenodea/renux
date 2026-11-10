@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>dev.compy.linux</id>
-  <name>Compy</name>
+  <id>dev.renux</id>
+  <name>Renux</name>
   <summary>A native client for Rex, the terminal multiplexer</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
-  <developer id="dev.compy">
-    <name>Compy</name>
+  <developer id="dev.renux">
+    <name>Renux</name>
   </developer>
   <description>
     <p>
-      Compy shows the sessions, tabs and panes of your Rex servers in a native window, with live
+      Renux shows the sessions, tabs and panes of your Rex servers in a native window, with live
       terminals, floating panes, key bindings from your Rex config and the status of the programs
       and agents running in each pane.
     </p>
@@ -21,9 +21,9 @@
       <li>Themes that follow the host or the system, and your own custom themes</li>
     </ul>
   </description>
-  <launchable type="desktop-id">dev.compy.linux.desktop</launchable>
+  <launchable type="desktop-id">dev.renux.desktop</launchable>
   <provides>
-    <binary>compy</binary>
+    <binary>renux</binary>
   </provides>
   <categories>
     <category>Development</category>

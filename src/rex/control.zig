@@ -210,7 +210,7 @@ fn onOpen(ctx: *anyopaque) void {
         .client = .{
             .kind = "app",
             .platform = "other",
-            .name = "Compy",
+            .name = "Renux",
             .version = c.version,
             .label = c.label,
         },

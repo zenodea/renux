@@ -1,5 +1,5 @@
-//! Custom themes: made and edited in Compy, saved as Ghostty theme files in
-//! ~/.config/compy/themes, and picked like any other theme.
+//! Custom themes: made and edited in Renux, saved as Ghostty theme files in
+//! ~/.config/renux/themes, and picked like any other theme.
 const std = @import("std");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
@@ -14,7 +14,7 @@ const gpa = std.heap.c_allocator;
 
 /// The folder custom themes live in, created when needed.
 pub fn dir() ?[:0]u8 {
-    const d = std.fmt.allocPrintSentinel(gpa, "{s}/compy/themes", .{std.mem.span(glib.getUserConfigDir())}, 0) catch return null;
+    const d = std.fmt.allocPrintSentinel(gpa, "{s}/renux/themes", .{std.mem.span(glib.getUserConfigDir())}, 0) catch return null;
     _ = glib.mkdirWithParents(d.ptr, 0o700);
     return d;
 }
@@ -226,7 +226,7 @@ pub fn open(parent: *gtk.Widget, path: ?[]const u8, start: stream.Colors, ctx: *
     };
     _ = gtk.Button.signals.clicked.connect(save_button, *Editor, &H.saved, e, .{});
     _ = gtk.Button.signals.clicked.connect(regen, *Editor, &H.regenerated, e, .{});
-    dialog.as(gobject.Object).setDataFull("compy-theme-editor", e, &H.freed);
+    dialog.as(gobject.Object).setDataFull("renux-theme-editor", e, &H.freed);
     dialog.present(parent);
 }
 

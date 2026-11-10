@@ -4,18 +4,18 @@ const App = @import("app/app.zig").App;
 /// For the few standard library calls that need it.
 pub var io: std.Io = undefined;
 
-/// Where the running Compy writes its process ID, for `compy --toggle`.
+/// Where the running Renux writes its process ID, for `renux --toggle`.
 fn pidPath(buf: []u8) ?[:0]const u8 {
     const glib = @import("glib");
-    return std.fmt.bufPrintSentinel(buf, "{s}/compy.pid", .{std.mem.span(glib.getUserRuntimeDir())}, 0) catch null;
+    return std.fmt.bufPrintSentinel(buf, "{s}/renux.pid", .{std.mem.span(glib.getUserRuntimeDir())}, 0) catch null;
 }
 
-/// The process ID file, held open and locked for as long as this Compy runs. The lock, which the
+/// The process ID file, held open and locked for as long as this Renux runs. The lock, which the
 /// system drops when the process ends however it ends, is what says the ID in the file is a
-/// live Compy and not a number some other program has since been given.
+/// live Renux and not a number some other program has since been given.
 var pid_fd: std.c.fd_t = -1;
 
-/// Makes this process the one `compy --toggle` reaches, unless a running Compy already is.
+/// Makes this process the one `renux --toggle` reaches, unless a running Renux already is.
 pub fn claimToggle() void {
     if (pid_fd >= 0) return;
     var buf: [512]u8 = undefined;
@@ -33,7 +33,7 @@ pub fn claimToggle() void {
     pid_fd = fd;
 }
 
-/// Gives the toggle up as Compy quits.
+/// Gives the toggle up as Renux quits.
 fn releaseToggle() void {
     if (pid_fd < 0) return;
     var buf: [512]u8 = undefined;
@@ -42,14 +42,14 @@ fn releaseToggle() void {
     pid_fd = -1;
 }
 
-/// The running Compy that `--toggle` should reach, if there is one.
+/// The running Renux that `--toggle` should reach, if there is one.
 fn toggleTarget() ?std.c.pid_t {
     var buf: [512]u8 = undefined;
     const path = pidPath(&buf) orelse return null;
     const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
     if (fd < 0) return null;
     defer _ = std.c.close(fd);
-    // Getting the lock means no Compy holds it: the file was left by one that has gone.
+    // Getting the lock means no Renux holds it: the file was left by one that has gone.
     if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) == 0) return null;
     var text: [32]u8 = undefined;
     const n = std.c.read(fd, &text, text.len);
@@ -60,11 +60,11 @@ fn toggleTarget() ?std.c.pid_t {
 
 pub fn main(init: std.process.Init) !void {
     io = init.io;
-    // `compy --toggle`, for a desktop shortcut: shows or hides the running Compy.
+    // `renux --toggle`, for a desktop shortcut: shows or hides the running Renux.
     var args = init.minimal.args.iterate();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--version")) {
-            const text = "compy " ++ @import("build_options").version ++ "\n";
+            const text = "renux " ++ @import("build_options").version ++ "\n";
             _ = std.c.write(1, text.ptr, text.len);
             return;
         }
@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     _ = @import("glib").setenv("GSK_CACHE_TIMEOUT", "86400", 0);
     // Before GTK starts, which is when Pango first lists the fonts.
     @import("terminal/fonts.zig").registerBundled();
-    if (@import("builtin").os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("platform/macos.zig").neverActivate();
+    if (@import("builtin").os.tag == .macos and std.c.getenv("RENUX_NOFOCUS") != null) @import("platform/macos.zig").neverActivate();
     const app = try App.create();
     const code = app.run();
     // A setting changed in the last second is still waiting to be written.

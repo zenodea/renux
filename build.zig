@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
 
     // The version, from build.zig.zon, and whether the development hooks are built in:
     // `-Ddev` adds the test script, screenshots and the frame log, which releases leave out.
-    const dev = b.option(bool, "dev", "Build in the development hooks (COMPY_SCRIPT, COMPY_SHOT, COMPY_PERF)") orelse false;
+    const dev = b.option(bool, "dev", "Build in the development hooks (RENUX_SCRIPT, RENUX_SHOT, RENUX_PERF)") orelse false;
     const options = b.addOptions();
     options.addOption([]const u8, "version", @import("build.zig.zon").version);
     options.addOption(bool, "dev", dev);
@@ -52,19 +52,19 @@ pub fn build(b: *std.Build) void {
     vt_header.defineCMacro("GHOSTTY_STATIC", "");
     mod.addImport("vtc", vt_header.createModule());
 
-    const exe = b.addExecutable(.{ .name = "compy", .root_module = mod });
+    const exe = b.addExecutable(.{ .name = "renux", .root_module = mod });
     b.installArtifact(exe);
 
     // The app icon and desktop entry, where Linux desktops look for them.
-    b.installFile("data/icons/dev.compy.linux.svg", "share/icons/hicolor/scalable/apps/dev.compy.linux.svg");
-    b.installFile("data/icons/dev.compy.linux.png", "share/icons/hicolor/512x512/apps/dev.compy.linux.png");
-    b.installFile("data/dev.compy.linux.desktop", "share/applications/dev.compy.linux.desktop");
+    b.installFile("data/icons/dev.renux.svg", "share/icons/hicolor/scalable/apps/dev.renux.svg");
+    b.installFile("data/icons/dev.renux.png", "share/icons/hicolor/512x512/apps/dev.renux.png");
+    b.installFile("data/dev.renux.desktop", "share/applications/dev.renux.desktop");
     // What software centers show, and the license.
-    b.installFile("data/dev.compy.linux.metainfo.xml", "share/metainfo/dev.compy.linux.metainfo.xml");
-    b.installFile("LICENSE", "share/licenses/compy/LICENSE");
+    b.installFile("data/dev.renux.metainfo.xml", "share/metainfo/dev.renux.metainfo.xml");
+    b.installFile("LICENSE", "share/licenses/renux/LICENSE");
     // Nerd Font symbols, so icons in prompts show with any font.
-    b.installFile("data/fonts/SymbolsNerdFontMono-Regular.ttf", "share/compy/fonts/SymbolsNerdFontMono-Regular.ttf");
-    b.installFile("data/fonts/SymbolsNerdFont-LICENSE.txt", "share/compy/fonts/SymbolsNerdFont-LICENSE.txt");
+    b.installFile("data/fonts/SymbolsNerdFontMono-Regular.ttf", "share/renux/fonts/SymbolsNerdFontMono-Regular.ttf");
+    b.installFile("data/fonts/SymbolsNerdFont-LICENSE.txt", "share/renux/fonts/SymbolsNerdFont-LICENSE.txt");
     // Fontconfig takes the bundled font on Linux.
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("fontconfig", .{});
 
@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
     run.addPassthruArgs();
-    b.step("run", "Run Compy").dependOn(&run.step);
+    b.step("run", "Run Renux").dependOn(&run.step);
 
     const tests = b.addTest(.{ .root_module = mod });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);

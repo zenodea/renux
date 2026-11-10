@@ -36,7 +36,7 @@ pub const Binding = struct { keys: []const []const u8, action: []const u8, args:
 
 pub const ListedHost = struct { label: []const u8, url: []const u8 };
 
-/// An action from the person's Rex config that Compy can run, with the keys bound to it.
+/// An action from the person's Rex config that Renux can run, with the keys bound to it.
 /// Every server there is, for `Server.isLive`. Main thread only.
 var live: std.ArrayList(*const Server) = .empty;
 
@@ -142,7 +142,7 @@ pub const Server = struct {
     keymap_arena: std.heap.ArenaAllocator = .init(gpa),
     actions: []Action = &.{},
     mode_bindings: []ModeBinding = &.{},
-    /// The keys in effect: the config's, with Compy's own shortcuts in place of theirs.
+    /// The keys in effect: the config's, with Renux's own shortcuts in place of theirs.
     bindings: []Binding = &.{},
     /// The config's keys as the server sent them.
     config_bindings: []Binding = &.{},
@@ -310,13 +310,13 @@ pub const Server = struct {
         s.reconnect_token = if (w.reconnect_token) |t| gpa.dupe(u8, t) catch null else null;
         s.api_revision = w.api_revision;
         if (w.api_revision != control.api_revision) {
-            log.info("server uses API revision {d}; Compy was written for {d}", .{ w.api_revision, control.api_revision });
+            log.info("server uses API revision {d}; Renux was written for {d}", .{ w.api_revision, control.api_revision });
         }
-        // A newer server still speaks this revision. An older one lacks calls Compy makes, so say
+        // A newer server still speaks this revision. An older one lacks calls Renux makes, so say
         // so once per server rather than let things fail one by one with no reason given.
         if (w.api_revision > 0 and w.api_revision < control.api_revision and !s.warned_old) {
             s.warned_old = true;
-            s.showMessage("This Rex server is older than Compy expects, so some things may not work. Update Rex on that computer.");
+            s.showMessage("This Rex server is older than Renux expects, so some things may not work. Update Rex on that computer.");
         }
         if (!w.resumed) {
             freeKeys(&s.attached);
@@ -382,7 +382,7 @@ pub const Server = struct {
     fn onEvent(ctx: *anyopaque, c: *Control, kind: []const u8, payload: ?json.Value) void {
         const s: *Server = @ptrCast(@alignCast(ctx));
         if (c != s.control and c != s.attempt) return;
-        if (std.c.getenv("COMPY_DEBUG") != null) {
+        if (std.c.getenv("RENUX_DEBUG") != null) {
             const text = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch "";
             defer gpa.free(text);
             log.info("event {s}: {s}", .{ kind, text[0..@min(text.len, 300)] });
@@ -403,8 +403,8 @@ pub const Server = struct {
         } else if (eql(kind, "client_perform_requested")) {
             s.handlePerform(payload orelse return);
         } else if (eql(kind, "client_call_requested")) {
-            // Compy never lists other servers with an action, but the action would wait for an answer.
-            s.reply(json.str(payload, "call_id") orelse return, "not_supported", "Compy can't call other servers");
+            // Renux never lists other servers with an action, but the action would wait for an answer.
+            s.reply(json.str(payload, "call_id") orelse return, "not_supported", "Renux can't call other servers");
         } else if (eql(kind, "session_event")) {
             const session_id = json.str(payload, "session_id") orelse return;
             const event = json.get(payload, "event");
@@ -688,7 +688,7 @@ pub const Server = struct {
     }
 
     /// Rex actions can ask the client that started them to do something and wait for the answer,
-    /// so every request gets one, even if it's only that Compy can't do it.
+    /// so every request gets one, even if it's only that Renux can't do it.
     fn handlePerform(s: *Server, payload: json.Value) void {
         const call_id = json.str(payload, "call_id") orelse return;
         const action = json.str(payload, "action") orelse "";
@@ -700,7 +700,7 @@ pub const Server = struct {
             return s.reply(call_id, null, null);
         }
         if (s.performer) |p| if (p.perform(p.ctx, action, args, session_id)) return s.reply(call_id, null, null);
-        s.reply(call_id, "not_supported", "Compy can't do that yet");
+        s.reply(call_id, "not_supported", "Renux can't do that yet");
     }
 
     fn reply(s: *Server, call_id: []const u8, code: ?[]const u8, message: ?[]const u8) void {
@@ -824,7 +824,7 @@ pub const Server = struct {
     }
 
     fn applyView(s: *Server, payload: ?json.Value) void {
-        if (std.c.getenv("COMPY_DEBUG") != null) {
+        if (std.c.getenv("RENUX_DEBUG") != null) {
             const text = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch "";
             defer gpa.free(text);
             log.info("view: {s}", .{text[0..@min(text.len, 600)]});
@@ -1063,7 +1063,7 @@ pub const Server = struct {
             log.warn("key dropped: not connected", .{});
             return;
         };
-        if (std.c.getenv("COMPY_DEBUG") != null) log.info("key to {s}", .{block_id});
+        if (std.c.getenv("RENUX_DEBUG") != null) log.info("key to {s}", .{block_id});
         c.fire("client.key", .{ .session_id = session_id, .block_id = block_id, .key = key });
     }
 
@@ -1542,11 +1542,11 @@ pub const Server = struct {
         }
         s.config_bindings = binds.items;
         s.applyShortcuts();
-        if (std.c.getenv("COMPY_DEBUG") != null) log.info("keymap: {d} actions, {d} bindings, {d} in modes", .{ s.actions.len, json.array(payload, "bindings").len, modes.items.len });
+        if (std.c.getenv("RENUX_DEBUG") != null) log.info("keymap: {d} actions, {d} bindings, {d} in modes", .{ s.actions.len, json.array(payload, "bindings").len, modes.items.len });
         s.notify(.keymap, null);
     }
 
-    /// Puts Compy's own shortcuts over the config's: an action with one loses the config's keys.
+    /// Puts Renux's own shortcuts over the config's: an action with one loses the config's keys.
     pub fn applyShortcuts(s: *Server) void {
         _ = s.overrides_arena.reset(.retain_capacity);
         const a = s.overrides_arena.allocator();

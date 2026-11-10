@@ -1,5 +1,5 @@
 //! The settings window, laid out like Rex's: sections in a sidebar, their settings on the right.
-//! Everything here changes only Compy; key bindings stay in the person's Rex config.
+//! Everything here changes only Renux; key bindings stay in the person's Rex config.
 const std = @import("std");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -97,7 +97,7 @@ pub fn open(app: *App) void {
     d.setTitle("Settings");
     d.setContentWidth(900);
     d.setContentHeight(640);
-    d.as(gobject.Object).setDataFull("compy-settings", ctx, &freed);
+    d.as(gobject.Object).setDataFull("renux-settings", ctx, &freed);
     _ = adw.Dialog.signals.closed.connect(d, *Ctx, &closed, ctx, .{});
 
     ctx.list.as(gtk.Widget).addCssClass("navigation-sidebar");
@@ -128,8 +128,8 @@ pub fn open(app: *App) void {
     split.setContent(adw.NavigationPage.new(content.as(gtk.Widget), "Settings"));
     split.setMinSidebarWidth(200);
     d.setChild(split.as(gtk.Widget));
-    // Development: COMPY_SETTINGS_PAGE opens on a page by its number.
-    const first: c_int = if (!@import("build_options").dev) 0 else if (std.c.getenv("COMPY_SETTINGS_PAGE")) |n| std.fmt.parseInt(c_int, std.mem.span(n), 10) catch 0 else 0;
+    // Development: RENUX_SETTINGS_PAGE opens on a page by its number.
+    const first: c_int = if (!@import("build_options").dev) 0 else if (std.c.getenv("RENUX_SETTINGS_PAGE")) |n| std.fmt.parseInt(c_int, std.mem.span(n), 10) catch 0 else 0;
     ctx.list.selectRow(ctx.list.getRowAtIndex(first));
     refresh(ctx);
     ctx.tick = glib.timeoutAdd(500, &ticked, ctx);
@@ -505,7 +505,7 @@ fn setRowText(row: *adw.ActionRow, title: ?[]const u8, subtitle: ?[]const u8) vo
 fn serverPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const a = ctx.app;
-    const g = group(p, "Rex Server", "The server Compy is showing now. Add more under Remote Hosts.");
+    const g = group(p, "Rex Server", "The server Renux is showing now. Add more under Remote Hosts.");
     const status = adw.ActionRow.new();
     const retry = gtk.Button.newWithLabel("Reconnect");
     retry.as(gtk.Widget).setValign(.center);
@@ -535,7 +535,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     }
     @import("../app/manage.zig").localServerGroup(p, a);
     const more = group(p, "Help", null);
-    inline for (.{ .{ "Diagnostics", "What Compy knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
+    inline for (.{ .{ "Diagnostics", "What Renux knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
         const row = adw.ActionRow.new();
         row.as(adw.PreferencesRow).setTitle(e[0]);
         row.setSubtitle(e[1]);
@@ -625,7 +625,7 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const panes_group = group(p, "Pane Behavior", null);
     switchRow(ctx, panes_group, "Focus follows mouse", "Pointing at a pane gives it the keyboard", &settings.current.focus_follows_mouse, null);
     rangePercentRow(ctx, panes_group, "Fade inactive panes", "How much panes without the keyboard dim, in percent", &settings.current.fade_inactive, 0, 60);
-    switchRow(ctx, panes_group, "Fade panes for inactive windows", "Dim every pane while Compy isn't the window in use", &settings.current.fade_inactive_window, App.redrawAllPub);
+    switchRow(ctx, panes_group, "Fade panes for inactive windows", "Dim every pane while Renux isn't the window in use", &settings.current.fade_inactive_window, App.redrawAllPub);
     switchRow(ctx, panes_group, "Autobalance splits", "Panes share space evenly after one opens or closes", &settings.current.autobalance, null);
     switchRow(ctx, panes_group, "Match program backgrounds", "A pane's frame takes the background color of the program in it", &settings.current.match_program_bg, App.applyLook);
     switchRow(ctx, panes_group, "Rounded selection corners", null, &settings.current.rounded_selection, App.redrawAllPub);
@@ -635,7 +635,7 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
     colorPicker(ctx, hl, "Highlight color", "The theme's accent unless one is picked", &settings.current.highlight_color, "Use Accent", App.applyLook);
     const extras = group(p, "Window", null);
-    switchRow(ctx, extras, "Show window on launch", "Off starts Compy hidden; compy --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
+    switchRow(ctx, extras, "Show window on launch", "Off starts Renux hidden; renux --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
     switchRow(ctx, extras, "Trackpad gestures", "Swipe sideways with two fingers to switch tabs", &settings.current.trackpad_gestures, null);
     numberRow(ctx, extras, "Trackpad scroll speed", "How far text moves for the fingers' movement; 2 is what terminals on a Mac do", &settings.current.scroll_speed, 0.5, 5, 0.25, 2, App.redrawAllPub);
     numberRow(ctx, extras, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
@@ -713,7 +713,7 @@ fn slotRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, field: *[]u
 }
 
 fn customThemes(ctx: *Ctx, p: *adw.PreferencesPage) void {
-    const g = group(p, "Custom Themes", "Your own themes, saved in ~/.config/compy/themes");
+    const g = group(p, "Custom Themes", "Your own themes, saved in ~/.config/renux/themes");
     const new_button = rowButton("New Theme");
     g.setHeaderSuffix(new_button.as(gtk.Widget));
     _ = gtk.Button.signals.clicked.connect(new_button, *Ctx, &newTheme, ctx, .{});
@@ -831,7 +831,7 @@ fn themesPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, look, "Separate light and dark themes", "Follow the system's appearance with a theme for each", &settings.current.theme_follow_system, App.themeChanged);
     slotRow(ctx, look, "Light theme", &settings.current.theme_light);
     slotRow(ctx, look, "Dark theme", &settings.current.theme_dark);
-    const g = group(p, "Terminal Theme", "Compy follows each host's theme unless you pick one here. A theme picked here only colors Compy; your Rex server keeps its own.");
+    const g = group(p, "Terminal Theme", "Renux follows each host's theme unless you pick one here. A theme picked here only colors Renux; your Rex server keeps its own.");
     themeRow(ctx, g, "Follow host", "", null);
     for (&themes.builtins) |*t| themeRow(ctx, g, t.name, t.name, t);
     if (std.mem.startsWith(u8, settings.current.theme, "file:")) {

@@ -108,17 +108,17 @@ pub fn setupAgents(a: *App) void {
 
 // Diagnostics.
 
-/// A page of what Compy knows about each host, with a button to copy it all.
+/// A page of what Renux knows about each host, with a button to copy it all.
 pub fn openDiagnostics(a: *App) void {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
-    text.appendSlice(gpa, "Compy for Linux " ++ @import("build_options").version ++ "\n") catch return;
+    text.appendSlice(gpa, "Renux for Linux " ++ @import("build_options").version ++ "\n") catch return;
     text.print(gpa, "GTK {d}.{d}.{d}, libadwaita {d}.{d}.{d}\n", .{ gtk.getMajorVersion(), gtk.getMinorVersion(), gtk.getMicroVersion(), adw.getMajorVersion(), adw.getMinorVersion(), adw.getMicroVersion() }) catch return;
     for (a.hosts.items) |h| {
         const s = h.server;
         text.print(gpa, "\nHost {s}\n  address: {s}\n  state: {s}\n", .{ h.label, s.url, @tagName(s.state) }) catch return;
         if (s.rex_version) |v| text.print(gpa, "  Rex: {s}\n", .{v}) catch return;
-        if (s.api_revision != 0) text.print(gpa, "  API revision: {d} (Compy speaks {d})\n", .{ s.api_revision, @import("../rex/control.zig").api_revision }) catch return;
+        if (s.api_revision != 0) text.print(gpa, "  API revision: {d} (Renux speaks {d})\n", .{ s.api_revision, @import("../rex/control.zig").api_revision }) catch return;
         if (s.state == .offline) text.print(gpa, "  reason: {s}\n", .{s.reason.items}) catch return;
         var windows: usize = 0;
         var panes: usize = 0;
@@ -167,13 +167,13 @@ pub fn openDiagnostics(a: *App) void {
 const Tip = struct { title: [:0]const u8, text: [:0]const u8, icon: icons.Kind };
 
 const tips = [_]Tip{
-    .{ .title = "Welcome to Compy", .text = "A Rex client for Linux. Your sessions, tabs and panes live on the Rex server, so they're the same here, in the Rex app and on your phone.", .icon = .terminal },
-    .{ .title = "Your keys come from Rex", .text = "Bindings in your Rex config work here, prefixes included. After a prefix such as ctrl+a, Compy lists the keys that can follow.", .icon = .keyboard },
+    .{ .title = "Welcome to Renux", .text = "A Rex client for Linux. Your sessions, tabs and panes live on the Rex server, so they're the same here, in the Rex app and on your phone.", .icon = .terminal },
+    .{ .title = "Your keys come from Rex", .text = "Bindings in your Rex config work here, prefixes included. After a prefix such as ctrl+a, Renux lists the keys that can follow.", .icon = .keyboard },
     .{ .title = "Find anything", .text = "Go to Anything searches every session, tab, pane and recent folder. The activity panel shows what each program is doing, with the ones that need you first.", .icon = .search },
     .{ .title = "Make it yours", .text = "Settings has themes, fonts, transparency, tab styles and more. A shortcut you record there takes the place of your config's keys for that action.", .icon = .palette },
 };
 
-/// A few pages about Compy, shown on first launch and from client.onboarding.
+/// A few pages about Renux, shown on first launch and from client.onboarding.
 pub fn openWelcome(a: *App) void {
     const dialog = adw.Dialog.new();
     dialog.setContentWidth(480);

@@ -1,5 +1,5 @@
 //! The command palette: the person's Rex actions, with the keys their config binds to them, and
-//! Compy's own. Typing filters; Enter or a click runs the action on the focused pane.
+//! Renux's own. Typing filters; Enter or a click runs the action on the focused pane.
 const std = @import("std");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -11,7 +11,7 @@ const filterdialog = @import("filterdialog.zig");
 
 const gpa = std.heap.c_allocator;
 
-/// Compy's own actions, run through the app's action names.
+/// Renux's own actions, run through the app's action names.
 const local = [_]struct { title: [:0]const u8, action: [:0]const u8, words: []const u8 }{
     .{ .title = "Split right", .action = "app.split-right", .words = "pane new horizontal" },
     .{ .title = "Split down", .action = "app.split-down", .words = "pane new vertical" },
@@ -85,7 +85,7 @@ pub const Palette = struct {
         // An action without a title is a call a program makes, such as reading a terminal's
         // screen, not a command for a person to run; those stay out of the list.
         for (server.actions) |a| if (!std.mem.eql(u8, a.title, a.name)) p.add(a.title, a.category, a.keys, a.keywords, a.name, true, null);
-        for (local, 0..) |l, i| p.add(l.title, "Compy", "", l.words, l.action, false, i);
+        for (local, 0..) |l, i| p.add(l.title, "Renux", "", l.words, l.action, false, i);
 
         p.filter("");
         p.dialog.present(parent);
@@ -174,7 +174,7 @@ pub const Palette = struct {
         if (a.needs_args and a.args == null) {
             server.notifyMessage("That command needs arguments; bind it to a key in your Rex config");
         } else if (std.mem.startsWith(u8, a.name, "pane.") or std.mem.startsWith(u8, a.name, "client.")) {
-            if (!server.performLocal(p.session_id, a.name, a.args)) server.notifyMessage("Compy can't do that action yet");
+            if (!server.performLocal(p.session_id, a.name, a.args)) server.notifyMessage("Renux can't do that action yet");
         } else {
             server.runAction(p.session_id, p.block_id, a.name, a.args);
         }

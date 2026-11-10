@@ -1,4 +1,4 @@
-//! The Mac-only touches for development builds: the Dock shows Compy's icon, and the window can
+//! The Mac-only touches for development builds: the Dock shows Renux's icon, and the window can
 //! be frosted glass behind see-through panes. Linux desktops take the icon from the desktop
 //! entry and blur see-through windows themselves.
 const std = @import("std");
@@ -82,13 +82,13 @@ pub fn setBlur(surface: *anyopaque, on: bool, radius: f64) void {
 }
 
 /// Development: a test run that must never take the keyboard from the app being used. The
-/// window still draws, and COMPY_SHOT pictures still work.
+/// window still draws, and RENUX_SHOT pictures still work.
 pub fn neverActivate() void {
     const app = send(Id, objc_getClass("NSApplication"), "sharedApplication", .{});
     send(void, app, "setActivationPolicy:", .{@as(isize, 2)}); // prohibited
 }
 
-/// Whether macOS is set to Dark appearance, whatever Compy itself shows.
+/// Whether macOS is set to Dark appearance, whatever Renux itself shows.
 pub fn systemDark() bool {
     const defaults = send(Id, objc_getClass("NSUserDefaults"), "standardUserDefaults", .{});
     const key = send(Id, objc_getClass("NSString"), "stringWithUTF8String:", .{@as([*:0]const u8, "AppleInterfaceStyle")});
@@ -97,7 +97,7 @@ pub fn systemDark() bool {
     return std.mem.eql(u8, std.mem.span(text), "Dark");
 }
 
-/// The number on Compy's Dock icon, or none for zero.
+/// The number on Renux's Dock icon, or none for zero.
 pub fn setBadge(n: u32) void {
     const app = send(Id, objc_getClass("NSApplication"), "sharedApplication", .{});
     const tile = send(Id, app, "dockTile", .{});

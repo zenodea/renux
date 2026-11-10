@@ -1,4 +1,4 @@
-//! The Compy window: sessions and their windows in a sidebar, the chosen window's panes on the
+//! The Renux window: sessions and their windows in a sidebar, the chosen window's panes on the
 //! right, and a connect page until a server is set.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -30,7 +30,7 @@ const gpa = std.heap.c_allocator;
 const window_radius = 12;
 
 const css =
-    \\window.compy, window.compy .sidebar-pane { background-color: @compy_shell; }
+    \\window.renux, window.renux .sidebar-pane { background-color: @renux_shell; }
     \\*, *:focus-visible, *:focus-within { outline: none; outline-width: 0; }
     \\.carry-ghost { background-color: mix(@view_bg_color, @window_fg_color, 0.1); border: 1.5px solid alpha(@accent_bg_color, 0.9); border-radius: 10px; box-shadow: 0 5px 18px alpha(black, 0.35); }
     \\.copied-chip { opacity: 0; transform: translateY(-6px) scale(0.92); transition: opacity 180ms ease-out, transform 240ms cubic-bezier(0.2, 0.9, 0.3, 1.2); background-color: @accent_bg_color; color: @accent_fg_color; border-radius: 99px; padding: 3px 11px; font-size: 0.85em; font-weight: 600; box-shadow: 0 3px 12px alpha(black, 0.3); }
@@ -39,59 +39,59 @@ const css =
     \\.hover-card > contents { padding: 12px 14px; border-radius: 13px; min-width: 250px; }
     \\.hover-title { font-weight: 700; }
     \\.hover-name { font-weight: 500; }
-    \\.hover-dim { color: @compy_secondary; font-size: 0.9em; }
-    \\.hover-chip { font-size: 0.8em; font-weight: 600; padding: 1px 8px; border-radius: 7px; background-color: alpha(@window_fg_color, 0.1); color: @compy_secondary; }
+    \\.hover-dim { color: @renux_secondary; font-size: 0.9em; }
+    \\.hover-chip { font-size: 0.8em; font-weight: 600; padding: 1px 8px; border-radius: 7px; background-color: alpha(@window_fg_color, 0.1); color: @renux_secondary; }
     \\.hover-chip.blocked { color: @warning_color; }
     \\.hover-chip.failed { color: @error_color; }
     \\.settings-plain-row { padding: 0; }
     \\.settings-cards { padding: 12px 12px 10px 12px; }
-    \\.settings-cards-title { font-size: 0.9em; color: @compy_secondary; margin-left: 4px; }
-    \\.pick-card { padding: 5px 5px 7px 5px; border-radius: 13px; font-weight: 400; color: @compy_secondary; transition: box-shadow 140ms ease-out, background-color 140ms ease-out; }
+    \\.settings-cards-title { font-size: 0.9em; color: @renux_secondary; margin-left: 4px; }
+    \\.pick-card { padding: 5px 5px 7px 5px; border-radius: 13px; font-weight: 400; color: @renux_secondary; transition: box-shadow 140ms ease-out, background-color 140ms ease-out; }
     \\.pick-card:checked { background-color: alpha(@accent_bg_color, 0.12); box-shadow: inset 0 0 0 2px @accent_bg_color; color: @window_fg_color; font-weight: 700; }
     \\.settings-sample-row { padding: 12px; }
-    \\.board { background-color: @compy_shell; padding: 14px 14px 12px 14px; }
+    \\.board { background-color: @renux_shell; padding: 14px 14px 12px 14px; }
     \\.board-title { font-weight: 700; font-size: 1.15em; margin-left: 4px; }
-    \\.board-column { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; padding: 10px 8px 8px 8px; }
+    \\.board-column { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @renux_stroke_subtle; padding: 10px 8px 8px 8px; }
     \\.board-column-head { padding: 0 6px 2px 4px; }
     \\.board-column-title { font-weight: 700; }
-    \\.board-count { color: @compy_secondary; font-size: 0.9em; }
+    \\.board-count { color: @renux_secondary; font-size: 0.9em; }
     \\.agent-row { min-height: 44px; }
-    \\.agent-status { font-size: 0.86em; color: @compy_secondary; }
+    \\.agent-status { font-size: 0.86em; color: @renux_secondary; }
     \\.agent-status.blocked { color: @warning_color; }
     \\.agent-status.failed { color: @error_color; }
-    \\.eye-dot { min-width: 7px; min-height: 7px; border-radius: 99px; margin: -2px -3px 0 0; background-color: @accent_bg_color; box-shadow: 0 0 0 1.5px @compy_shell; }
+    \\.eye-dot { min-width: 7px; min-height: 7px; border-radius: 99px; margin: -2px -3px 0 0; background-color: @accent_bg_color; box-shadow: 0 0 0 1.5px @renux_shell; }
     \\.eye-dot.done { background-color: #3b82f6; }
     \\.eye-dot.blocked { background-color: #f59e0b; }
     \\.eye-dot.failed { background-color: #ef4444; }
-    \\.board-session { font-size: 0.82em; font-weight: 600; color: @compy_secondary; margin: 6px 0 -2px 6px; }
+    \\.board-session { font-size: 0.82em; font-weight: 600; color: @renux_secondary; margin: 6px 0 -2px 6px; }
     \\.board-session:first-child { margin-top: 0; }
     \\.board-grouping button { min-height: 26px; padding: 0 12px; font-size: 0.88em; }
-    \\.board-empty { color: @compy_secondary; font-size: 0.9em; margin-top: 18px; }
-    \\.board-card { background-color: mix(@view_bg_color, @window_fg_color, 0.05); border-radius: 10px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @compy_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
+    \\.board-empty { color: @renux_secondary; font-size: 0.9em; margin-top: 18px; }
+    \\.board-card { background-color: mix(@view_bg_color, @window_fg_color, 0.05); border-radius: 10px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @renux_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.09); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
     \\.board-card.attention { box-shadow: inset 0 0 0 1px alpha(@warning_color, 0.6), 0 1px 4px alpha(black, 0.12); }
     \\.board-card-title { font-weight: 600; }
-    \\.board-card-message { color: @compy_secondary; font-size: 0.92em; }
-    \\.board-card-meta { color: @compy_secondary; font-size: 0.82em; }
+    \\.board-card-message { color: @renux_secondary; font-size: 0.92em; }
+    \\.board-card-meta { color: @renux_secondary; font-size: 0.82em; }
     \\.board-card-progress { margin: 2px 0; }
     \\.board-card.arrived { animation: board-arrive 320ms cubic-bezier(0.2, 0.9, 0.3, 1.1); }
     \\@keyframes board-arrive { from { opacity: 0; transform: translateY(10px) scale(0.96); } to { opacity: 1; transform: none; } }
     \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
-    \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
-    \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
-    \\.compy-sidebar list > row { border-radius: 8px; min-height: 30px; padding: 0 5px 0 8px; margin: 0 0 3px 0; }
-    \\.compy-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
-    \\.compy-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
-    \\.compy-sidebar .row-title { font-size: 0.95em; }
+    \\.renux-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
+    \\.renux-sidebar list { background: none; padding: 2px 8px 8px 8px; }
+    \\.renux-sidebar list > row { border-radius: 8px; min-height: 30px; padding: 0 5px 0 8px; margin: 0 0 3px 0; }
+    \\.renux-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
+    \\.renux-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
+    \\.renux-sidebar .row-title { font-size: 0.95em; }
     \\.row-more { opacity: 0; }
     \\.row-more, .row-more > button { min-height: 20px; min-width: 24px; padding: 0; margin: 0; border-radius: 6px; }
     \\row:hover .row-more, row:selected .row-more { opacity: 0.6; }
-    \\.session-heading { font-size: 0.82em; color: @compy_secondary; }
-    \\.compy-sidebar list > row.session-row { min-height: 22px; margin-top: 8px; padding: 0 2px 0 8px; background: none; }
-    \\.compy-sidebar list > row.host-row { min-height: 22px; margin-top: 12px; padding: 0 8px; background: none; }
-    \\.compy-sidebar list > row.host-row:first-child { margin-top: 4px; }
+    \\.session-heading { font-size: 0.82em; color: @renux_secondary; }
+    \\.renux-sidebar list > row.session-row { min-height: 22px; margin-top: 8px; padding: 0 2px 0 8px; background: none; }
+    \\.renux-sidebar list > row.host-row { min-height: 22px; margin-top: 12px; padding: 0 8px; background: none; }
+    \\.renux-sidebar list > row.host-row:first-child { margin-top: 4px; }
     \\.host-heading { font-weight: 700; font-size: 0.88em; }
     \\.session-tool { opacity: 0; min-width: 22px; min-height: 22px; }
     \\row.session-row:hover .session-tool, .session-tool.folded { opacity: 0.6; }
@@ -109,25 +109,25 @@ const css =
     \\window.no-headers .content.alone .workspace { margin-top: 52px; }
     \\window.tight .content.alone .workspace { margin: 7px 0 0 0; }
     \\.window-corner { min-height: 52px; padding: 0 6px 0 12px; }
-    \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @compy_stroke_subtle; }
+    \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @renux_stroke_subtle; }
     \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
     \\.pane-card.floating { box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.pane-card.floating.focused { box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 8px 28px alpha(black, 0.45); }
-    \\.layer-card { background-color: @compy_stroke_subtle; border: 1px solid @compy_stroke_subtle; border-radius: 11px; box-shadow: 0 8px 28px alpha(black, 0.45); }
+    \\.layer-card { background-color: @renux_stroke_subtle; border: 1px solid @renux_stroke_subtle; border-radius: 11px; box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.layer-card.focused { border-color: alpha(@accent_bg_color, 0.85); }
     \\.pane-card.joined.focused .pane-title .title { color: @accent_color; }
     \\.pane-title { min-height: 38px; padding: 0 6px 0 12px; }
     \\.pane-tools > * { margin-left: 2px; }
     \\.pane-title .title { font-weight: 500; font-size: 0.95em; }
-    \\.pane-card:not(.focused) .pane-title .title { color: @compy_secondary; }
+    \\.pane-card:not(.focused) .pane-title .title { color: @renux_secondary; }
     \\.pane-tools { opacity: 0; transition: opacity 120ms; }
     \\.pane-card.focused .pane-tools, .pane-card:hover .pane-tools { opacity: 1; }
     \\.icon-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; opacity: 0.5; }
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
     \\.icon-button:checked { opacity: 1; background-color: alpha(@window_fg_color, 0.12); }
-    \\.find-bar { margin: 6px 12px 14px 12px; padding: 4px 5px 4px 6px; min-width: 230px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
+    \\.find-bar { margin: 6px 12px 14px 12px; padding: 4px 5px 4px 6px; min-width: 230px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @renux_stroke_subtle; }
     \\.find-bar entry { background: none; box-shadow: none; outline: none; border: none; min-height: 28px; padding-left: 6px; }
-    \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
+    \\.find-count { color: @renux_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.chip-face { box-shadow: none; }
@@ -135,9 +135,9 @@ const css =
     \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
     \\window.tight .content .workspace { margin: 7px 0 0 0; }
     \\window.tight .pane-card { border-radius: 0; border: none; box-shadow: none; }
-    \\window.tight .workspace { background-color: @compy_stroke_subtle; }
+    \\window.tight .workspace { background-color: @renux_stroke_subtle; }
     \\window.tight .pane-card.focused .pane-title .title { color: @accent_color; }
-    \\window.tight .pane-card.floating { border: 1px solid @compy_stroke; border-radius: 8px; box-shadow: 0 8px 28px alpha(black, 0.45); }
+    \\window.tight .pane-card.floating { border: 1px solid @renux_stroke; border-radius: 8px; box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.pane-card.joined, .pane-card.joined.floating, .pane-card.joined.focused, .pane-card.joined.floating.focused { border: none; box-shadow: none; }
     \\window .pane-card.joined.floating { border-radius: 0; }
     \\window .pane-card.joined.floating.c-tl { border-top-left-radius: 10px; }
@@ -145,19 +145,19 @@ const css =
     \\window .pane-card.joined.floating.c-bl { border-bottom-left-radius: 10px; }
     \\window .pane-card.joined.floating.c-br { border-bottom-right-radius: 10px; }
     \\.palette { padding: 12px; }
-    \\.palette-category { color: @compy_secondary; font-size: 0.85em; }
-    \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
+    \\.palette-category { color: @renux_secondary; font-size: 0.85em; }
+    \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @renux_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
     \\.activity-panel { background-color: @popover_bg_color; border-radius: 12px; box-shadow: 0 10px 34px alpha(black, 0.42), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
     \\.activity-head { padding: 12px 12px 6px 16px; }
     \\.activity-title { font-weight: 700; font-size: 1.05em; }
     \\.activity-head button { min-height: 24px; padding: 0 10px; font-size: 0.85em; }
-    \\.activity-idle { margin: 0 0 6px 12px; font-size: 0.9em; color: @compy_secondary; }
+    \\.activity-idle { margin: 0 0 6px 12px; font-size: 0.9em; color: @renux_secondary; }
     \\.activity-list { background: none; padding: 0 6px 8px 6px; }
-    \\.activity-heading { font-size: 0.8em; font-weight: 600; color: @compy_secondary; margin: 10px 0 2px 8px; }
+    \\.activity-heading { font-size: 0.8em; font-weight: 600; color: @renux_secondary; margin: 10px 0 2px 8px; }
     \\.activity-row { border-radius: 9px; padding: 6px 8px; }
     \\.activity-row:hover { background-color: alpha(@window_fg_color, 0.06); }
     \\.activity-name { font-weight: 500; }
-    \\.activity-detail { font-size: 0.85em; color: @compy_secondary; }
+    \\.activity-detail { font-size: 0.85em; color: @renux_secondary; }
     \\.activity-row.blocked .activity-detail { color: @warning_color; }
     \\.activity-row.failed .activity-detail { color: @error_color; }
     \\.activity-unread { min-width: 8px; min-height: 8px; border-radius: 99px; background-color: @accent_bg_color; }
@@ -165,20 +165,20 @@ const css =
     \\.tab-strip > * { margin-top: 11px; margin-bottom: 5px; }
     \\window.tabs-above .content .workspace { margin-top: 0; }
     \\.content.alone .tab-strip { padding-left: 8px; }
-    \\.tab { border-radius: 9px; min-height: 30px; padding: 0 5px 0 10px; color: @compy_secondary; }
+    \\.tab { border-radius: 9px; min-height: 30px; padding: 0 5px 0 10px; color: @renux_secondary; }
     \\.tab:hover { background-color: alpha(@window_fg_color, 0.05); }
     \\.tab.active { background-color: alpha(@window_fg_color, 0.10); color: @window_fg_color; }
     \\.tab .tab-close { opacity: 0; min-width: 20px; min-height: 20px; padding: 0; margin: 0; border-radius: 6px; }
     \\.tab:hover .tab-close, .tab.active .tab-close { opacity: 0.55; }
-    \\window.tabs-above .compy-sidebar list > row.session-pick { min-height: 28px; margin-top: 2px; border-radius: 8px; }
-    \\window.tabs-above .compy-sidebar list > row.session-pick:selected { background-color: alpha(@window_fg_color, 0.09); }
-    \\window.tabs-above .compy-sidebar row.session-pick .session-heading { font-size: 0.95em; color: @window_fg_color; }
+    \\window.tabs-above .renux-sidebar list > row.session-pick { min-height: 28px; margin-top: 2px; border-radius: 8px; }
+    \\window.tabs-above .renux-sidebar list > row.session-pick:selected { background-color: alpha(@window_fg_color, 0.09); }
+    \\window.tabs-above .renux-sidebar row.session-pick .session-heading { font-size: 0.95em; color: @window_fg_color; }
     \\window.sidebar-end .content .workspace { margin: 6px 0 8px 8px; }
     \\window.sidebar-end .content.alone .workspace { margin: 6px 8px 8px 8px; }
     \\.goto { padding: 12px; }
-    \\.goto-detail { font-size: 0.85em; color: @compy_secondary; }
-    \\.goto-path { font-family: monospace; font-size: 0.9em; color: @compy_secondary; margin: 0 4px; }
-    \\.goto-kind { font-size: 0.75em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 7px; }
+    \\.goto-detail { font-size: 0.85em; color: @renux_secondary; }
+    \\.goto-path { font-family: monospace; font-size: 0.9em; color: @renux_secondary; margin: 0 4px; }
+    \\.goto-kind { font-size: 0.75em; color: @renux_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 7px; }
     \\.goto-row { padding: 6px 8px; }
     \\.record-box { padding: 24px; }
     \\.record-keys { font-family: monospace; font-size: 1.6em; font-weight: 700; color: @accent_color; min-height: 40px; }
@@ -244,14 +244,14 @@ fn tileFor(w: *const view.Window) u64 {
     return hasher.final();
 }
 
-/// One Rex server Compy is connected to, with its own workspace page.
+/// One Rex server Renux is connected to, with its own workspace page.
 pub const Host = struct {
     app: *App,
     label: []u8,
     server: *Server,
     workspace: *Workspace,
     page: [:0]u8,
-    /// Set for a host from $COMPY_SERVER, which isn't saved.
+    /// Set for a host from $RENUX_SERVER, which isn't saved.
     temporary: bool = false,
     /// Its number among every host this run, which no later host shares.
     serial: usize = 0,
@@ -355,7 +355,7 @@ pub const App = struct {
     pub fn create() !*App {
         const a = try gpa.create(App);
         // Each window is its own process, so a second launch opens a second window.
-        a.* = .{ .app = adw.Application.new("dev.compy.linux", .{ .non_unique = true }) };
+        a.* = .{ .app = adw.Application.new("dev.renux", .{ .non_unique = true }) };
         _ = gio.Application.signals.activate.connect(a.app, *App, &activate, a, .{});
         return a;
     }
@@ -366,9 +366,9 @@ pub const App = struct {
 
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
         // GTK may have reset it while starting up.
-        if (builtin.os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("../platform/macos.zig").neverActivate();
+        if (builtin.os.tag == .macos and std.c.getenv("RENUX_NOFOCUS") != null) @import("../platform/macos.zig").neverActivate();
         settings.load();
-        // Asked before Compy forces a scheme of its own, while libadwaita still reports the
+        // Asked before Renux forces a scheme of its own, while libadwaita still reports the
         // desktop's preference: dark only when the desktop prefers dark.
         if (builtin.os.tag != .macos) linux_dark = adw.StyleManager.getDefault().getDark() != 0;
         termview.pad_x = settings.current.pad_x;
@@ -376,7 +376,7 @@ pub const App = struct {
         a.applied_text = TextSetup.now();
         a.applied_extended = settings.current.extended_palette;
         {
-            const name: ?[:0]u8 = gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch null;
+            const name: ?[:0]u8 = gpa.dupeSentinel(u8, if (std.c.getenv("RENUX_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch null;
             defer if (name) |z| gpa.free(z);
             termview.font = termview.Font.init(name orelse "Monospace 11");
         }
@@ -389,15 +389,15 @@ pub const App = struct {
         a.window = adw.ApplicationWindow.new(a.app.as(gtk.Application));
         const win = a.window.as(gtk.Window);
         win.setDefaultSize(1180, 760);
-        // Development: COMPY_SIZE=WIDTHxHEIGHT starts the window at another size.
-        if (build_options.dev) if (std.c.getenv("COMPY_SIZE")) |size| {
+        // Development: RENUX_SIZE=WIDTHxHEIGHT starts the window at another size.
+        if (build_options.dev) if (std.c.getenv("RENUX_SIZE")) |size| {
             var parts = std.mem.splitScalar(u8, std.mem.span(size), 'x');
             const w = std.fmt.parseInt(c_int, parts.first(), 10) catch 1180;
             const h = std.fmt.parseInt(c_int, parts.next() orelse "760", 10) catch 760;
             win.setDefaultSize(w, h);
         };
-        win.setTitle("Compy");
-        win.as(gtk.Widget).addCssClass("compy");
+        win.setTitle("Renux");
+        win.as(gtk.Widget).addCssClass("renux");
 
         // Sidebar: window controls and a menu on top, sessions and their windows, then a footer.
         a.sidebar = gtk.ListBox.new();
@@ -495,7 +495,7 @@ pub const App = struct {
         a.foot_more.setVisible(0);
         footer.append(a.foot_more);
         const side = adw.ToolbarView.new();
-        side.as(gtk.Widget).addCssClass("compy-sidebar");
+        side.as(gtk.Widget).addCssClass("renux-sidebar");
         side.addTopBar(side_header.as(gtk.Widget));
         side.addBottomBar(footer.as(gtk.Widget));
         side.setContent(scroller.as(gtk.Widget));
@@ -619,8 +619,8 @@ pub const App = struct {
         // The development hooks (screenshots, the test script) are only in `-Ddev` builds.
         if (build_options.dev) installShotHook(a);
 
-        // $COMPY_SERVER, for testing, names hosts to use without saving them, separated by commas.
-        if (std.c.getenv("COMPY_SERVER")) |env| {
+        // $RENUX_SERVER, for testing, names hosts to use without saving them, separated by commas.
+        if (std.c.getenv("RENUX_SERVER")) |env| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(env), ',');
             while (it.next()) |url| if (a.addHost(settings.labelFor(url), url)) |h| {
                 h.temporary = true;
@@ -628,20 +628,20 @@ pub const App = struct {
         } else for (settings.current.hosts.items) |h| _ = a.addHost(h.label, h.url);
         if (a.hosts.items.len == 0) a.stack.setVisibleChildName("connect");
         // When driven by tests, show the window without taking the keyboard from what the person
-        // is using; otherwise their typing lands in Compy.
-        const dev_shot = build_options.dev and std.c.getenv("COMPY_SHOT") != null;
+        // is using; otherwise their typing lands in Renux.
+        const dev_shot = build_options.dev and std.c.getenv("RENUX_SHOT") != null;
         if (dev_shot) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
         @import("warm.zig").start(win.as(gtk.Window));
         _ = gobject.Object.signals.notify.connect(win, ?*anyopaque, &fullscreenChanged, null, .{ .detail = "fullscreened" });
         a.watchConfig();
         // The sidebar's buttons are fitted again once the window's corner has its real width.
         _ = glib.idleAdd(&refitSidebar, a);
-        // `compy --toggle` finds this process by its ID and signals it.
+        // `renux --toggle` finds this process by its ID and signals it.
         if (!dev_shot) {
             @import("../main.zig").claimToggle();
             _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
         }
-        if (build_options.dev and std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
+        if (build_options.dev and std.c.getenv("RENUX_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
         if (!settings.current.welcomed and !dev_shot) @import("manage.zig").openWelcome(a);
         a.applyLook();
         _ = gobject.Object.signals.notify.connect(win, *App, &activeChanged, a, .{ .detail = "is-active" });
@@ -735,7 +735,7 @@ pub const App = struct {
     const sidebar_standard: f64 = 292;
 
     /// Watches the settings file and the themes folder, so a change made outside this window
-    /// takes effect at once: a script that switches color themes, another Compy window, an
+    /// takes effect at once: a script that switches color themes, another Renux window, an
     /// editor. Folders are watched rather than files, since most programs save by writing a
     /// new file over the old one.
     fn watchConfig(a: *App) void {
@@ -1268,7 +1268,7 @@ pub const App = struct {
     fn ensureSelection(a: *App) bool {
         const s = a.server orelse return false;
         // A window opened for one tab shows it as soon as its session is known.
-        if (std.c.getenv("COMPY_OPEN")) |env| if (!open_done) {
+        if (std.c.getenv("RENUX_OPEN")) |env| if (!open_done) {
             var parts = std.mem.splitScalar(u8, std.mem.span(env), '\t');
             const url = parts.next() orelse "";
             const sid = parts.next() orelse "";
@@ -1855,7 +1855,7 @@ pub const App = struct {
         a.rebuildSidebar();
     }
 
-    /// Adds the hosts a server listed that Compy doesn't have yet.
+    /// Adds the hosts a server listed that Renux doesn't have yet.
     pub fn importListedHosts(a: *App, h: *Host) void {
         var added: usize = 0;
         for (h.server.listed_hosts) |lh| {
@@ -2052,7 +2052,7 @@ pub const App = struct {
         // there the call only logs errors and shows nothing, so the Mac build keeps to the
         // sound, the Dock badge and the activity panel.
         if (builtin.os.tag != .macos) {
-            const n = gio.Notification.new("Compy");
+            const n = gio.Notification.new("Renux");
             defer n.as(gobject.Object).unref();
             n.setBody(text.ptr);
             var tbuf: [512]u8 = undefined;
@@ -2249,8 +2249,8 @@ pub const App = struct {
         props.add("{sv}", "count", glib.Variant.newInt64(n));
         props.add("{sv}", "count-visible", glib.Variant.newBoolean(@intFromBool(n > 0)));
         // The tuple is floating, and sending it takes it over along with what it holds.
-        const params = glib.Variant.newTuple(&[_]*glib.Variant{ glib.Variant.newString("application://dev.compy.linux.desktop"), props.end() }, 2);
-        _ = bus.emitSignal(null, "/dev/compy/linux", "com.canonical.Unity.LauncherEntry", "Update", params, null);
+        const params = glib.Variant.newTuple(&[_]*glib.Variant{ glib.Variant.newString("application://dev.renux.desktop"), props.end() }, 2);
+        _ = bus.emitSignal(null, "/dev/renux", "com.canonical.Unity.LauncherEntry", "Update", params, null);
     }
 
     fn gotBadgeBus(_: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
@@ -2430,7 +2430,7 @@ pub const App = struct {
         return a.moreActions(action, args);
     }
 
-    /// The rest of Rex's client and session actions that make sense in Compy.
+    /// The rest of Rex's client and session actions that make sense in Renux.
     fn moreActions(a: *App, action: []const u8, args: ?@import("../util/json.zig").Value) bool {
         const J = @import("../util/json.zig");
         const is = struct {
@@ -2528,7 +2528,7 @@ pub const App = struct {
             return true;
         }
         if (is(action, "client.version.copy")) {
-            a.window.as(gtk.Widget).getClipboard().setText("Compy for Linux " ++ build_options.version);
+            a.window.as(gtk.Widget).getClipboard().setText("Renux for Linux " ++ build_options.version);
             a.toast("Version copied");
             return true;
         }
@@ -2852,7 +2852,7 @@ pub const App = struct {
         return true;
     }
 
-    /// Opens another Compy window, a process of its own, optionally showing one tab.
+    /// Opens another Renux window, a process of its own, optionally showing one tab.
     fn openAppWindow(a: *App, show: ?struct { []const u8, []const u8 }) bool {
         // The new window reads the settings file as it starts, so it must hold every change made here.
         settings.flush();
@@ -2865,8 +2865,8 @@ pub const App = struct {
             const h = a.current orelse return false;
             const open = std.fmt.allocPrintSentinel(gpa, "{s}\t{s}\t{s}", .{ h.server.url, sw[0], sw[1] }, 0) catch return false;
             defer gpa.free(open);
-            env = glib.environSetenv(env, "COMPY_OPEN", open.ptr, 1);
-        } else env = glib.environUnsetenv(env, "COMPY_OPEN");
+            env = glib.environSetenv(env, "RENUX_OPEN", open.ptr, 1);
+        } else env = glib.environUnsetenv(env, "RENUX_OPEN");
         defer glib.strfreev(@ptrCast(env));
         var argv = [_:null]?[*:0]u8{@ptrCast(&exe)};
         var err: ?*glib.Error = null;
@@ -3438,7 +3438,7 @@ pub const App = struct {
     /// the system setting on the Mac.
     fn systemDark() bool {
         if (builtin.os.tag == .macos) return @import("../platform/macos.zig").systemDark();
-        // GTK's own setting can't say: Compy forces a scheme to match its theme, which that
+        // GTK's own setting can't say: Renux forces a scheme to match its theme, which that
         // setting then repeats, and GTK before 4.20 doesn't have it. The desktop's settings
         // portal can, and `watchAppearance` keeps this up to date from it.
         return linux_dark;
@@ -3460,7 +3460,7 @@ pub const App = struct {
 
     fn gotAppearanceBus(_: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const a: *App = @ptrCast(@alignCast(data.?));
-        // The session bus everything shares; this reference lasts as long as Compy runs.
+        // The session bus everything shares; this reference lasts as long as Renux runs.
         const bus = gio.busGetFinish(result, null) orelse return;
         _ = bus.signalSubscribe(portal_name, portal_settings, "SettingChanged", portal_path, appearance_namespace, .{}, &appearanceSignal, a, null);
         const args = glib.Variant.newTuple(&[_]*glib.Variant{ glib.Variant.newString(appearance_namespace), glib.Variant.newString("color-scheme") }, 2);
@@ -3554,9 +3554,9 @@ pub const App = struct {
         var buf: [1024]u8 = undefined;
         const see_through = prefs.window_opacity < 1 or prefs.terminal_opacity < 1;
         const look_text = if (!see_through) "" else std.fmt.bufPrintSentinel(&buf,
-            \\window.compy {{ border-radius: {d}px; }}
-            \\window.compy, window.compy .sidebar-pane {{ background-color: alpha(@compy_shell, {d:.2}); }}
-            \\window.tight .workspace {{ background-color: alpha(@compy_stroke_subtle, {d:.2}); }}
+            \\window.renux {{ border-radius: {d}px; }}
+            \\window.renux, window.renux .sidebar-pane {{ background-color: alpha(@renux_shell, {d:.2}); }}
+            \\window.tight .workspace {{ background-color: alpha(@renux_stroke_subtle, {d:.2}); }}
             \\.pane-card:not(.floating) {{ background-color: transparent; }}
             \\.pane-card:not(.floating) .pane-title {{ background-color: alpha(@view_bg_color, {d:.2}); }}
         , .{ window_radius, prefs.window_opacity, prefs.window_opacity, prefs.terminal_opacity }, 0) catch "";
@@ -3570,12 +3570,12 @@ pub const App = struct {
             \\.pane-card.floating.focused {{ box-shadow: 0 0 0 1px alpha({s}, {d:.2}), 0 8px 28px alpha(black, 0.45); }}
             \\{s}
         , .{ color, prefs.highlight_opacity, color, prefs.highlight_opacity * 0.4, color, prefs.highlight_opacity * 0.4, if (prefs.highlight_animate) ".pane-card, .layer-card { transition: border-color 220ms ease-out, box-shadow 220ms ease-out; }" else "" }) catch "" else
-            \\.pane-card.focused, .layer-card.focused { border-color: @compy_stroke_subtle; }
+            \\.pane-card.focused, .layer-card.focused { border-color: @renux_stroke_subtle; }
             \\.pane-card.focused { box-shadow: none; }
             \\.pane-card.floating.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
         ;
         var sbuf: [128]u8 = undefined;
-        const sidebar_text = std.fmt.bufPrint(&sbuf, ".compy-sidebar list {{ font-size: {d:.2}em; }}", .{prefs.sidebar_text_scale}) catch "";
+        const sidebar_text = std.fmt.bufPrint(&sbuf, ".renux-sidebar list {{ font-size: {d:.2}em; }}", .{prefs.sidebar_text_scale}) catch "";
         // After the highlight's own rules, which these must win over: a card on its way to
         // the tray has no outline or highlight, only the shadow a floating card casts.
         const to_tray =
@@ -3690,7 +3690,7 @@ pub const App = struct {
     }
 };
 
-/// Shows Compy's icon for its windows: from the installed icons, or from the build's when run
+/// Shows Renux's icon for its windows: from the installed icons, or from the build's when run
 /// from zig-out. On a Mac, where it's only built for development, it sets the Dock icon too.
 fn useAppIcon() void {
     // Installed apps live in PREFIX/bin with their icons in PREFIX/share, zig-out included.
@@ -3701,18 +3701,18 @@ fn useAppIcon() void {
     const icons_dir = std.fmt.allocPrintSentinel(gpa, "{s}/icons", .{data_dir}, 0) catch return;
     defer gpa.free(icons_dir);
     gtk.IconTheme.getForDisplay(gdk.Display.getDefault().?).addSearchPath(icons_dir.ptr);
-    gtk.Window.setDefaultIconName("dev.compy.linux");
+    gtk.Window.setDefaultIconName("dev.renux");
     if (builtin.os.tag == .macos) {
-        const png = std.fmt.allocPrintSentinel(gpa, "{s}/icons/hicolor/512x512/apps/dev.compy.linux.png", .{data_dir}, 0) catch return;
+        const png = std.fmt.allocPrintSentinel(gpa, "{s}/icons/hicolor/512x512/apps/dev.renux.png", .{data_dir}, 0) catch return;
         defer gpa.free(png);
         @import("../platform/macos.zig").setDockIcon(png);
     }
 }
 
 var mode_app: ?*App = null;
-/// Whether $COMPY_OPEN's tab has been shown.
+/// Whether $RENUX_OPEN's tab has been shown.
 var open_done = false;
-/// The font size Compy started with, which client.font.reset goes back to.
+/// The font size Renux started with, which client.font.reset goes back to.
 var start_font_size: c_int = 0;
 
 /// Shows the start of a key sequence, such as "ctrl+a …", until it's finished.
@@ -4025,10 +4025,10 @@ fn menuToggled(button: *gtk.MenuButton, _: *gobject.ParamSpec, _: ?*anyopaque) c
     const obj = button.as(gobject.Object);
     const now: usize = @intCast(@divTrunc(glib.getMonotonicTime(), 1000));
     if (button.getActive() == 0) {
-        obj.setData("compy-menu-closed", @ptrFromInt(now + 1));
+        obj.setData("renux-menu-closed", @ptrFromInt(now + 1));
         return;
     }
-    const closed = @intFromPtr(obj.getData("compy-menu-closed"));
+    const closed = @intFromPtr(obj.getData("renux-menu-closed"));
     if (closed != 0 and now + 1 -| closed < 350) button.setActive(0);
 }
 
@@ -4114,23 +4114,23 @@ fn setSlot(slot: *?[]u8, value: ?[]const u8) void {
     slot.* = if (value) |v| gpa.dupe(u8, v) catch null else null;
 }
 
-// Development: SIGUSR1 saves a picture of the window to $COMPY_SHOT, since macOS won't let a
+// Development: SIGUSR1 saves a picture of the window to $RENUX_SHOT, since macOS won't let a
 // terminal capture another app's window without asking.
 
 var shot_app: ?*App = null;
 
 fn installShotHook(a: *App) void {
     shot_app = a;
-    if (std.c.getenv("COMPY_SHOT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &takeShot, null);
-    if (std.c.getenv("COMPY_SCRIPT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR2), &runScript, null);
+    if (std.c.getenv("RENUX_SHOT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &takeShot, null);
+    if (std.c.getenv("RENUX_SCRIPT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR2), &runScript, null);
 }
 
-/// Development: SIGUSR2 runs the commands in $COMPY_SCRIPT against the focused pane, so
+/// Development: SIGUSR2 runs the commands in $RENUX_SCRIPT against the focused pane, so
 /// selection and find can be checked without a mouse. One command per line:
 /// `find TEXT`, `select X1 Y1 X2 Y2`, `word X Y`, `copy`, `type TEXT`, `close-find`.
 fn runScript(_: ?*anyopaque) callconv(.c) c_int {
     const a = shot_app orelse return 1;
-    const path = std.c.getenv("COMPY_SCRIPT") orelse return 1;
+    const path = std.c.getenv("RENUX_SCRIPT") orelse return 1;
     var contents: [*]u8 = undefined;
     var len: usize = 0;
     if (glib.fileGetContents(path, &contents, &len, null) == 0) return 1;
@@ -4256,8 +4256,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
     return 1;
 }
 
-/// Development: with COMPY_PERF set, logs each second of drawing: frames shown, the longest
-/// gap between frames, and how long Compy spent making a frame.
+/// Development: with RENUX_PERF set, logs each second of drawing: frames shown, the longest
+/// gap between frames, and how long Renux spent making a frame.
 const FrameLog = struct {
     var start: i64 = 0;
     var last_end: i64 = 0;
@@ -4372,7 +4372,7 @@ fn benchWindow(a: *App) void {
 
 fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
     const a = shot_app orelse return 1;
-    const path = std.c.getenv("COMPY_SHOT") orelse return 1;
+    const path = std.c.getenv("RENUX_SHOT") orelse return 1;
     const w = a.window.as(gtk.Widget);
     const paintable = gtk.WidgetPaintable.new(w);
     defer paintable.as(gobject.Object).unref();

@@ -4,7 +4,7 @@ A native Linux client for [Rex](https://rex.superlogical.com), written in Zig wi
 libadwaita. It shows a Rex server's sessions, windows and panes, with live terminals drawn
 through libghostty-vt.
 
-The program it builds is called `compy`, and its desktop ID is `dev.compy.linux`.
+The program it builds is called `renux`, and its desktop ID is `dev.renux`.
 
 ## Building
 
@@ -16,7 +16,7 @@ zig build -Doptimize=ReleaseFast
 zig build test
 ```
 
-The program is `zig-out/bin/compy`. Add `-Ddev` for the development hooks: screenshots, the
+The program is `zig-out/bin/renux`. Add `-Ddev` for the development hooks: screenshots, the
 test script and the frame log.
 
 On a Mac with Homebrew, for development, point pkg-config at Homebrew first:

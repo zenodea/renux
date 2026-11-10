@@ -1,5 +1,5 @@
 //! Settings > Shortcuts: every action with its keys, a way to record new ones, and the
-//! recorded ones as Lua for the Rex config. Recorded keys are Compy's own, over the config's.
+//! recorded ones as Lua for the Rex config. Recorded keys are Renux's own, over the config's.
 const std = @import("std");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
@@ -84,7 +84,7 @@ pub fn build(a: *App, p: *adw.PreferencesPage, page: *Page) void {
     const s = a.server orelse return;
     const head = adw.PreferencesGroup.new();
     head.setTitle("Key Bindings");
-    head.setDescription("From your Rex config. A shortcut recorded here is Compy's own and takes the place of the config's keys for that action; Copy as Lua puts them in your config for good.");
+    head.setDescription("From your Rex config. A shortcut recorded here is Renux's own and takes the place of the config's keys for that action; Copy as Lua puts them in your config for good.");
     const copy = gtk.Button.newWithLabel("Copy Shortcuts as Lua");
     copy.as(gtk.Widget).addCssClass("flat");
     copy.as(gtk.Widget).setValign(.center);
@@ -328,7 +328,7 @@ fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
     _ = gtk.Button.signals.clicked.connect(save, *Recording, &H.saved, r, .{});
     _ = gtk.Button.signals.clicked.connect(unbind, *Recording, &H.unbound, r, .{});
     _ = gtk.Button.signals.clicked.connect(cancel, *Recording, &H.cancelled, r, .{});
-    dialog.as(gobject.Object).setDataFull("compy-recording", r, &H.freed);
+    dialog.as(gobject.Object).setDataFull("renux-recording", r, &H.freed);
     // Buttons can't take the keyboard, so every key goes to the recording.
     save.as(gtk.Widget).setFocusable(0);
     unbind.as(gtk.Widget).setFocusable(0);
@@ -379,14 +379,14 @@ fn luaValue(out: *std.ArrayList(u8), v: std.json.Value) !void {
     }
 }
 
-/// The shortcuts recorded in Compy, as rex.bind lines for init.lua, onto the clipboard.
+/// The shortcuts recorded in Renux, as rex.bind lines for init.lua, onto the clipboard.
 fn copyLua(_: *gtk.Button, a: *App) callconv(.c) void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    out.appendSlice(gpa, "-- Shortcuts recorded in Compy\n") catch return;
+    out.appendSlice(gpa, "-- Shortcuts recorded in Renux\n") catch return;
     for (settings.current.shortcuts.items) |sc| {
         if (sc.keys.len == 0) {
-            out.print(gpa, "-- {s} has no keys in Compy\n", .{sc.action}) catch return;
+            out.print(gpa, "-- {s} has no keys in Renux\n", .{sc.action}) catch return;
             continue;
         }
         out.appendSlice(gpa, "rex.bind(\"") catch return;

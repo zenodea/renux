@@ -1,4 +1,4 @@
-//! Terminal themes Compy can use instead of the host's. They only recolor this app; Compy never
+//! Terminal themes Renux can use instead of the host's. They only recolor this app; Renux never
 //! changes a server's theme. Built-ins are well-known MIT-licensed palettes; any Ghostty theme
 //! file can be imported too.
 const std = @import("std");
@@ -9,7 +9,7 @@ const Rgb = @import("theme.zig").Rgb;
 
 const gpa = std.heap.c_allocator;
 
-/// The theme chosen in Compy's settings, or null to follow each host.
+/// The theme chosen in Renux's settings, or null to follow each host.
 pub var active: ?Colors = null;
 
 pub const Theme = struct {

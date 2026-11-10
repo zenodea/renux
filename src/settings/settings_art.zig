@@ -22,7 +22,7 @@ pub const Sample = enum(usize) { typography, cursor, selection };
 
 pub const Status = enum(usize) { working, blocked, failed, done, idle };
 
-/// The terminal's colors as they are now: the theme picked in Compy, or a plain dark or light
+/// The terminal's colors as they are now: the theme picked in Renux, or a plain dark or light
 /// set with the window when each host's own theme is followed.
 const Look = struct { bg: u32, fg: u32, accent: u32, green: u32, yellow: u32, blue: u32 };
 
@@ -239,7 +239,7 @@ fn drawSample(area: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, 
     switch (kind) {
         .typography => {
             _ = runs(cr, layout, &font, x0, pad, &.{
-                .{ .text = "~/compy ", .color = l.blue },
+                .{ .text = "~/renux ", .color = l.blue },
                 .{ .text = "main ", .color = l.green },
                 .{ .text = "$ zig build test", .color = l.fg },
             });
@@ -255,7 +255,7 @@ fn drawSample(area: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, 
         },
         .cursor => {
             const end = runs(cr, layout, &font, x0, pad, &.{
-                .{ .text = "~/compy ", .color = l.blue },
+                .{ .text = "~/renux ", .color = l.blue },
                 .{ .text = "$ ", .color = l.fg },
             });
             if (!blink_shown) return;

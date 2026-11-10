@@ -128,10 +128,10 @@ pub const Palette = struct {
             \\@define-color success_color {f};
             \\@define-color warning_color {f};
             \\@define-color error_color {f};
-            \\@define-color compy_stroke {f};
-            \\@define-color compy_stroke_subtle {f};
-            \\@define-color compy_secondary {f};
-            \\@define-color compy_shell {f};
+            \\@define-color renux_stroke {f};
+            \\@define-color renux_stroke_subtle {f};
+            \\@define-color renux_secondary {f};
+            \\@define-color renux_shell {f};
             \\@define-color sidebar_border_color {f};
             \\
         , .{

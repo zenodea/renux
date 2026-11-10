@@ -1,4 +1,4 @@
-//! The Nerd Font symbols that come with Compy, so prompt and file icons show whatever font the
+//! The Nerd Font symbols that come with Renux, so prompt and file icons show whatever font the
 //! person picks. The font is registered for this process only; nothing is installed.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,13 +10,13 @@ pub var registered = false;
 
 const file_name = "SymbolsNerdFontMono-Regular.ttf";
 
-/// Registers the bundled font, found next to the app in PREFIX/share/compy/fonts. It must run
+/// Registers the bundled font, found next to the app in PREFIX/share/renux/fonts. It must run
 /// before Pango first lists fonts.
 pub fn registerBundled() void {
     var exe_buf: [4096]u8 = undefined;
     const n = std.process.executableDirPath(@import("../main.zig").io, &exe_buf) catch return;
     var path_buf: [4200]u8 = undefined;
-    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/../share/compy/fonts/{s}", .{ exe_buf[0..n], file_name }, 0) catch return;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/../share/renux/fonts/{s}", .{ exe_buf[0..n], file_name }, 0) catch return;
     if (glib.fileTest(path.ptr, .{ .exists = true }) == 0) return;
     registered = if (builtin.os.tag == .macos) registerMac(path) else registerFontconfig(path);
     if (!registered) std.log.warn("couldn't register the Nerd Font symbols at {s}", .{path});

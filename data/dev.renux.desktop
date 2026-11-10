@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Compy
+Name=Renux
 Comment=A native client for Rex, the terminal multiplexer
-Exec=compy
-Icon=dev.compy.linux
+Exec=renux
+Icon=dev.renux
 Terminal=false
 Categories=Development;System;TerminalEmulator;
-StartupWMClass=dev.compy.linux
+StartupWMClass=dev.renux
 StartupNotify=true
 Keywords=terminal;rex;multiplexer;shell;ssh;agent;

@@ -21,7 +21,7 @@ const Job = struct {
     timer: c_uint = 0,
 };
 
-/// A launcher whose commands don't inherit the Rex terminal Compy may itself have been started
+/// A launcher whose commands don't inherit the Rex terminal Renux may itself have been started
 /// from, so `rex` and others talk to this computer's own server rather than that terminal's.
 fn launcher(flags: gio.SubprocessFlags) *gio.SubprocessLauncher {
     const l = gio.SubprocessLauncher.new(flags);

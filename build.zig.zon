@@ -1,7 +1,7 @@
 .{
-    .name = .compy,
+    .name = .renux,
     .version = "0.1.0",
-    .fingerprint = 0x3d1cf5c824aac144,
+    .fingerprint = 0x717d114ef86b4d0,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .ghostty = .{ .path = "third_party/ghostty" },

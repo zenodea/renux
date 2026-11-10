@@ -237,7 +237,7 @@ pub const Workspace = struct {
         ew.setParent(root);
 
         ws.* = .{ .root = root, .ghost = ghost.as(gtk.Widget), .target = target.as(gtk.Widget), .line = line.as(gtk.Widget), .swap_arrows = arrows.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
-        gobject.Object.setData(root.as(gobject.Object), "compy-workspace", ws);
+        gobject.Object.setData(root.as(gobject.Object), "renux-workspace", ws);
 
         const drag = gtk.GestureDrag.new();
         _ = gtk.GestureDrag.signals.drag_begin.connect(drag, *Workspace, &dividerBegin, ws, .{});
@@ -431,7 +431,7 @@ pub const Workspace = struct {
         }
         ws.bg_css_text.deinit(gpa);
         // The layout and the gestures on `root` find the workspace through this.
-        gobject.Object.setData(ws.root.as(gobject.Object), "compy-workspace", null);
+        gobject.Object.setData(ws.root.as(gobject.Object), "renux-workspace", null);
         ws.empty.unparent();
         inline for (.{ ws.ghost, ws.target, ws.line, ws.tray.as(gtk.Widget) }) |w| {
             if (w.getParent() != null) w.unparent();
@@ -726,7 +726,7 @@ pub const Workspace = struct {
         _ = gtk.Gesture.signals.cancel.connect(drag, *Workspace, &PaneDrag.cancel, ws, .{});
         row.as(gtk.Widget).addController(drag.as(gtk.EventController));
         // The drag handlers find their pane by the widget, so tag it with the block.
-        gobject.Object.setData(row.as(gobject.Object), "compy-block", owned.ptr);
+        gobject.Object.setData(row.as(gobject.Object), "renux-block", owned.ptr);
 
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).setOverflow(.hidden);
@@ -776,7 +776,7 @@ pub const Workspace = struct {
         _ = gtk.GestureDrag.signals.drag_end.connect(gdrag, *Workspace, &GripDrag.end, ws, .{});
         _ = gtk.Gesture.signals.cancel.connect(gdrag, *Workspace, &GripDrag.cancel, ws, .{});
         gw.addController(gdrag.as(gtk.EventController));
-        gobject.Object.setData(gw.as(gobject.Object), "compy-block", owned.ptr);
+        gobject.Object.setData(gw.as(gobject.Object), "renux-block", owned.ptr);
 
         const frame_overlay = gtk.Overlay.new();
         frame_overlay.setChild(card.as(gtk.Widget));
@@ -793,7 +793,7 @@ pub const Workspace = struct {
         const frame = frame_overlay.as(gtk.Widget);
         frame.addCssClass("pane-card");
         frame.setOverflow(.hidden);
-        gobject.Object.setData(frame.as(gobject.Object), "compy-block", owned.ptr);
+        gobject.Object.setData(frame.as(gobject.Object), "renux-block", owned.ptr);
         // Focus follows the mouse when that's on: pointing at a pane gives it the keyboard.
         const enter = gtk.EventControllerMotion.new();
         _ = gtk.EventControllerMotion.signals.enter.connect(enter, *Workspace, &pointerEntered, ws, .{});
@@ -1072,7 +1072,7 @@ pub const Workspace = struct {
     }
 
     fn fromWidget(w: *gtk.Widget) ?*Workspace {
-        return @ptrCast(@alignCast(gobject.Object.getData(w.as(gobject.Object), "compy-workspace") orelse return null));
+        return @ptrCast(@alignCast(gobject.Object.getData(w.as(gobject.Object), "renux-workspace") orelse return null));
     }
 
     // Geometry. Fractions of the window become pixels with one gap between neighbours and none at
@@ -1423,7 +1423,7 @@ pub const Workspace = struct {
     }
 
     fn paneOfWidget(ws: *Workspace, w: *gtk.Widget) ?usize {
-        const data = gobject.Object.getData(w.as(gobject.Object), "compy-block") orelse return null;
+        const data = gobject.Object.getData(w.as(gobject.Object), "renux-block") orelse return null;
         for (ws.panes.items, 0..) |p, i| if (@intFromPtr(p.block_id.ptr) == @intFromPtr(data)) return i;
         return null;
     }
@@ -1897,7 +1897,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     ws.tray.as(gtk.Widget).sizeAllocate(&tray, -1);
 }
 
-/// How many workspaces are animating, for COMPY_PERF.
+/// How many workspaces are animating, for RENUX_PERF.
 pub var ticking: u32 = 0;
 
 /// Places a card at its animated rect. The card takes that size rather than being scaled: scaling
