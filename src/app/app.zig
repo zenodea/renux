@@ -12,6 +12,7 @@ const gsk = @import("gsk");
 const pango = @import("pango");
 const adw = @import("adw");
 const server_mod = @import("../rex/server.zig");
+const updates = @import("../rex/updates.zig");
 const view = @import("../rex/view.zig");
 const termview = @import("../terminal/termview.zig");
 const programs = @import("../icons/programs.zig");
@@ -626,6 +627,8 @@ pub const App = struct {
                 h.temporary = true;
             };
         } else for (settings.current.hosts.items) |h| _ = a.addHost(h.label, h.url);
+        updates_app = a;
+        updates.changed = &updateKnown;
         if (a.hosts.items.len == 0) a.stack.setVisibleChildName("connect");
         // When driven by tests, show the window without taking the keyboard from what the person
         // is using; otherwise their typing lands in Renux.
@@ -1130,6 +1133,26 @@ pub const App = struct {
 
     // Following the server.
 
+    /// Asks again whether each server could be updated, after the setting for it is switched.
+    pub fn lookForUpdates(a: *App) void {
+        for (a.hosts.items) |h| updates.check(h.server.rex_version);
+    }
+
+    /// Says once, for each release, that a server could be updated to it. A Mac's Rex updates
+    /// itself, so only servers that get Rex from a package are spoken for.
+    fn announceUpdate(a: *App) void {
+        for (a.hosts.items) |h| {
+            const s = h.server;
+            const newer = updates.available(s.rex_version) orelse continue;
+            const platform = s.platform orelse continue;
+            if (std.mem.startsWith(u8, platform, "darwin")) continue;
+            if (std.mem.eql(u8, settings.current.rex_update_told, newer)) continue;
+            var buf: [256]u8 = undefined;
+            s.notifyMessage(std.fmt.bufPrint(&buf, "Rex {s} is out. Update Rex on {s} with that computer's package manager.", .{ newer, h.label }) catch continue);
+            settings.setString(&settings.current.rex_update_told, newer);
+        }
+    }
+
     fn serverChanged(ctx: *anyopaque, what: server_mod.Change, session_id: ?[]const u8) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         const a = h.app;
@@ -1141,6 +1164,7 @@ pub const App = struct {
                     a.showState();
                 }
                 a.rebuildSidebar();
+                a.announceUpdate();
             },
             .sessions => {
                 if (here) _ = a.ensureSelection();
@@ -4118,6 +4142,11 @@ fn setSlot(slot: *?[]u8, value: ?[]const u8) void {
 // terminal capture another app's window without asking.
 
 var shot_app: ?*App = null;
+var updates_app: ?*App = null;
+
+fn updateKnown() void {
+    if (updates_app) |a| a.announceUpdate();
+}
 
 fn installShotHook(a: *App) void {
     shot_app = a;

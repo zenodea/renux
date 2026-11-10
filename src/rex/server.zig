@@ -117,6 +117,8 @@ pub const Server = struct {
     retries: u5 = 0,
     retry_timer: c_uint = 0,
     rex_version: ?[]u8 = null,
+    /// What the server was built for, such as `linux_amd64`.
+    platform: ?[]u8 = null,
     /// The API revision the server answered with, or 0 before the first welcome.
     api_revision: i64 = 0,
     warned_old: bool = false,
@@ -222,6 +224,7 @@ pub const Server = struct {
         s.hosts_arena.deinit();
         if (s.reconnect_token) |t| gpa.free(t);
         if (s.rex_version) |v| gpa.free(v);
+        if (s.platform) |v| gpa.free(v);
         gpa.free(s.url);
         gpa.free(s.client_label);
         gpa.destroy(s);
@@ -341,8 +344,7 @@ pub const Server = struct {
             .err => |e| return s.failed(c, e.message),
             .ok => |payload| {
                 s.control = c;
-                if (s.rex_version) |v| gpa.free(v);
-                s.rex_version = if (json.str(json.get(payload, "server_status"), "rex_version")) |v| gpa.dupe(u8, v) catch null else null;
+                if (json.str(json.get(payload, "server_status"), "rex_version")) |v| setStr(&s.rex_version, v);
                 s.clearSessions();
                 for (json.array(json.get(payload, "attach_all"), "sessions")) |item| s.addSession(item);
                 s.dropViewsOfGoneSessions();
@@ -350,6 +352,7 @@ pub const Server = struct {
                 s.retries = 0;
                 s.setState(.online, "");
                 s.fetchKeymap();
+                s.call("server.version", no_args, void, {}, gotVersion);
                 s.notify(.sessions, null);
 
                 // Streams carry on; any whose session ended while away are dropped.
@@ -1458,6 +1461,17 @@ pub const Server = struct {
     };
 
     /// Reads the person's actions and bindings for the command palette.
+    fn gotVersion(s: *Server, _: *void, r: Result) void {
+        const payload = switch (r) {
+            .ok => |p| p,
+            .err => return,
+        };
+        if (json.str(payload, "rex_version")) |v| setStr(&s.rex_version, v);
+        setStr(&s.platform, json.str(payload, "platform"));
+        s.notify(.state, null);
+        @import("updates.zig").check(s.rex_version);
+    }
+
     pub fn fetchKeymap(s: *Server) void {
         s.call("client.keymap", no_args, void, {}, gotKeymap);
     }

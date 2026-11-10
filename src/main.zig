@@ -97,6 +97,7 @@ test {
     _ = @import("rex/view.zig");
     _ = @import("rex/stream.zig");
     _ = @import("rex/server.zig");
+    _ = @import("rex/updates.zig");
     _ = @import("terminal/keys.zig");
     _ = @import("theme/theme.zig");
     _ = @import("terminal/boxdraw.zig");

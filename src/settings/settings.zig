@@ -111,6 +111,10 @@ pub const Settings = struct {
     theme: []u8,
     /// Empty uses this computer's name.
     client_label: []u8,
+    /// Look up whether a later Rex than a server runs has been released.
+    rex_updates: bool = true,
+    /// The release last announced, so each is announced once and not at every start.
+    rex_update_told: []u8,
     /// Separate themes for a light and a dark system appearance, instead of `theme`.
     theme_follow_system: bool = false,
     theme_light: []u8,

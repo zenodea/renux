@@ -17,6 +17,7 @@ const shortcuts = @import("shortcuts.zig");
 const icons = @import("../icons/icons.zig");
 const art = @import("settings_art.zig");
 const App = @import("../app/app.zig").App;
+const updates = @import("../rex/updates.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -522,6 +523,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
         addr.setSubtitleSelectable(1);
         g.add(addr.as(gtk.Widget));
     }
+    switchRow(ctx, g, "Look for Rex updates", "Reads Rex's public list of releases and says when a server could be updated. Updating is done on the server's computer.", &settings.current.rex_updates, &App.lookForUpdates);
 
     if (a.server != null) {
         const pair = group(p, "Pair a Phone", null);
@@ -584,7 +586,10 @@ fn showStatus(ctx: *Ctx) void {
     setRowText(status, if (ctx.app.current) |h| h.label else "Rex", null);
     var buf: [320]u8 = undefined;
     const sub = switch (s.state) {
-        .online => std.fmt.bufPrintSentinel(&buf, "Connected{s}{s}", .{ if (s.rex_version != null) " · Rex " else "", s.rex_version orelse "" }, 0),
+        .online => if (updates.available(s.rex_version)) |newer|
+            std.fmt.bufPrintSentinel(&buf, "Connected · Rex {s}\nUpdate available: {s}", .{ s.rex_version orelse "", newer }, 0)
+        else
+            std.fmt.bufPrintSentinel(&buf, "Connected{s}{s}", .{ if (s.rex_version != null) " · Rex " else "", s.rex_version orelse "" }, 0),
         .connecting => std.fmt.bufPrintSentinel(&buf, "Connecting…", .{}, 0),
         .offline => std.fmt.bufPrintSentinel(&buf, "Offline: {s}", .{s.reason.items}, 0),
     } catch "";
