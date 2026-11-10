@@ -763,9 +763,23 @@ pub const TermView = struct {
             while (cps.nextCodepoint()) |cp| v.modeKey(cp, 0);
             return;
         }
+        // Plain keys arrive here as text, not as key presses, so a sequence waiting after a
+        // prefix such as ctrl+a looks at them first.
+        var rest = t;
+        while (chord_len > 0 and rest.len > 0) {
+            const n = std.unicode.utf8ByteSequenceLength(rest[0]) catch break;
+            if (n > rest.len) break;
+            const cp = std.unicode.utf8Decode(rest[0..n]) catch break;
+            var name_buf: [40]u8 = undefined;
+            const keyval = gdk.unicodeToKeyval(cp);
+            const name = keys.rexName(&name_buf, keyval, cp, 0) orelse break;
+            if (!v.chord(name)) break;
+            rest = rest[n..];
+        }
+        if (rest.len == 0) return;
         v.scrollToBottom();
         if (v.term()) |tm| tm.clearSelection();
-        const view = std.unicode.Utf8View.init(t) catch return v.server.paste(v.session_id, v.block_id, t);
+        const view = std.unicode.Utf8View.init(rest) catch return v.server.paste(v.session_id, v.block_id, rest);
         var it = view.iterator();
         while (it.nextCodepoint()) |cp| v.server.sendKey(v.session_id, v.block_id, keys.forChar(cp, 0));
     }

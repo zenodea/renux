@@ -349,3 +349,14 @@ test "keys as Rex config names them" {
     try std.testing.expectEqualStrings("=", rexName(&buf, '=', '=', 0).?);
     try std.testing.expectEqualStrings("enter", rexName(&buf, 0xff0d, 0, 0).?);
 }
+
+test "typed characters match bindings written with shift" {
+    var buf: [40]u8 = undefined;
+    const underscore = rexName(&buf, '_', '_', 0).?;
+    try std.testing.expect(sameKey("shift+-", underscore));
+    var buf2: [40]u8 = undefined;
+    const capital = rexName(&buf2, 'N', 'N', 0).?;
+    try std.testing.expect(sameKey("shift+n", capital));
+    var buf3: [40]u8 = undefined;
+    try std.testing.expect(sameKey("-", rexName(&buf3, '-', '-', 0).?));
+}
