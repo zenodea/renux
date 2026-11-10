@@ -285,20 +285,21 @@ pub const Workspace = struct {
     }
 
     /// The top-left pane's title starts after the window's corner while the sidebar is hidden.
+    /// The room is worked out as the panes are placed, from where each card is going in this
+    /// very frame, so the title never sits under the corner while the sidebar slides.
     pub fn cornerChanged(ws: *Workspace) void {
-        for (ws.panes.items) |p| {
-            const top_left = !p.floating and p.rect.x < 0.001 and p.rect.y < 0.001;
-            var room: f64 = 0;
-            if (top_left) if (p.frame.getRoot()) |root| {
-                var x: f64 = 0;
-                var y: f64 = 0;
-                // The title starts 13 pixels in: the card's border and the title's padding.
-                // Only a pane whose title is level with the corner; tabs above push panes down.
-                if (p.frame.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) != 0 and y < 30) room = @max(0, corner_right + 6 - (x + 13));
-            };
-            const want: c_int = @intFromFloat(@round(room));
-            if (p.title_row.getMarginStart() != want) p.title_row.setMarginStart(want);
-        }
+        ws.root.queueAllocate();
+    }
+
+    /// Gives a card's title row the room the corner takes from it. `origin` is where the
+    /// workspace sits in the window and `at` where the card is about to be placed in it.
+    fn cornerRoom(p: *Pane, origin: [2]f64, at: [4]f64) void {
+        const top_left = !p.floating and p.rect.x < 0.001 and p.rect.y < 0.001;
+        // The title starts 13 pixels in: the card's border and the title's padding.
+        // Only a pane whose title is level with the corner; tabs above push panes down.
+        const room: f64 = if (top_left and origin[1] + at[1] < 30) @max(0, corner_right + 6 - (origin[0] + at[0] + 13)) else 0;
+        const want: c_int = @intFromFloat(@round(room));
+        if (p.title_row.getMarginStart() != want) p.title_row.setMarginStart(want);
     }
 
     /// Floating layers draw over every tiled pane, in the server's order, back to front; the
@@ -1501,6 +1502,9 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     const resized = size[0] != ws.last_size[0] or size[1] != ws.last_size[1];
     ws.last_size = size;
     var moving = false;
+    // Where the workspace is in the window as of this layout, which its parents have just set.
+    var origin = [2]f64{ 0, 0 };
+    if (widget.getRoot()) |root| _ = widget.translateCoordinates(root.as(gtk.Widget), 0, 0, &origin[0], &origin[1]);
     for (ws.panes.items, 0..) |*p, i| {
         const target = ws.paneRect(p);
         if (p.fresh) {
@@ -1525,6 +1529,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         };
         if (p.alpha < 1) moving = true;
         p.frame.setOpacity(p.alpha);
+        Workspace.cornerRoom(p, origin, p.cur);
         allocateAt(p.frame, p.cur);
     }
     for (ws.leaving.items) |l| {
