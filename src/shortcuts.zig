@@ -24,16 +24,19 @@ const Entry = struct {
     title_lower: []u8,
 };
 
-var entries: std.ArrayList(*Entry) = .empty;
+/// The rows of one Shortcuts page. The Settings window owns it and the memory its rows are in,
+/// and frees both when the window itself is freed, so a row's buttons never outlive their data.
+pub const Page = struct {
+    al: std.mem.Allocator,
+    entries: std.ArrayList(*Entry) = .empty,
+};
 
-fn freeEntries() void {
-    for (entries.items) |e| {
-        gpa.free(e.action);
-        gpa.free(e.args);
-        gpa.free(e.title_lower);
-        gpa.destroy(e);
-    }
-    entries.clearRetainingCapacity();
+/// The page on screen, whose rows show new keys as they're recorded.
+var live: ?*Page = null;
+
+/// The Settings window closed: its page's rows are no longer refreshed.
+pub fn closed(page: *Page) void {
+    if (live == page) live = null;
 }
 
 fn overridden(action: []const u8, args: []const u8) ?settings.Shortcut {
@@ -74,9 +77,10 @@ fn refresh(e: *Entry) void {
     e.restore.as(gtk.Widget).setVisible(@intFromBool(overridden(e.action, e.args) != null));
 }
 
-/// Adds the shortcut groups to the Shortcuts page.
-pub fn build(a: *App, p: *adw.PreferencesPage) void {
-    freeEntries();
+/// Adds the shortcut groups to the Shortcuts page. `page` and its allocator outlive the rows.
+pub fn build(a: *App, p: *adw.PreferencesPage, page: *Page) void {
+    page.entries = .empty;
+    live = page;
     const s = a.server orelse return;
     const head = adw.PreferencesGroup.new();
     head.setTitle("Key Bindings");
@@ -100,23 +104,23 @@ pub fn build(a: *App, p: *adw.PreferencesPage) void {
         seen.deinit(gpa);
     }
     const Add = struct {
-        fn one(app: *App, group: *adw.PreferencesGroup, seen_list: *std.ArrayList([]const u8), action: []const u8, args: []const u8) void {
+        fn one(app: *App, pg: *Page, group: *adw.PreferencesGroup, seen_list: *std.ArrayList([]const u8), action: []const u8, args: []const u8) void {
             const key = std.fmt.allocPrint(gpa, "{s}\x00{s}", .{ action, args }) catch return;
             for (seen_list.items) |k| if (std.mem.eql(u8, k, key)) {
                 gpa.free(key);
                 return;
             };
-            seen_list.append(gpa, key) catch return;
-            addRow(app, group, action, args);
+            seen_list.append(gpa, key) catch return gpa.free(key);
+            addRow(app, pg, group, action, args);
         }
     };
-    for (s.config_bindings) |b| Add.one(a, list, &seen, b.action, b.args orelse "");
-    for (settings.current.shortcuts.items) |sc| Add.one(a, list, &seen, sc.action, sc.args);
-    for (s.actions) |act| if (!act.needs_args) Add.one(a, list, &seen, act.name, "");
-    _ = gtk.SearchEntry.signals.search_changed.connect(filter, ?*anyopaque, &filterChanged, null, .{});
+    for (s.config_bindings) |b| Add.one(a, page, list, &seen, b.action, b.args orelse "");
+    for (settings.current.shortcuts.items) |sc| Add.one(a, page, list, &seen, sc.action, sc.args);
+    for (s.actions) |act| if (!act.needs_args) Add.one(a, page, list, &seen, act.name, "");
+    _ = gtk.SearchEntry.signals.search_changed.connect(filter, *Page, &filterChanged, page, .{});
 }
 
-fn addRow(a: *App, group: *adw.PreferencesGroup, action: []const u8, args: []const u8) void {
+fn addRow(a: *App, page: *Page, group: *adw.PreferencesGroup, action: []const u8, args: []const u8) void {
     var dbuf: [128]u8 = undefined;
     const title = app_mod.describeAction(a, &dbuf, action, if (args.len > 0) args else null, false);
     const row = adw.ActionRow.new();
@@ -138,30 +142,30 @@ fn addRow(a: *App, group: *adw.PreferencesGroup, action: []const u8, args: []con
     record.as(gtk.Widget).setValign(.center);
     row.addSuffix(record.as(gtk.Widget));
     group.add(row.as(gtk.Widget));
-    const e = gpa.create(Entry) catch return;
-    const lower = gpa.dupe(u8, title) catch return;
+    const e = page.al.create(Entry) catch return;
+    const lower = page.al.dupe(u8, title) catch return;
     for (lower) |*c| c.* = std.ascii.toLower(c.*);
     e.* = .{
         .app = a,
-        .action = gpa.dupeSentinel(u8, action, 0) catch return,
-        .args = gpa.dupeSentinel(u8, args, 0) catch return,
+        .action = page.al.dupeSentinel(u8, action, 0) catch return,
+        .args = page.al.dupeSentinel(u8, args, 0) catch return,
         .row = row,
         .keys_label = label,
         .restore = restore,
         .title_lower = lower,
     };
-    entries.append(gpa, e) catch return;
+    page.entries.append(page.al, e) catch return;
     _ = gtk.Button.signals.clicked.connect(record, *Entry, &startRecord, e, .{});
     _ = gtk.Button.signals.clicked.connect(restore, *Entry, &restoreKeys, e, .{});
     refresh(e);
 }
 
-fn filterChanged(entry: *gtk.SearchEntry, _: ?*anyopaque) callconv(.c) void {
+fn filterChanged(entry: *gtk.SearchEntry, page: *Page) callconv(.c) void {
     const q = std.mem.span(entry.as(gtk.Editable).getText());
     var buf: [128]u8 = undefined;
     const n = @min(q.len, buf.len);
     for (q[0..n], 0..) |c, i| buf[i] = std.ascii.toLower(c);
-    for (entries.items) |e| {
+    for (page.entries.items) |e| {
         const show = n == 0 or std.mem.indexOf(u8, e.title_lower, buf[0..n]) != null or std.mem.indexOf(u8, e.action, buf[0..n]) != null;
         e.row.as(gtk.Widget).setVisible(@intFromBool(show));
     }
@@ -169,7 +173,7 @@ fn filterChanged(entry: *gtk.SearchEntry, _: ?*anyopaque) callconv(.c) void {
 
 fn applied(a: *App) void {
     for (a.hosts.items) |h| h.server.applyShortcuts();
-    for (entries.items) |e| refresh(e);
+    if (live) |page| for (page.entries.items) |e| refresh(e);
 }
 
 fn restoreKeys(_: *gtk.Button, e: *Entry) callconv(.c) void {
@@ -179,33 +183,38 @@ fn restoreKeys(_: *gtk.Button, e: *Entry) callconv(.c) void {
 
 // Recording.
 
+/// The keys recorded so far, such as "⌃A  X", or a prompt before the first. What doesn't fit
+/// in `buf` is left out.
+fn sequenceText(buf: []u8, seq: []const []const u8) [:0]const u8 {
+    if (seq.len == 0) return std.fmt.bufPrintSentinel(buf, "Press the keys…", .{}, 0) catch "";
+    var n: usize = 0;
+    for (seq, 0..) |k, i| {
+        var kb: [48]u8 = undefined;
+        const p = app_mod.prettyKey(&kb, k);
+        // Two spaces between keys, and room kept for the key and the end of the text.
+        const gap: usize = if (i > 0) 2 else 0;
+        if (n + gap + p.len >= buf.len) break;
+        @memcpy(buf[n..][0..gap], "  "[0..gap]);
+        n += gap;
+        @memcpy(buf[n..][0..p.len], p);
+        n += p.len;
+    }
+    buf[n] = 0;
+    return buf[0..n :0];
+}
+
 const Recording = struct {
-    entry: *Entry,
+    /// Its own copies: the row it was started from can go while this is open.
+    app: *App,
+    action: []u8,
+    args: []u8,
     dialog: *adw.Dialog,
     shown: *gtk.Label,
     seq: std.ArrayList([]u8) = .empty,
 
-    fn text(r: *Recording, buf: []u8) [:0]const u8 {
-        if (r.seq.items.len == 0) return std.fmt.bufPrintSentinel(buf, "Press the keys…", .{}, 0) catch "";
-        var n: usize = 0;
-        for (r.seq.items, 0..) |k, i| {
-            var kb: [48]u8 = undefined;
-            const p = app_mod.prettyKey(&kb, k);
-            if (i > 0 and n + 3 < buf.len) {
-                @memcpy(buf[n .. n + 3], "  ");
-                n += 2;
-            }
-            if (n + p.len >= buf.len) break;
-            @memcpy(buf[n .. n + p.len], p);
-            n += p.len;
-        }
-        buf[n] = 0;
-        return buf[0..n :0];
-    }
-
     fn update(r: *Recording) void {
         var buf: [256]u8 = undefined;
-        r.shown.setText(r.text(&buf).ptr);
+        r.shown.setText(sequenceText(&buf, r.seq.items).ptr);
     }
 
     fn clear(r: *Recording) void {
@@ -221,14 +230,19 @@ const Recording = struct {
             out.appendSlice(gpa, k) catch return;
         };
         if (!unbind and out.items.len == 0) return;
-        settings.setShortcut(r.entry.action, r.entry.args, out.items);
-        applied(r.entry.app);
+        settings.setShortcut(r.action, r.args, out.items);
+        applied(r.app);
         _ = r.dialog.close();
     }
 };
 
 fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
     const r = gpa.create(Recording) catch return;
+    const action = gpa.dupe(u8, e.action) catch return gpa.destroy(r);
+    const args = gpa.dupe(u8, e.args) catch {
+        gpa.free(action);
+        return gpa.destroy(r);
+    };
     const dialog = adw.Dialog.new();
     dialog.setTitle("Record Shortcut");
     dialog.setContentWidth(420);
@@ -241,21 +255,24 @@ fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
     const shown = gtk.Label.new("");
     shown.as(gtk.Widget).addCssClass("record-keys");
     box.append(shown.as(gtk.Widget));
-    const note = gtk.Label.new("Keys one after another make a sequence, like ctrl+a then x. Backspace starts over.");
+    const note = gtk.Label.new("Keys one after another make a sequence, like ctrl+a then x. Backspace starts over, and Escape cancels before the first key.");
     note.setWrap(1);
     note.setJustify(.center);
     note.as(gtk.Widget).addCssClass("dim-label");
     box.append(note.as(gtk.Widget));
     const buttons = gtk.Box.new(.horizontal, 8);
     buttons.as(gtk.Widget).setHalign(.center);
+    const cancel = gtk.Button.newWithLabel("Cancel");
     const unbind = gtk.Button.newWithLabel("No Keys");
+    unbind.as(gtk.Widget).setTooltipText("Leave this action without a shortcut");
     const save = gtk.Button.newWithLabel("Save");
     save.as(gtk.Widget).addCssClass("suggested-action");
+    buttons.append(cancel.as(gtk.Widget));
     buttons.append(unbind.as(gtk.Widget));
     buttons.append(save.as(gtk.Widget));
     box.append(buttons.as(gtk.Widget));
     dialog.setChild(box.as(gtk.Widget));
-    r.* = .{ .entry = e, .dialog = dialog, .shown = shown };
+    r.* = .{ .app = e.app, .action = action, .args = args, .dialog = dialog, .shown = shown };
     r.update();
 
     const H = struct {
@@ -267,10 +284,19 @@ fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
                 rr.update();
                 return 1;
             }
+            // Escape alone, before anything is recorded, is a way out; later it's a key like any.
+            if (keyval == 0xff1b and mods == 0 and rr.seq.items.len == 0) {
+                _ = rr.dialog.close();
+                return 1;
+            }
             if (rr.seq.items.len >= 4) return 1;
             var buf: [48]u8 = undefined;
             const name = keys.rexName(&buf, keyval, gdk.keyvalToUnicode(keyval), mods) orelse return 1;
-            rr.seq.append(gpa, gpa.dupe(u8, name) catch return 1) catch return 1;
+            const copy = gpa.dupe(u8, name) catch return 1;
+            rr.seq.append(gpa, copy) catch {
+                gpa.free(copy);
+                return 1;
+            };
             rr.update();
             return 1;
         }
@@ -280,9 +306,16 @@ fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
         fn unbound(_: *gtk.Button, rr: *Recording) callconv(.c) void {
             rr.save(true);
         }
-        fn closed(_: *adw.Dialog, rr: *Recording) callconv(.c) void {
+        fn cancelled(_: *gtk.Button, rr: *Recording) callconv(.c) void {
+            _ = rr.dialog.close();
+        }
+        // Runs when the dialog itself is freed, after every button that points here is gone.
+        fn freed(data: ?*anyopaque) callconv(.c) void {
+            const rr: *Recording = @ptrCast(@alignCast(data.?));
             rr.clear();
             rr.seq.deinit(gpa);
+            gpa.free(rr.action);
+            gpa.free(rr.args);
             gpa.destroy(rr);
         }
     };
@@ -292,10 +325,12 @@ fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
     dialog.as(gtk.Widget).addController(ctl.as(gtk.EventController));
     _ = gtk.Button.signals.clicked.connect(save, *Recording, &H.saved, r, .{});
     _ = gtk.Button.signals.clicked.connect(unbind, *Recording, &H.unbound, r, .{});
-    _ = adw.Dialog.signals.closed.connect(dialog, *Recording, &H.closed, r, .{});
+    _ = gtk.Button.signals.clicked.connect(cancel, *Recording, &H.cancelled, r, .{});
+    dialog.as(gobject.Object).setDataFull("compy-recording", r, &H.freed);
     // Buttons can't take the keyboard, so every key goes to the recording.
     save.as(gtk.Widget).setFocusable(0);
     unbind.as(gtk.Widget).setFocusable(0);
+    cancel.as(gtk.Widget).setFocusable(0);
     dialog.present(e.row.as(gtk.Widget));
 }
 
@@ -373,4 +408,18 @@ fn copyLua(_: *gtk.Button, a: *App) callconv(.c) void {
     out.append(gpa, 0) catch return;
     a.window.as(gtk.Widget).getClipboard().setText(@ptrCast(out.items.ptr));
     a.toastText("Shortcuts copied as Lua");
+}
+
+test "the recorded keys fit their buffer, two spaces apart" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Press the keys…", sequenceText(&buf, &.{}));
+    try std.testing.expectEqualStrings("⌃A", sequenceText(&buf, &.{"ctrl+a"}));
+    try std.testing.expectEqualStrings("⌃A  x  ⌃⇧N", sequenceText(&buf, &.{ "ctrl+a", "x", "ctrl+shift+n" }));
+    // A buffer too small for every key holds the ones that fit and still ends properly.
+    for (0..16) |len| {
+        var small: [16]u8 = undefined;
+        const text = sequenceText(small[0 .. len + 1], &.{ "ctrl+a", "x", "ctrl+shift+n", "f" });
+        try std.testing.expect(text.len <= len);
+        try std.testing.expect(std.mem.startsWith(u8, "⌃A  x  ⌃⇧N  f", text));
+    }
 }

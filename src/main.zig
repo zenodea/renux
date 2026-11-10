@@ -102,6 +102,8 @@ test {
     _ = @import("settings.zig");
     _ = @import("themes.zig");
     _ = @import("settings_window.zig");
+    _ = @import("shortcuts.zig");
+    _ = @import("theme_editor.zig");
     _ = @import("tailscale.zig");
     _ = @import("qr.zig");
 }

@@ -8,6 +8,7 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const themes = @import("themes.zig");
 const stream = @import("stream.zig");
+const Rgb = @import("theme.zig").Rgb;
 
 const gpa = std.heap.c_allocator;
 
@@ -67,17 +68,11 @@ pub fn regenerate(bg: u32, fg: u32) [16]u32 {
 }
 
 fn luma(c: u32) f64 {
-    return (0.2126 * @as(f64, @floatFromInt((c >> 16) & 0xff)) + 0.7152 * @as(f64, @floatFromInt((c >> 8) & 0xff)) + 0.0722 * @as(f64, @floatFromInt(c & 0xff))) / 255;
+    return Rgb.of(c).luma();
 }
 
 fn mix(a: u32, b: u32, t: f64) u32 {
-    var out: u32 = 0;
-    inline for (.{ 16, 8, 0 }) |sh| {
-        const x: f64 = @floatFromInt((a >> sh) & 0xff);
-        const y: f64 = @floatFromInt((b >> sh) & 0xff);
-        out |= @as(u32, @intFromFloat(@round(x + (y - x) * t))) << sh;
-    }
-    return out;
+    return Rgb.of(a).mix(Rgb.of(b), t).pack();
 }
 
 fn hsl(h: f64, s: f64, l: f64) u32 {
@@ -86,9 +81,21 @@ fn hsl(h: f64, s: f64, l: f64) u32 {
     const x = c * (1 - @abs(@mod(hp, 2) - 1));
     const rgb: [3]f64 = if (hp < 1) .{ c, x, 0 } else if (hp < 2) .{ x, c, 0 } else if (hp < 3) .{ 0, c, x } else if (hp < 4) .{ 0, x, c } else if (hp < 5) .{ x, 0, c } else .{ c, 0, x };
     const m = l - c / 2;
-    var out: u32 = 0;
-    for (rgb, 0..) |v, i| out |= @as(u32, @intFromFloat(@round(std.math.clamp(v + m, 0, 1) * 255))) << @intCast(16 - 8 * i);
-    return out;
+    return (Rgb{ .r = rgb[0] + m, .g = rgb[1] + m, .b = rgb[2] + m }).pack();
+}
+
+pub const NameError = error{ Empty, Hidden, TooLong };
+
+/// A theme's name as the name of its file: slashes and control characters become dashes. A
+/// name that starts with a dot is refused, since the list of themes leaves hidden files out
+/// and `.` and `..` aren't files at all.
+pub fn fileName(buf: []u8, raw: []const u8) NameError![]const u8 {
+    const name = std.mem.trim(u8, raw, " \t");
+    if (name.len == 0) return error.Empty;
+    if (name[0] == '.') return error.Hidden;
+    if (name.len > buf.len) return error.TooLong;
+    for (name, 0..) |c, i| buf[i] = if (c == '/' or c == '\\' or c < 0x20 or c == 0x7f) '-' else c;
+    return buf[0..name.len];
 }
 
 // The editor.
@@ -96,32 +103,36 @@ fn hsl(h: f64, s: f64, l: f64) u32 {
 const Editor = struct {
     dialog: *adw.Dialog,
     name: *adw.EntryRow,
+    /// The group the name is in, whose description says why a name was refused.
+    name_group: *adw.PreferencesGroup,
     path: ?[:0]u8,
     buttons: [19]*gtk.ColorDialogButton,
-    done: *const fn (ctx: *anyopaque, path: []const u8) void,
+    done: Done,
     ctx: *anyopaque,
 
     fn get(e: *Editor, i: usize) u32 {
-        const v = e.buttons[i].getRgba();
-        const byte = struct {
-            fn f(x: f32) u32 {
-                return @intFromFloat(@round(std.math.clamp(x, 0, 1) * 255));
-            }
-        }.f;
-        return (byte(v.f_red) << 16) | (byte(v.f_green) << 8) | byte(v.f_blue);
+        return Rgb.fromRgba(e.buttons[i].getRgba()).pack();
     }
 
     fn set(e: *Editor, i: usize, c: u32) void {
-        const rgba: gdk.RGBA = .{ .f_red = @as(f32, @floatFromInt((c >> 16) & 0xff)) / 255, .f_green = @as(f32, @floatFromInt((c >> 8) & 0xff)) / 255, .f_blue = @as(f32, @floatFromInt(c & 0xff)) / 255, .f_alpha = 1 };
-        e.buttons[i].setRgba(&rgba);
+        e.buttons[i].setRgba(&Rgb.of(c).rgba());
+    }
+
+    /// Says why the theme wasn't saved, by the name.
+    fn refuse(e: *Editor, why: [:0]const u8) void {
+        e.name.as(gtk.Widget).addCssClass("error");
+        e.name_group.setDescription(why.ptr);
     }
 };
+
+/// Called with the file a theme was saved to, and the file it was in before when it was an
+/// existing theme (the same one unless it was renamed).
+pub const Done = *const fn (ctx: *anyopaque, old: ?[]const u8, path: []const u8) void;
 
 const labels = [_][:0]const u8{ "Background", "Foreground", "Cursor", "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White", "Bright black", "Bright red", "Bright green", "Bright yellow", "Bright blue", "Bright magenta", "Bright cyan", "Bright white" };
 
 /// Opens the editor on a theme file, or on a new theme starting from `start`'s colors.
-pub fn open(parent: *gtk.Widget, path: ?[]const u8, start: stream.Colors, ctx: *anyopaque, done: *const fn (ctx: *anyopaque, path: []const u8) void) void {
-    const e = gpa.create(Editor) catch return;
+pub fn open(parent: *gtk.Widget, path: ?[]const u8, start: stream.Colors, ctx: *anyopaque, done: Done) void {
     var colors = start;
     if (path) |p| if (themes.loadGhostty(p)) |c| {
         colors = c;
@@ -143,15 +154,14 @@ pub fn open(parent: *gtk.Widget, path: ?[]const u8, start: stream.Colors, ctx: *
     const g = adw.PreferencesGroup.new();
     const name = adw.EntryRow.new();
     name.as(adw.PreferencesRow).setTitle("Name");
-    if (path) |p| {
-        const base = std.fs.path.basename(p);
-        const z = gpa.dupeSentinel(u8, base, 0) catch return;
+    if (path) |p| if (gpa.dupeSentinel(u8, std.fs.path.basename(p), 0)) |z| {
         defer gpa.free(z);
         name.as(gtk.Editable).setText(z.ptr);
-    }
+    } else |_| {};
     g.add(name.as(gtk.Widget));
     page.add(g);
-    e.* = .{ .dialog = dialog, .name = name, .path = if (path) |p| gpa.dupeSentinel(u8, p, 0) catch null else null, .buttons = undefined, .done = done, .ctx = ctx };
+    const e = gpa.create(Editor) catch return;
+    e.* = .{ .dialog = dialog, .name = name, .name_group = g, .path = if (path) |p| gpa.dupeSentinel(u8, p, 0) catch null else null, .buttons = undefined, .done = done, .ctx = ctx };
     const groups = [_][:0]const u8{ "Colors", "Normal", "Bright" };
     var gi: usize = 0;
     var current_group: *adw.PreferencesGroup = undefined;
@@ -180,40 +190,65 @@ pub fn open(parent: *gtk.Widget, path: ?[]const u8, start: stream.Colors, ctx: *
 
     const H = struct {
         fn saved(_: *gtk.Button, ed: *Editor) callconv(.c) void {
-            const raw = std.mem.trim(u8, std.mem.span(ed.name.as(gtk.Editable).getText()), " ");
-            if (raw.len == 0) return;
-            // A name stays a plain file name.
             var clean: [96]u8 = undefined;
-            var n: usize = 0;
-            for (raw) |c| if (n < clean.len) {
-                clean[n] = if (c == '/' or c == '\\') '-' else c;
-                n += 1;
-            };
-            const d = dir() orelse return;
+            const name_text = fileName(&clean, std.mem.span(ed.name.as(gtk.Editable).getText())) catch |err| return ed.refuse(switch (err) {
+                error.Empty => "Give the theme a name",
+                error.Hidden => "A theme's name can't start with a dot",
+                error.TooLong => "That name is too long",
+            });
+            const d = dir() orelse return ed.refuse("The themes folder couldn't be made");
             defer gpa.free(d);
-            const target = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ d, clean[0..n] }, 0) catch return;
+            const target = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ d, name_text }, 0) catch return;
             defer gpa.free(target);
+            // Saving under another theme's name would replace that theme.
+            const same_file = if (ed.path) |old| std.mem.eql(u8, old, target) else false;
+            if (!same_file and glib.fileTest(target.ptr, .{ .exists = true }) != 0) return ed.refuse("Another theme already has that name");
             var palette: [16]u32 = undefined;
             for (0..16) |i| palette[i] = ed.get(3 + i);
-            if (!save(target, ed.get(0), ed.get(1), ed.get(2), palette)) return;
+            if (!save(target, ed.get(0), ed.get(1), ed.get(2), palette)) return ed.refuse("The theme couldn't be saved");
             // A renamed theme leaves its old file behind no more.
-            if (ed.path) |old| if (!std.mem.eql(u8, old, target)) {
+            if (ed.path) |old| if (!same_file) {
                 _ = glib.unlink(old.ptr);
             };
-            ed.done(ed.ctx, target);
+            ed.done(ed.ctx, ed.path, target);
             _ = ed.dialog.close();
         }
         fn regenerated(_: *gtk.Button, ed: *Editor) callconv(.c) void {
             const p = regenerate(ed.get(0), ed.get(1));
             for (0..16) |i| ed.set(3 + i, p[i]);
         }
-        fn closed(_: *adw.Dialog, ed: *Editor) callconv(.c) void {
+        // Runs when the dialog itself is freed, after every button that points here is gone.
+        fn freed(data: ?*anyopaque) callconv(.c) void {
+            const ed: *Editor = @ptrCast(@alignCast(data.?));
             if (ed.path) |p| gpa.free(p);
             gpa.destroy(ed);
         }
     };
     _ = gtk.Button.signals.clicked.connect(save_button, *Editor, &H.saved, e, .{});
     _ = gtk.Button.signals.clicked.connect(regen, *Editor, &H.regenerated, e, .{});
-    _ = adw.Dialog.signals.closed.connect(dialog, *Editor, &H.closed, e, .{});
+    dialog.as(gobject.Object).setDataFull("compy-theme-editor", e, &H.freed);
     dialog.present(parent);
+}
+
+test "theme names become plain file names" {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("Night Owl", try fileName(&buf, "  Night Owl "));
+    try std.testing.expectEqualStrings("a-b-c-d", try fileName(&buf, "a/b\\c\nd"));
+    try std.testing.expectEqualStrings("café", try fileName(&buf, "café"));
+    try std.testing.expectError(error.Empty, fileName(&buf, "   "));
+    try std.testing.expectError(error.Hidden, fileName(&buf, ".."));
+    try std.testing.expectError(error.Hidden, fileName(&buf, "."));
+    try std.testing.expectError(error.Hidden, fileName(&buf, ".hidden"));
+    // A name is never cut short, which could split a character in two.
+    var long: [98]u8 = undefined;
+    for (0..49) |i| @memcpy(long[i * 2 ..][0..2], "é");
+    try std.testing.expectError(error.TooLong, fileName(&buf, &long));
+    try std.testing.expectEqualStrings(long[0..96], try fileName(&buf, long[0..96]));
+}
+
+test "a regenerated palette keeps the background and foreground at its ends" {
+    const p = regenerate(0x101010, 0xe0e0e0);
+    try std.testing.expectEqual(@as(u32, 0xe0e0e0), p[15]);
+    try std.testing.expectEqual(mix(0x101010, 0xe0e0e0, 0.15), p[0]);
+    try std.testing.expectEqual(@as(u32, 0x2f2f2f), p[0]);
 }

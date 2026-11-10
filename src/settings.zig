@@ -501,6 +501,8 @@ pub fn flush() void {
         timer = 0;
     }
     if (!dirty) return;
+    // A test that hasn't set up a folder of its own never reaches the person's real settings.
+    if (@import("builtin").is_test and test_dir == null) return;
     const mine = toKeyFile(&current) catch return;
     var keep = false;
     defer if (!keep) mine.unref();
