@@ -1016,7 +1016,7 @@ pub const TermView = struct {
         // Programs that take the mouse, or use the whole screen, scroll themselves: by lines,
         // at the cell under the pointer. A touchpad reports pixels, which become lines here.
         if (t.frame.mouse or t.frame.alt_screen) {
-            v.scroll_rest += if (ctl.getUnit() == .surface) dy / v.cell_h else dy;
+            v.scroll_rest += if (ctl.getUnit() == .surface) dy * settings.current.scroll_speed / v.cell_h else dy;
             const lines = @trunc(v.scroll_rest);
             if (lines == 0) return 1;
             v.scroll_rest -= lines;
@@ -1026,8 +1026,9 @@ pub const TermView = struct {
         }
         v.scroll_velocity = 0;
         if (ctl.getUnit() == .surface) {
-            // A touchpad reports pixels: follow the fingers exactly.
-            v.scroll_px -= dy;
+            // A touchpad reports pixels. Terminals on a Mac move text about twice as far as
+            // the fingers do, which is the speed people expect; the setting scales it.
+            v.scroll_px -= dy * settings.current.scroll_speed;
             v.scroll_target = v.scroll_px;
         } else {
             // A wheel notch glides three lines.
@@ -1047,7 +1048,7 @@ pub const TermView = struct {
     fn onDecelerate(_: *gtk.EventControllerScroll, _: f64, vy: f64, v: *TermView) callconv(.c) void {
         const t = v.term() orelse return;
         if (t.frame.mouse or t.frame.alt_screen) return;
-        v.scroll_velocity = -vy;
+        v.scroll_velocity = -vy * settings.current.scroll_speed;
         v.startScrollTick();
     }
 

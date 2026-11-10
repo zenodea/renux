@@ -23,6 +23,8 @@ const max_message_bytes = 64 * 1024 * 1024;
 /// Events are delivered just after the window draws, never ahead of it, a few at a time.
 const deliver_priority = glib.PRIORITY_HIGH_IDLE + 25;
 const deliver_budget_us = 5 * std.time.us_per_ms;
+/// At most this much waiting data counts as "a little" and is delivered ahead of the frame.
+const quick_bytes = 32 * 1024;
 
 pub const Handler = struct {
     ctx: *anyopaque,
@@ -510,9 +512,22 @@ fn post(s: *Socket, event: Event) void {
     if (!s.draining) {
         s.draining = true;
         s.ref();
-        _ = glib.idleAddFull(deliver_priority, &drain, s, null);
+        // A little data (the echo of a key, a prompt) is delivered ahead of the next frame so
+        // it is drawn in that frame; a lot waits until after it, so a flood never holds up
+        // drawing.
+        if (s.in_bytes <= quick_bytes)
+            _ = glib.idleAddFull(glib.PRIORITY_DEFAULT, &drainQuick, s, null)
+        else
+            _ = glib.idleAddFull(deliver_priority, &drain, s, null);
     }
     while (s.in_bytes > max_in_bytes and !s.closed.load(.acquire)) s.in_cond.wait(&s.lock);
+}
+
+/// The quick delivery, ahead of drawing. If more arrived than fits its few milliseconds, the
+/// rest goes the ordinary way, after the frame.
+fn drainQuick(data: ?*anyopaque) callconv(.c) c_int {
+    if (drain(data) != 0) _ = glib.idleAddFull(deliver_priority, &drain, data, null);
+    return 0;
 }
 
 /// Delivers queued events on the main loop, in order, for a few milliseconds at a time so a

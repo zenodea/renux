@@ -41,6 +41,8 @@ pub const Settings = struct {
     blur: bool = true,
     /// The sidebar's width in pixels, set by dragging its edge.
     sidebar_width: f64 = 250,
+    /// How far a trackpad's movement scrolls a terminal, as a multiple of the fingers' own.
+    scroll_speed: f64 = 2,
     /// After a prefix such as ctrl+a, list the keys that can follow.
     key_hints: bool = true,
     /// Whether the welcome pages have been seen.
@@ -189,6 +191,7 @@ const ranges = [_]struct { []const u8, f64, f64 }{
     .{ "window_opacity", 0.2, 1 },
     .{ "terminal_opacity", 0.2, 1 },
     .{ "sidebar_width", sidebar_min, 480 },
+    .{ "scroll_speed", 0.5, 5 },
     .{ "sidebar_text_scale", 0.8, 1.4 },
     .{ "fade_inactive", 0, 0.6 },
     .{ "highlight_opacity", 0.1, 1 },
