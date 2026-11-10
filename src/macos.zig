@@ -36,8 +36,21 @@ pub fn setDockIcon(png_path: [:0]const u8) void {
     const path = send(Id, ns_string, "stringWithUTF8String:", .{@as([*:0]const u8, png_path.ptr)});
     const image = send(Id, send(Id, objc_getClass("NSImage"), "alloc", .{}), "initWithContentsOfFile:", .{path});
     if (image == null) return std.log.warn("couldn't load the Dock icon from {s}", .{png_path});
+    // The picture fills its square, as Linux desktops expect, but the Dock's own icons leave a
+    // margin around theirs (an 824-point shape on a 1024-point square). Drawn edge to edge it
+    // looks a size bigger than its neighbors, so it goes onto a clear square with that margin.
+    const Size = extern struct { w: f64, h: f64 };
+    const side: f64 = 512;
+    const inset = side * (1024.0 - 824.0) / 1024.0 / 2.0;
+    const canvas = send(Id, send(Id, objc_getClass("NSImage"), "alloc", .{}), "initWithSize:", .{Size{ .w = side, .h = side }});
+    if (canvas == null) return;
+    send(void, canvas, "lockFocus", .{});
+    const draw: *const fn (Id, Sel, Rect, Rect, c_ulong, f64) callconv(.c) void = @ptrCast(&objc_msgSend);
+    // A zero source rect means the whole picture; 2 is "source over".
+    draw(image, sel_registerName("drawInRect:fromRect:operation:fraction:"), .{ .x = inset, .y = inset, .w = side - 2 * inset, .h = side - 2 * inset }, .{ .x = 0, .y = 0, .w = 0, .h = 0 }, 2, 1);
+    send(void, canvas, "unlockFocus", .{});
     const app = send(Id, objc_getClass("NSApplication"), "sharedApplication", .{});
-    send(void, app, "setApplicationIconImage:", .{image});
+    send(void, app, "setApplicationIconImage:", .{canvas});
 }
 
 var effect: Id = null;
