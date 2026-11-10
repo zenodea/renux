@@ -13,6 +13,14 @@ pub const Rect = struct {
     h: f64 = 1,
 };
 
+/// `v` kept between `lo` and `hi`. Unlike `std.math.clamp` the range may be empty or not a
+/// number, as it is for a layer the server placed past the window's edge; `lo` wins then.
+pub fn clampWithin(v: f64, lo: f64, hi: f64) f64 {
+    if (!(hi > lo)) return lo;
+    if (!(v > lo)) return lo;
+    return @min(v, hi);
+}
+
 pub const Block = struct {
     id: []const u8,
     label: []const u8,
@@ -207,6 +215,17 @@ fn rectOf(v: ?json.Value) Rect {
 
 fn dupeOpt(a: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try a.dupe(u8, v) else null;
+}
+
+test "clamping survives an empty range" {
+    try std.testing.expectEqual(@as(f64, 0.5), clampWithin(0.5, 0, 1));
+    try std.testing.expectEqual(@as(f64, 0), clampWithin(-2, 0, 1));
+    try std.testing.expectEqual(@as(f64, 1), clampWithin(7, 0, 1));
+    // A layer wider than the window leaves no room to move: it stays at the near edge.
+    try std.testing.expectEqual(@as(f64, 0), clampWithin(0.3, 0, -0.2));
+    try std.testing.expectEqual(@as(f64, 0.15), clampWithin(0.6, 0.15, 0.1));
+    try std.testing.expectEqual(@as(f64, 0.15), clampWithin(std.math.nan(f64), 0.15, 1));
+    try std.testing.expectEqual(@as(f64, 0), clampWithin(0.5, 0, std.math.nan(f64)));
 }
 
 test "parses a split window" {

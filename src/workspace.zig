@@ -19,6 +19,9 @@ const Server = @import("server.zig").Server;
 const TermView = @import("termview.zig").TermView;
 const icons = @import("icons.zig");
 const blockicon = @import("blockicon.zig");
+const draw = @import("draw.zig");
+const programs = @import("programs.zig");
+const settings = @import("settings.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -30,10 +33,6 @@ pub var show_headers = true;
 /// Where the window's corner (its buttons and the sidebar toggle) ends, in window pixels. A
 /// pane title under it starts after it, which is the case while the sidebar is hidden.
 pub var corner_right: f64 = 0;
-
-pub fn isTightNow() bool {
-    return tight;
-}
 
 pub fn setTight(on: bool) void {
     tight = on;
@@ -65,6 +64,8 @@ const Pane = struct {
     joined: bool = false,
     /// The program's own background, for frames that match it.
     program_bg: u32 = 0,
+    /// The background the card's style class is for now, or none.
+    bg_applied: ?u32 = null,
     seen: bool = false,
     /// Where the card is drawn now, in pixels, and how fast that is moving toward `rect`.
     cur: [4]f64 = .{ 0, 0, 0, 0 },
@@ -77,7 +78,14 @@ const Pane = struct {
 const Backdrop = struct { layer_id: []u8, widget: *gtk.Widget };
 
 /// A card whose pane went away, fading out where it was.
-const Leaving = struct { frame: *gtk.Widget, cur: [4]f64, size: [2]f64, alpha: f64, block_id: []u8 };
+const Leaving = struct {
+    frame: *gtk.Widget,
+    cur: [4]f64,
+    /// The size the card keeps while it fades, so its terminal never asks for a new one.
+    size: [2]f64,
+    alpha: f64,
+    block_id: []u8,
+};
 
 const Divider = struct {
     horizontal: bool,
@@ -87,7 +95,7 @@ const Divider = struct {
     after_id: []u8,
 };
 
-const Minimized = struct { layer_id: []u8, block_id: []u8, button: *gtk.Widget };
+const Minimized = struct { layer_id: []u8, block_id: []u8, button: *gtk.Widget, label: *gtk.Label };
 
 pub const Workspace = struct {
     pub fn isTight() bool {
@@ -95,6 +103,9 @@ pub const Workspace = struct {
     }
 
     bg_idle: c_uint = 0,
+    /// The colors of frames that match their programs, and the text last loaded into it.
+    bg_css: ?*gtk.CssProvider = null,
+    bg_css_text: std.ArrayList(u8) = .empty,
     root: *gtk.Widget,
     /// While a tiled pane is carried: a small card under the pointer, and where it would land.
     ghost: *gtk.Widget,
@@ -198,6 +209,7 @@ pub const Workspace = struct {
         _ = gtk.GestureDrag.signals.drag_begin.connect(drag, *Workspace, &dividerBegin, ws, .{});
         _ = gtk.GestureDrag.signals.drag_update.connect(drag, *Workspace, &dividerUpdate, ws, .{});
         _ = gtk.GestureDrag.signals.drag_end.connect(drag, *Workspace, &dividerEnd, ws, .{});
+        _ = gtk.Gesture.signals.cancel.connect(drag, *Workspace, &dividerCancel, ws, .{});
         root.addController(drag.as(gtk.EventController));
         const motion = gtk.EventControllerMotion.new();
         _ = gtk.EventControllerMotion.signals.motion.connect(motion, *Workspace, &hover, ws, .{});
@@ -213,10 +225,9 @@ pub const Workspace = struct {
             replace(&ws.session_id, session_id);
             ws.snap = true;
         }
-        ws.clearDividers();
-        ws.clearTray();
         ws.empty.setVisible(@intFromBool(window == null));
         const w = window orelse return ws.clear();
+        ws.clearDividers();
         if (ws.window_id) |old| {
             if (!std.mem.eql(u8, old, w.id)) ws.snap = true;
         } else ws.snap = true;
@@ -233,13 +244,10 @@ pub const Workspace = struct {
         }
         // Floating layers sit over the tiles, at their bounds; minimized ones wait in the tray.
         if (w.zoomed_block_id == null) for (w.layers) |layer| {
-            if (!layer.floating) continue;
-            if (layer.minimized) {
-                if (layer.blocks.len > 0) ws.addToTray(layer.id, layer.blocks[0].id);
-                continue;
-            }
+            if (!layer.floating or layer.minimized) continue;
             if (layer.layout) |node| ws.placeNode(session_id, node, layer.id, layer.bounds);
         };
+        ws.syncTray(w);
 
         var i: usize = 0;
         while (i < ws.panes.items.len) {
@@ -248,34 +256,28 @@ pub const Workspace = struct {
                 if (ws.snap) ws.drop(p) else ws.leave(p);
             } else i += 1;
         }
-        // Floating layers draw over every tiled pane, in the server's order, back to front.
-        if (w.zoomed_block_id == null) for (w.layers) |layer| {
-            if (!layer.floating or layer.minimized) continue;
-            for (ws.panes.items) |p| if (p.floating and std.mem.eql(u8, p.layer_id, layer.id)) p.frame.insertBefore(ws.root, null);
-        };
+        // Another window's cards must not fade out over this one.
+        if (ws.snap) ws.flushLeaving();
         if (ws.moving != null) {
             ws.moving = null;
             if (dragged) |d| for (ws.panes.items, 0..) |p, k| if (p.block_id.ptr == d) {
                 ws.moving = k;
             };
             if (ws.moving == null) {
+                // The pane under the pointer is gone, and its carried card with it.
                 ws.float_resizing = false;
+                ws.move_armed = false;
                 ws.zone = .none;
                 ws.zone_pane = null;
+                ws.showCarry();
             }
         }
         if (ws.zone_pane) |z| if (z >= ws.panes.items.len) {
             ws.zone_pane = null;
             ws.zone = .none;
         };
-        // Keep the carried card, its target and the tray above the cards.
-        inline for (.{ ws.target, ws.ghost }) |top| {
-            top.unparent();
-            top.setParent(ws.root);
-        }
+        ws.restack(w);
         if (ws.resizing != null) ws.followDivider();
-        ws.tray.as(gtk.Widget).unparent();
-        ws.tray.as(gtk.Widget).setParent(ws.root);
         ws.joinLayers();
         ws.markFocus();
         ws.cornerChanged();
@@ -299,11 +301,67 @@ pub const Workspace = struct {
         }
     }
 
+    /// Floating layers draw over every tiled pane, in the server's order, back to front; the
+    /// drop target, the carried card and the tray stay above them all. Children only move when
+    /// that order isn't already the one on screen, since moving one lays the workspace out again.
+    fn restack(ws: *Workspace, w: *const view.Window) void {
+        var want: std.ArrayList(*gtk.Widget) = .empty;
+        defer want.deinit(gpa);
+        if (w.zoomed_block_id == null) for (w.layers) |layer| {
+            if (!layer.floating or layer.minimized) continue;
+            for (ws.panes.items) |p| if (p.floating and std.mem.eql(u8, p.layer_id, layer.id)) want.append(gpa, p.frame) catch {};
+        };
+        want.appendSlice(gpa, &.{ ws.target, ws.ghost, ws.tray.as(gtk.Widget) }) catch {};
+        // Compare with the children at the top, skipping the cards behind joined layers, which
+        // `joinLayers` places itself.
+        var child = ws.root.getLastChild();
+        var k = want.items.len;
+        while (k > 0) {
+            const c = child orelse break;
+            child = c.getPrevSibling();
+            if (ws.isBackdrop(c)) continue;
+            if (c != want.items[k - 1]) break;
+            k -= 1;
+        }
+        if (k == 0) return;
+        for (want.items) |x| {
+            if (x.getParent() == null) x.setParent(ws.root) else x.insertBefore(ws.root, null);
+        }
+    }
+
+    fn isBackdrop(ws: *Workspace, w: *gtk.Widget) bool {
+        for (ws.backdrops.items) |bd| if (bd.widget == w) return true;
+        return false;
+    }
+
+    /// Forgets any drag in progress, such as when the panes under it are gone.
+    fn resetDrag(ws: *Workspace) void {
+        ws.resizing = null;
+        ws.moving = null;
+        ws.move_armed = false;
+        ws.float_resizing = false;
+        ws.zone = .none;
+        ws.zone_pane = null;
+        ws.ghost.setVisible(0);
+        ws.target.setVisible(0);
+        ws.swap_arrows.setVisible(0);
+        ws.root.setCursorFromName(null);
+    }
+
+    fn flushLeaving(ws: *Workspace) void {
+        // Emptied first: `gone` asks whether a pane is shown, never whether one is leaving.
+        var leaving = ws.leaving;
+        ws.leaving = .empty;
+        defer leaving.deinit(gpa);
+        for (leaving.items) |l| ws.gone(l);
+    }
+
     pub fn clear(ws: *Workspace) void {
+        // Drag state points at panes by index, so it goes with them.
+        ws.resetDrag();
         for (ws.panes.items) |p| ws.drop(p);
         ws.panes.clearRetainingCapacity();
-        for (ws.leaving.items) |l| ws.gone(l);
-        ws.leaving.clearRetainingCapacity();
+        ws.flushLeaving();
         for (ws.backdrops.items) |bd| {
             bd.widget.unparent();
             gpa.free(bd.layer_id);
@@ -311,6 +369,39 @@ pub const Workspace = struct {
         ws.backdrops.clearRetainingCapacity();
         ws.clearDividers();
         ws.clearTray();
+        ws.root.queueAllocate();
+    }
+
+    /// Frees the workspace. Call it while `root` is still alive (before it leaves its parent)
+    /// and while the server is: dropping the panes releases their terminals.
+    pub fn destroy(ws: *Workspace) void {
+        ws.clear();
+        if (ws.bg_idle != 0) _ = glib.Source.remove(ws.bg_idle);
+        if (ws.tick != 0) {
+            ws.root.removeTickCallback(ws.tick);
+            ticking -|= 1;
+        }
+        if (ws.bg_css) |pr| {
+            if (gdk.Display.getDefault()) |d| gtk.StyleContext.removeProviderForDisplay(d, pr.as(gtk.StyleProvider));
+            pr.unref();
+        }
+        ws.bg_css_text.deinit(gpa);
+        // The layout and the gestures on `root` find the workspace through this.
+        gobject.Object.setData(ws.root.as(gobject.Object), "compy-workspace", null);
+        ws.empty.unparent();
+        inline for (.{ ws.ghost, ws.target, ws.tray.as(gtk.Widget) }) |w| {
+            if (w.getParent() != null) w.unparent();
+            w.as(gobject.Object).unref();
+        }
+        // The gestures on `root` hold this pointer; without their widget they never fire again.
+        ws.root.setCanTarget(0);
+        ws.panes.deinit(gpa);
+        ws.dividers.deinit(gpa);
+        ws.minimized.deinit(gpa);
+        ws.backdrops.deinit(gpa);
+        ws.leaving.deinit(gpa);
+        inline for (.{ ws.session_id, ws.window_id, ws.focused }) |slot| if (slot) |v| gpa.free(v);
+        gpa.destroy(ws);
     }
 
     fn clearDividers(ws: *Workspace) void {
@@ -331,8 +422,35 @@ pub const Workspace = struct {
         ws.minimized.clearRetainingCapacity();
     }
 
+    /// Shows a chip for each minimized layer. Chips that are already right stay as they are,
+    /// keeping their hover and their place; only a change to the set rebuilds them.
+    fn syncTray(ws: *Workspace, w: *const view.Window) void {
+        var same = true;
+        var n: usize = 0;
+        if (w.zoomed_block_id == null) for (w.layers) |layer| {
+            if (!layer.floating or !layer.minimized or layer.blocks.len == 0) continue;
+            if (n >= ws.minimized.items.len or !std.mem.eql(u8, ws.minimized.items[n].layer_id, layer.id) or !std.mem.eql(u8, ws.minimized.items[n].block_id, layer.blocks[0].id)) same = false;
+            n += 1;
+        };
+        if (same and n == ws.minimized.items.len) {
+            for (ws.minimized.items) |m| ws.refreshChip(m);
+            return;
+        }
+        ws.clearTray();
+        if (w.zoomed_block_id == null) for (w.layers) |layer| {
+            if (layer.floating and layer.minimized and layer.blocks.len > 0) ws.addToTray(layer.id, layer.blocks[0].id);
+        };
+    }
+
+    fn refreshChip(ws: *Workspace, m: Minimized) void {
+        var buf: [256]u8 = undefined;
+        const title = chipTitle(ws.server, m.block_id, &buf);
+        if (!std.mem.eql(u8, std.mem.span(m.label.getText()), title)) m.label.setText(title.ptr);
+    }
+
     /// Lets a card fade out where it was before it goes.
     fn leave(ws: *Workspace, p: Pane) void {
+        if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         p.frame.setCanTarget(0);
         gpa.free(p.layer_id);
         // The terminal stays until the card has faded, so it fades with its text.
@@ -354,6 +472,7 @@ pub const Workspace = struct {
     }
 
     fn drop(ws: *Workspace, p: Pane) void {
+        if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         p.frame.unparent();
         ws.server.releaseTerminal(p.block_id);
         gpa.free(p.block_id);
@@ -448,11 +567,15 @@ pub const Workspace = struct {
             fn end(_: *gtk.GestureDrag, _: f64, _: f64, w: *Workspace) callconv(.c) void {
                 w.moveEnd();
             }
+            fn cancel(_: *gtk.GestureDrag, _: ?*gdk.EventSequence, w: *Workspace) callconv(.c) void {
+                w.moveCancel();
+            }
         };
         const drag = gtk.GestureDrag.new();
         _ = gtk.GestureDrag.signals.drag_begin.connect(drag, *Workspace, &PaneDrag.begin, ws, .{});
         _ = gtk.GestureDrag.signals.drag_update.connect(drag, *Workspace, &PaneDrag.update, ws, .{});
         _ = gtk.GestureDrag.signals.drag_end.connect(drag, *Workspace, &PaneDrag.end, ws, .{});
+        _ = gtk.Gesture.signals.cancel.connect(drag, *Workspace, &PaneDrag.cancel, ws, .{});
         row.as(gtk.Widget).addController(drag.as(gtk.EventController));
         // The drag handlers find their pane by the widget, so tag it with the block.
         gobject.Object.setData(row.as(gobject.Object), "compy-block", owned.ptr);
@@ -489,11 +612,15 @@ pub const Workspace = struct {
             fn end(_: *gtk.GestureDrag, _: f64, _: f64, w: *Workspace) callconv(.c) void {
                 w.gripEnd();
             }
+            fn cancel(_: *gtk.GestureDrag, _: ?*gdk.EventSequence, w: *Workspace) callconv(.c) void {
+                w.gripEnd();
+            }
         };
         const gdrag = gtk.GestureDrag.new();
         _ = gtk.GestureDrag.signals.drag_begin.connect(gdrag, *Workspace, &GripDrag.begin, ws, .{});
         _ = gtk.GestureDrag.signals.drag_update.connect(gdrag, *Workspace, &GripDrag.update, ws, .{});
         _ = gtk.GestureDrag.signals.drag_end.connect(gdrag, *Workspace, &GripDrag.end, ws, .{});
+        _ = gtk.Gesture.signals.cancel.connect(gdrag, *Workspace, &GripDrag.cancel, ws, .{});
         gw.addController(gdrag.as(gtk.EventController));
         gobject.Object.setData(gw.as(gobject.Object), "compy-block", owned.ptr);
 
@@ -557,6 +684,7 @@ pub const Workspace = struct {
             .layer_id = gpa.dupe(u8, layer_id) catch return,
             .block_id = gpa.dupe(u8, block_id) catch return,
             .button = button.as(gtk.Widget),
+            .label = label,
         }) catch {};
     }
 
@@ -575,15 +703,16 @@ pub const Workspace = struct {
     fn showCopied(ctx: *anyopaque, block_id: []const u8) void {
         const ws: *Workspace = @ptrCast(@alignCast(ctx));
         const p = ws.paneOf(block_id) orelse return;
-        if (!@import("settings.zig").current.copy_animation) return;
+        if (!settings.current.copy_animation) return;
         p.copied.addCssClass("shown");
         if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         const Hide = struct {
             fn run(data: ?*anyopaque) callconv(.c) c_int {
                 const w: *Workspace = @ptrCast(@alignCast(data.?));
-                // Each pane's timer is cleared here; the one that fired is past its time.
-                const now = glib.getMonotonicTime();
-                for (w.panes.items) |*q| if (q.copied_timer != 0 and now >= q.copied_until) {
+                // Only the pane whose timer this is: another pane's stays its own to remove, or
+                // it would be left running after its pane, and the workspace, are gone.
+                const id = if (glib.mainCurrentSource()) |source| source.getId() else 0;
+                for (w.panes.items) |*q| if (q.copied_timer != 0 and q.copied_timer == id) {
                     q.copied.removeCssClass("shown");
                     q.copied_timer = 0;
                 };
@@ -603,13 +732,14 @@ pub const Workspace = struct {
                 p.term.widget().queueDraw();
             }
         }
+        ws.markBackdropFocus();
+    }
+
+    /// The card behind a joined layer is lit while one of its panes has the focus.
+    fn markBackdropFocus(ws: *Workspace) void {
+        const layer: ?[]const u8 = if (ws.focused) |f| (if (ws.paneOf(f)) |p| p.layer_id else null) else null;
         for (ws.backdrops.items) |bd| {
-            var on = false;
-            for (ws.panes.items) |p| if (std.mem.eql(u8, p.layer_id, bd.layer_id)) {
-                if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) {
-                    on = true;
-                };
-            };
+            const on = if (layer) |l| std.mem.eql(u8, l, bd.layer_id) else false;
             if (on) bd.widget.addCssClass("focused") else bd.widget.removeCssClass("focused");
         }
     }
@@ -699,8 +829,8 @@ pub const Workspace = struct {
         for (ws.panes.items) |p| p.term.resendSize();
     }
 
-    fn fromWidget(w: *gtk.Widget) *Workspace {
-        return @ptrCast(@alignCast(gobject.Object.getData(w.as(gobject.Object), "compy-workspace").?));
+    fn fromWidget(w: *gtk.Widget) ?*Workspace {
+        return @ptrCast(@alignCast(gobject.Object.getData(w.as(gobject.Object), "compy-workspace") orelse return null));
     }
 
     // Geometry. Fractions of the window become pixels with one gap between neighbours and none at
@@ -808,18 +938,12 @@ pub const Workspace = struct {
                     if (p.frame == c) break std.mem.eql(u8, p.layer_id, bd.layer_id);
                 } else false;
                 if (is_layer) {
-                    bd.widget.insertBefore(ws.root, c);
+                    if (c.getPrevSibling() != bd.widget) bd.widget.insertBefore(ws.root, c);
                     break;
                 }
             }
-            var focused = false;
-            for (ws.panes.items) |p| if (std.mem.eql(u8, p.layer_id, bd.layer_id)) {
-                if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) {
-                    focused = true;
-                };
-            };
-            if (focused) bd.widget.addCssClass("focused") else bd.widget.removeCssClass("focused");
         }
+        ws.markBackdropFocus();
     }
 
     // Dividers.
@@ -863,6 +987,7 @@ pub const Workspace = struct {
     /// the drag began, without waiting for the server's answer.
     fn followDivider(ws: *Workspace) void {
         const i = ws.resizing orelse return;
+        if (i >= ws.dividers.items.len) return;
         const d = ws.dividers.items[i];
         const eps = 0.0005;
         const start = if (d.horizontal) d.rect.x else d.rect.y;
@@ -900,6 +1025,7 @@ pub const Workspace = struct {
 
     fn sendDivider(ws: *Workspace, dx: f64, dy: f64, force: bool) void {
         const i = ws.resizing orelse return;
+        if (i >= ws.dividers.items.len) return;
         const d = &ws.dividers.items[i];
         const w = ws.width();
         const h = ws.height();
@@ -927,10 +1053,21 @@ pub const Workspace = struct {
         ws.resizing = null;
     }
 
+    /// The drag was taken away (a dialog opened, the compositor took the pointer) and no end
+    /// follows. The split stays where it was let go, and the server hears that ratio.
+    fn dividerCancel(_: *gtk.GestureDrag, _: ?*gdk.EventSequence, ws: *Workspace) callconv(.c) void {
+        const i = ws.resizing orelse return;
+        ws.resizing = null;
+        if (i >= ws.dividers.items.len) return;
+        const d = ws.dividers.items[i];
+        if (ws.session_id) |s| ws.server.resizePane(s, d.horizontal, d.before_id, d.after_id, ws.local_ratio);
+        ws.root.queueAllocate();
+    }
+
     // Carrying a pane by its title.
 
     fn pointerEntered(ctl: *gtk.EventControllerMotion, _: f64, _: f64, ws: *Workspace) callconv(.c) void {
-        if (!@import("settings.zig").current.focus_follows_mouse) return;
+        if (!settings.current.focus_follows_mouse) return;
         if (ws.moving != null or ws.resizing != null) return;
         const w = ctl.as(gtk.EventController).getWidget() orelse return;
         const i = ws.paneOfWidget(w) orelse return;
@@ -943,11 +1080,14 @@ pub const Workspace = struct {
     /// A program changed its background; with frames matching programs, the card follows it.
     fn programBg(ctx: *anyopaque, block_id: []const u8, bg: u32) void {
         const ws: *Workspace = @ptrCast(@alignCast(ctx));
+        var wanted = false;
         for (ws.panes.items) |*p| if (std.mem.eql(u8, p.block_id, block_id)) {
             p.program_bg = bg;
+            if (!std.meta.eql(p.bg_applied, wantedBg(p))) wanted = true;
         };
-        // Styles can't change while drawing, so this waits for the next idle moment.
-        if (ws.bg_idle == 0) ws.bg_idle = glib.idleAdd(&applyProgramBgs, ws);
+        // Styles can't change while drawing, so this waits for the next idle moment. Nothing
+        // waits at all when no card would change, which is always so with the setting off.
+        if (wanted and ws.bg_idle == 0) ws.bg_idle = glib.idleAdd(&applyProgramBgs, ws);
     }
 
     fn applyProgramBgs(data: ?*anyopaque) callconv(.c) c_int {
@@ -957,32 +1097,51 @@ pub const Workspace = struct {
         return 0;
     }
 
+    /// The background a card should take from its program, or none.
+    fn wantedBg(p: *const Pane) ?u32 {
+        if (!settings.current.match_program_bg or p.program_bg == 0) return null;
+        return p.program_bg & 0xffffff;
+    }
+
+    /// Gives each card the style class of its program's background, named after the color, and
+    /// loads the rules for the colors in use. Nothing is touched when nothing changed.
     pub fn refreshProgramBgs(ws: *Workspace) void {
-        const on = @import("settings.zig").current.match_program_bg;
         var css: std.ArrayList(u8) = .empty;
         defer css.deinit(gpa);
-        for (ws.panes.items, 0..) |p, i| {
-            var name_buf: [16]u8 = undefined;
-            const name = std.fmt.bufPrintSentinel(&name_buf, "pbg-{d}", .{i}, 0) catch continue;
-            // Drop any old class, then add this pane's.
-            var k: usize = 0;
-            while (k < 64) : (k += 1) {
-                var old: [16]u8 = undefined;
-                const o = std.fmt.bufPrintSentinel(&old, "pbg-{d}", .{k}, 0) catch break;
-                if (p.frame.hasCssClass(o.ptr) != 0) p.frame.removeCssClass(o.ptr);
+        for (ws.panes.items, 0..) |*p, i| {
+            const want = wantedBg(p);
+            if (!std.meta.eql(p.bg_applied, want)) {
+                var old_buf: [16]u8 = undefined;
+                if (p.bg_applied) |old| p.frame.removeCssClass(bgClass(&old_buf, old).ptr);
+                if (want) |c| p.frame.addCssClass(bgClass(&old_buf, c).ptr);
+                p.bg_applied = want;
             }
-            if (!on or p.program_bg == 0) continue;
-            p.frame.addCssClass(name.ptr);
-            css.print(gpa, ".pane-card.{s}, .pane-card.{s} .pane-title {{ background-color: #{x:0>6}; }}\n", .{ name, name, p.program_bg & 0xffffff }) catch {};
+            const c = want orelse continue;
+            // One rule per color, however many panes share it.
+            const listed = for (ws.panes.items[0..i]) |q| {
+                if (q.bg_applied) |qc| if (qc == c) break true;
+            } else false;
+            if (listed) continue;
+            var name_buf: [16]u8 = undefined;
+            const name = bgClass(&name_buf, c);
+            css.print(gpa, ".pane-card.{s}, .pane-card.{s} .pane-title {{ background-color: #{x:0>6}; }}\n", .{ name, name, c }) catch {};
         }
+        if (std.mem.eql(u8, css.items, ws.bg_css_text.items)) return;
+        ws.bg_css_text.clearRetainingCapacity();
+        ws.bg_css_text.appendSlice(gpa, css.items) catch {};
         css.append(gpa, 0) catch return;
-        const provider = bg_css orelse blk: {
+        const provider = ws.bg_css orelse blk: {
+            const display = gdk.Display.getDefault() orelse return;
             const pr = gtk.CssProvider.new();
-            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, pr.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
-            bg_css = pr;
+            gtk.StyleContext.addProviderForDisplay(display, pr.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+            ws.bg_css = pr;
             break :blk pr;
         };
         provider.loadFromString(@ptrCast(css.items.ptr));
+    }
+
+    fn bgClass(buf: *[16]u8, color: u32) [:0]const u8 {
+        return std.fmt.bufPrintSentinel(buf, "pbg-{x:0>6}", .{color & 0xffffff}, 0) catch "pbg";
     }
 
     fn paneOfWidget(ws: *Workspace, w: *gtk.Widget) ?usize {
@@ -1020,7 +1179,7 @@ pub const Workspace = struct {
 
     fn moveUpdate(ws: *Workspace, dx: f64, dy: f64) void {
         const i = ws.moving orelse return;
-        if (ws.float_resizing) return;
+        if (ws.float_resizing or i >= ws.panes.items.len) return;
         if (!ws.move_armed and @abs(dx) < 6 and @abs(dy) < 6) return;
         ws.move_armed = true;
         ws.pointer = .{ ws.move_origin[0] + dx, ws.move_origin[1] + dy };
@@ -1029,8 +1188,8 @@ pub const Workspace = struct {
             // A floating layer follows the pointer, all its panes together; the server hears
             // where it lands.
             var b = ws.float_start;
-            b.x = std.math.clamp(b.x + dx / ws.width(), 0, 1 - b.w);
-            b.y = std.math.clamp(b.y + dy / ws.height(), 0, 1 - b.h);
+            b.x = view.clampWithin(b.x + dx / @max(ws.width(), 1), 0, 1 - b.w);
+            b.y = view.clampWithin(b.y + dy / @max(ws.height(), 1), 0, 1 - b.h);
             ws.setLayerBounds(i, b);
             return;
         }
@@ -1072,7 +1231,7 @@ pub const Workspace = struct {
 
     /// Shows the carried card under the pointer and where it would land.
     fn showCarry(ws: *Workspace) void {
-        const carrying = if (ws.moving) |i| ws.move_armed and !ws.panes.items[i].floating else false;
+        const carrying = if (ws.moving) |i| i < ws.panes.items.len and ws.move_armed and !ws.panes.items[i].floating else false;
         ws.ghost.setVisible(@intFromBool(carrying));
         const shown = carrying and ws.zone_pane != null;
         if (shown and ws.target.getVisible() == 0) {
@@ -1089,6 +1248,7 @@ pub const Workspace = struct {
     /// Where the carried pane would land, in pixels.
     fn targetRect(ws: *Workspace) [4]f64 {
         const t = ws.zone_pane orelse return .{ 0, 0, 0, 0 };
+        if (t >= ws.panes.items.len) return .{ 0, 0, 0, 0 };
         const r = ws.pixels(ws.panes.items[t].rect);
         var x = r[0];
         var y = r[1];
@@ -1121,12 +1281,15 @@ pub const Workspace = struct {
         }
         if (!ws.move_armed) return;
         const sid = ws.session_id orelse return;
+        if (i >= ws.panes.items.len) return;
         const p = ws.panes.items[i];
         if (p.floating) return ws.server.resizeLayer(sid, p.layer_id, p.bounds);
+        const t = ws.zone_pane orelse return;
+        if (t >= ws.panes.items.len) return;
         switch (ws.zone) {
             .none => {},
-            .swap => if (ws.zone_pane) |t| ws.server.swapBlocks(sid, p.block_id, ws.panes.items[t].block_id),
-            .left, .right, .top, .bottom => if (ws.zone_pane) |t| ws.server.moveBlock(
+            .swap => ws.server.swapBlocks(sid, p.block_id, ws.panes.items[t].block_id),
+            .left, .right, .top, .bottom => ws.server.moveBlock(
                 sid,
                 p.block_id,
                 ws.panes.items[t].block_id,
@@ -1134,6 +1297,18 @@ pub const Workspace = struct {
                 ws.zone == .left or ws.zone == .top,
             ),
         }
+    }
+
+    /// The drag was taken away and no end follows. A floating layer stays where it was let go
+    /// and the server hears that; a carried pane is put down where it came from.
+    fn moveCancel(ws: *Workspace) void {
+        const i = ws.moving orelse return;
+        if (ws.float_resizing) return;
+        if (i < ws.panes.items.len and ws.panes.items[i].floating) return ws.moveEnd();
+        ws.moving = null;
+        ws.zone = .none;
+        ws.zone_pane = null;
+        ws.showCarry();
     }
 
     fn updateZone(ws: *Workspace) void {
@@ -1188,8 +1363,8 @@ pub const Workspace = struct {
         const decay = @exp(-spring * dt);
         var busy = false;
         for (ws.panes.items, 0..) |*p, i| {
-            if (ws.pinned(i)) continue;
-            const still = springStep(&p.cur, &p.vel, ws.paneRect(p), dt, decay);
+            // A card under the pointer is placed directly, but still fades in if it is new.
+            const still = ws.pinned(i) or springStep(&p.cur, &p.vel, ws.paneRect(p), dt, decay);
             p.alpha += (1 - p.alpha) * (1 - @exp(-14 * dt));
             if (p.alpha > 0.995) p.alpha = 1;
             if (!still or p.alpha < 1) busy = true;
@@ -1210,7 +1385,7 @@ pub const Workspace = struct {
         ws.root.queueAllocate();
         if (!busy) {
             ws.tick = 0;
-            ticking -= 1;
+            ticking -|= 1;
             return 0;
         }
         return 1;
@@ -1286,18 +1461,21 @@ pub const Workspace = struct {
     fn gripUpdate(ws: *Workspace, dx: f64, dy: f64) void {
         if (!ws.float_resizing) return;
         const i = ws.moving orelse return;
+        if (i >= ws.panes.items.len) return;
         var b = ws.float_start;
-        b.w = std.math.clamp(b.w + dx / ws.width(), 0.15, 1 - b.x);
-        b.h = std.math.clamp(b.h + dy / ws.height(), 0.15, 1 - b.y);
+        b.w = view.clampWithin(b.w + dx / @max(ws.width(), 1), 0.15, 1 - b.x);
+        b.h = view.clampWithin(b.h + dy / @max(ws.height(), 1), 0.15, 1 - b.y);
         ws.setLayerBounds(i, b);
     }
 
+    /// Also where a cancelled resize ends, so it does nothing unless one is under way.
     fn gripEnd(ws: *Workspace) void {
-        defer {
-            ws.float_resizing = false;
-            ws.moving = null;
-        }
-        const p = ws.panes.items[ws.moving orelse return];
+        if (!ws.float_resizing) return;
+        ws.float_resizing = false;
+        const i = ws.moving orelse return;
+        ws.moving = null;
+        if (i >= ws.panes.items.len) return;
+        const p = ws.panes.items[i];
         if (ws.session_id) |s| ws.server.resizeLayer(s, p.layer_id, p.bounds);
     }
 };
@@ -1317,7 +1495,7 @@ fn measure(_: *gtk.Widget, _: gtk.Orientation, _: c_int, minimum: *c_int, natura
 }
 
 fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
-    const ws = Workspace.fromWidget(widget);
+    const ws = Workspace.fromWidget(widget) orelse return;
     // When the window itself changes size, cards keep up with it instead of easing behind.
     const size = [2]f64{ @floatFromInt(width), @floatFromInt(height) };
     const resized = size[0] != ws.last_size[0] or size[1] != ws.last_size[1];
@@ -1347,12 +1525,12 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         };
         if (p.alpha < 1) moving = true;
         p.frame.setOpacity(p.alpha);
-        allocateAt(p.frame, p.cur, .{ @round(target[2]), @round(target[3]) });
+        allocateAt(p.frame, p.cur);
     }
     for (ws.leaving.items) |l| {
         l.frame.setOpacity(@max(0, l.alpha));
         // A leaving card keeps its size, so its terminal never asks the server for a new one.
-        allocateAt(l.frame, .{ l.cur[0] + (l.cur[2] - l.size[0]) / 2, l.cur[1] + (l.cur[3] - l.size[1]) / 2, l.size[0], l.size[1] }, l.size);
+        allocateAt(l.frame, .{ l.cur[0] + (l.cur[2] - l.size[0]) / 2, l.cur[1] + (l.cur[3] - l.size[1]) / 2, l.size[0], l.size[1] });
     }
     // A joined layer's card wraps its panes where they are drawn now, a pixel outside them.
     for (ws.backdrops.items) |bd| {
@@ -1374,8 +1552,8 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         };
         bd.widget.sizeAllocate(&a, -1);
     }
-    if (ws.target.getVisible() != 0) allocateAt(ws.target, ws.target_cur, .{ @round(ws.target_cur[2]), @round(ws.target_cur[3]) });
-    if (ws.ghost.getVisible() != 0) allocateAt(ws.ghost, .{ ws.pointer[0] - 75, ws.pointer[1] - 46, 150, 92 }, .{ 150, 92 });
+    if (ws.target.getVisible() != 0) allocateAt(ws.target, ws.target_cur);
+    if (ws.ghost.getVisible() != 0) allocateAt(ws.ghost, .{ ws.pointer[0] - 75, ws.pointer[1] - 46, 150, 92 });
     ws.snap = false;
     if (moving or ws.leaving.items.len > 0) ws.startTick();
     var all: gtk.Allocation = .{ .f_x = 0, .f_y = 0, .f_width = width, .f_height = height };
@@ -1391,19 +1569,13 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     ws.tray.as(gtk.Widget).sizeAllocate(&tray, -1);
 }
 
-/// Places a card at `r`. While it's on its way somewhere, the card keeps the size it's headed
-/// for and the GPU scales and moves it there, so its terminal isn't drawn again on every frame.
-/// Places a card at its animated rect. The card takes that size rather than being scaled: scaling
-/// makes the GPU redraw every glyph at a new size each frame, which cost 6 to 300 ms a frame.
-/// The terminal inside keeps its grid until the size settles, since resizes are debounced.
-/// The colors of frames that match their programs.
-var bg_css: ?*gtk.CssProvider = null;
-
 /// How many workspaces are animating, for COMPY_PERF.
 pub var ticking: u32 = 0;
 
-fn allocateAt(w: *gtk.Widget, r: [4]f64, size: [2]f64) void {
-    _ = size;
+/// Places a card at its animated rect. The card takes that size rather than being scaled: scaling
+/// makes the GPU redraw every glyph at a new size each frame, which cost 6 to 300 ms a frame.
+/// The terminal inside keeps its grid until the size settles, since resizes are debounced.
+fn allocateAt(w: *gtk.Widget, r: [4]f64) void {
     const cw: c_int = @intFromFloat(@max(1, @round(r[2])));
     const ch: c_int = @intFromFloat(@max(1, @round(r[3])));
     const fx = @round(r[0]);
@@ -1438,32 +1610,17 @@ fn drawSwap(area: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, _: ?
 }
 
 /// A minimized pane's name, as its title row would show it, such as "zsh ~/Work/bundle".
-fn chipTitle(server: *Server, block_id: []const u8, out: []u8) [:0]const u8 {
-    const programs = @import("programs.zig");
+fn chipTitle(server: *Server, block_id: []const u8, out: *[256]u8) [:0]const u8 {
     const info = server.blockInfo(block_id) orelse return "Pane";
-    var folder_buf: [256]u8 = undefined;
-    const folder: ?[]const u8 = if (info.folder) |f| programs.shortFolder(&folder_buf, f) else null;
-    const program: ?[]const u8 = if (info.program) |p| std.mem.trimStart(u8, p[0 .. std.mem.indexOfScalar(u8, p, '/') orelse p.len], "-") else null;
-    const shell = if (program) |p| TermView.isShell(p) else false;
-    if (!shell) if (info.title) |t| if (t.len > 0) return std.fmt.bufPrintSentinel(out, "{s}", .{t}, 0) catch "Pane";
-    const p = program orelse return "Pane";
-    if (folder) |f| return std.fmt.bufPrintSentinel(out, "{s} {s}", .{ p, f }, 0) catch "Pane";
-    return std.fmt.bufPrintSentinel(out, "{s}", .{p}, 0) catch "Pane";
+    const program = info.program orelse "";
+    // Anything but a shell goes by the title it set.
+    if (!TermView.isShell(programs.programName(program))) if (info.title) |t| if (t.len > 0) return std.fmt.bufPrintSentinel(out, "{s}", .{t}, 0) catch "Pane";
+    if (info.program == null) return "Pane";
+    var buf: [255]u8 = undefined;
+    return std.fmt.bufPrintSentinel(out, "{s}", .{programs.displayTitle(&buf, program, info.folder)}, 0) catch "Pane";
 }
 
-fn setRgba(cr: *cairo.Context, c: gdk.RGBA, alpha: f64) void {
-    cr.setSourceRgba(c.f_red, c.f_green, c.f_blue, c.f_alpha * alpha);
-}
-
-fn roundRect(cr: *cairo.Context, x: f64, y: f64, w: f64, h: f64, r: f64) void {
-    const pi: f64 = std.math.pi;
-    cr.newSubPath();
-    cr.arc(x + w - r, y + r, r, -pi / 2, 0);
-    cr.arc(x + w - r, y + h - r, r, 0, pi / 2);
-    cr.arc(x + r, y + h - r, r, pi / 2, pi);
-    cr.arc(x + r, y + r, r, pi, 3 * pi / 2);
-    cr.closePath();
-}
+const setRgba = draw.setRgba;
 
 fn drawGrip(area: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, _: ?*anyopaque) callconv(.c) void {
     var ink: gdk.RGBA = undefined;
