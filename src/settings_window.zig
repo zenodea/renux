@@ -283,6 +283,8 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     segments(ctx, tabs, "Tabs", settings.TabPosition, &settings.current.tab_position, &.{ "Left", "Right", "Above" }, App.tabsChanged);
     switchRow(ctx, tabs, "Fill available space", "Tabs above the panes share the width", &settings.current.tab_fill, App.tabsChanged);
     switchRow(ctx, tabs, "Show each process", "A tab lists every program in its window", &settings.current.tab_processes, App.tabsChanged);
+    const go = group(p, "Go to Anything", null);
+    switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     const look = group(p, "Appearance", null);
     segments(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, App.themeChanged);
     const panes = group(p, "Panes", null);

@@ -827,6 +827,39 @@ pub const Server = struct {
         c.fire("client.key", .{ .session_id = session_id, .block_id = block_id, .key = key });
     }
 
+    /// Folders (and files, if asked) in a directory as the terminal's shell sees it.
+    pub const DirList = struct {
+        ctx: *anyopaque,
+        done: *const fn (ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool) void,
+    };
+
+    pub fn listDir(s: *Server, session_id: []const u8, block_id: []const u8, path: []const u8, with_files: bool, cb: DirList) void {
+        s.call("com.superlogical.terminal.list_dir", .{ .session_id = session_id, .block_id = block_id, .args = .{ .path = path, .files = with_files, .limit = 400 } }, DirList, cb, gotDir);
+    }
+
+    fn gotDir(_: *Server, cb: *DirList, r: Result) void {
+        switch (r) {
+            .ok => |payload| {
+                var names: std.ArrayList([]const u8) = .empty;
+                defer names.deinit(gpa);
+                var files: std.ArrayList(bool) = .empty;
+                defer files.deinit(gpa);
+                for (json.array(payload, "entries")) |e| {
+                    const name = json.str(e, "name") orelse continue;
+                    names.append(gpa, name) catch break;
+                    files.append(gpa, json.boolean(e, "file") orelse false) catch break;
+                }
+                cb.done(cb.ctx, json.str(payload, "path") orelse "", names.items, files.items);
+            },
+            .err => cb.done(cb.ctx, "", &.{}, &.{}),
+        }
+    }
+
+    /// Types text into a terminal as if from the keyboard.
+    pub fn writeText(s: *Server, session_id: []const u8, block_id: []const u8, text: []const u8) void {
+        s.act(session_id, "com.superlogical.terminal.write", .{ .session_id = session_id, .block_id = block_id, .args = .{ .data = text } });
+    }
+
     pub fn paste(s: *Server, session_id: []const u8, block_id: []const u8, text: []const u8) void {
         const c = s.control orelse return;
         c.fire("block.event", .{ .session_id = session_id, .block_id = block_id, .event = .{ .type = "paste", .payload = .{ .text = text } } });

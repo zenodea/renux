@@ -179,6 +179,20 @@ pub const Term = struct {
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel);
     }
 
+    /// Selects everything: the scrollback and the screen.
+    pub fn selectAll(self: *Term) void {
+        var sel: c.GhosttySelection = std.mem.zeroes(c.GhosttySelection);
+        var first: c.GhosttyPoint = std.mem.zeroes(c.GhosttyPoint);
+        first.tag = c.GHOSTTY_POINT_TAG_SCREEN;
+        var last: c.GhosttyPoint = std.mem.zeroes(c.GhosttyPoint);
+        last.tag = c.GHOSTTY_POINT_TAG_ACTIVE;
+        last.value.coordinate.x = self.frame.cols -| 1;
+        last.value.coordinate.y = self.frame.rows -| 1;
+        if (c.ghostty_terminal_grid_ref(self.term, first, &sel.start) != c.GHOSTTY_SUCCESS) return;
+        if (c.ghostty_terminal_grid_ref(self.term, last, &sel.end) != c.GHOSTTY_SUCCESS) return;
+        _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel);
+    }
+
     pub fn selectWord(self: *Term, x: u16, y: u32) void {
         var o: c.GhosttyTerminalSelectWordOptions = std.mem.zeroes(c.GhosttyTerminalSelectWordOptions);
         o.size = @sizeOf(c.GhosttyTerminalSelectWordOptions);

@@ -130,6 +130,11 @@ const css =
     \\window.tabs-above .compy-sidebar row.session-pick .session-heading { font-size: 0.95em; color: @window_fg_color; }
     \\window.sidebar-end .content .workspace { margin: 6px 0 8px 8px; }
     \\window.sidebar-end .content.alone .workspace { margin: 6px 8px 8px 8px; }
+    \\.goto { padding: 12px; }
+    \\.goto-detail { font-size: 0.85em; color: @compy_secondary; }
+    \\.goto-path { font-family: monospace; font-size: 0.9em; color: @compy_secondary; margin: 0 4px; }
+    \\.goto-kind { font-size: 0.75em; color: @compy_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 7px; }
+    \\.goto-row { padding: 6px 8px; }
     \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
     \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
     \\.hint-desc { font-size: 0.92em; }
@@ -651,6 +656,11 @@ pub const App = struct {
                 h.workspace.blockChanged(block);
                 a.refreshRows();
                 a.activity.changed();
+                if (h.server.blockInfo(block)) |info| if (info.folder) |f| {
+                    var pbuf: [1024]u8 = undefined;
+                    const path = folderPath(&pbuf, f);
+                    if (path.len > 1) settings.addRecentPath(path);
+                };
             },
             .alert => a.showAlert(h),
             .keymap => {},
@@ -1129,7 +1139,7 @@ pub const App = struct {
     }
 
     /// A window's row shows its focused pane: that pane's program and title, like Rex.
-    fn rowTitle(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
+    pub fn rowTitle(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
         if (w.focused_block_id) |fb| for (h.workspace.panes.items) |p| if (std.mem.eql(u8, p.block_id, fb)) {
             var tb: [256]u8 = undefined;
             const t = p.term.title(&tb);
@@ -1221,6 +1231,51 @@ pub const App = struct {
                 return;
             }
         };
+    }
+
+    pub fn openSession(a: *App, h: *Host, session_id: []const u8) void {
+        a.selectHost(h);
+        a.showSession(session_id);
+    }
+
+    pub fn openWindow(a: *App, h: *Host, session_id: []const u8, window_id: []const u8) void {
+        a.selectHost(h);
+        a.showWindowAction(session_id, window_id);
+    }
+
+    /// Changes the focused pane's shell to a folder.
+    pub fn changeDirectory(a: *App, path: []const u8) void {
+        const t = a.target() orelse return;
+        a.usePath(t[0], t[1], t[2], path, false);
+    }
+
+    /// Types a path into a pane, quoted for the shell: as a cd and Enter, or as text to use.
+    pub fn usePath(a: *App, s: *Server, session_id: []const u8, block_id: []const u8, path: []const u8, insert: bool) void {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        if (!insert) out.appendSlice(gpa, "cd ") catch return;
+        out.append(gpa, '\'') catch return;
+        for (path) |c| if (c == '\'') out.appendSlice(gpa, "'\\''") catch return else out.append(gpa, c) catch return;
+        out.append(gpa, '\'') catch return;
+        if (insert) out.append(gpa, ' ') catch return else out.append(gpa, '\r') catch return;
+        s.writeText(session_id, block_id, out.items);
+        if (!insert) settings.addRecentPath(path);
+        if (a.workspace) |w| w.grabFocus();
+    }
+
+    /// The focused pane's folder as a plain path, from the file:// address its shell reports.
+    fn focusedFolder(a: *App, buf: []u8) []const u8 {
+        const t = a.target() orelse return "";
+        const info = t[0].blockInfo(t[2]) orelse return "";
+        const uri = info.folder orelse return "";
+        return folderPath(buf, uri);
+    }
+
+    fn browse(a: *App, mode: @import("goto.zig").BrowseMode) bool {
+        const t = a.target() orelse return false;
+        var buf: [1024]u8 = undefined;
+        @import("goto.zig").openBrowser(a, t[0], t[1], t[2], a.focusedFolder(&buf), mode);
+        return true;
     }
 
     /// Shows a pane wherever it is: its host, session and window, with the keyboard in it.
@@ -1460,7 +1515,7 @@ pub const App = struct {
         return true;
     }
 
-    fn showSession(a: *App, session_id: []const u8) void {
+    pub fn showSession(a: *App, session_id: []const u8) void {
         a.auto_picked = false;
         setSlot(&a.session_id, session_id);
         setSlot(&a.window_id, null);
@@ -1550,6 +1605,18 @@ pub const App = struct {
         if (eql(u8, name, "minimize_all_floating")) return a.minimizeAllFloating();
         if (eql(u8, name, "new_floating")) return a.newFloatingPane();
         if (eql(u8, name, "rename")) return a.renamePaneAction();
+        if (eql(u8, name, "go_to")) {
+            @import("goto.zig").openAnything(a);
+            return true;
+        }
+        if (eql(u8, name, "go_to_directory")) return a.browse(.cd);
+        if (eql(u8, name, "insert_path")) return a.browse(.insert);
+        if (eql(u8, name, "select_all")) {
+            const ws = a.workspace orelse return false;
+            const tv = ws.focusedView() orelse return false;
+            tv.selectAll();
+            return true;
+        }
         if (eql(u8, name, "view_activity")) {
             a.activity.toggle();
             return true;
@@ -2674,6 +2741,31 @@ fn rowTile(s: *Server, w: *const view.Window) *gtk.Widget {
     return @import("blockicon.zig").createFor(s, block, ids[0..n], 16);
 }
 
+/// A window's name as its row and tab show it.
+pub fn windowLabel(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
+    return App.rowTitle(h, buf, w, v);
+}
+
+/// "file://host/Users/me/My%20Code" as "/Users/me/My Code".
+fn folderPath(buf: []u8, uri: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, uri, "file://")) return uri;
+    const rest = uri["file://".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return "";
+    const encoded = rest[slash..];
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < encoded.len and n < buf.len) : (n += 1) {
+        if (encoded[i] == '%' and i + 2 < encoded.len) {
+            buf[n] = std.fmt.parseInt(u8, encoded[i + 1 .. i + 3], 16) catch encoded[i];
+            i += 3;
+        } else {
+            buf[n] = encoded[i];
+            i += 1;
+        }
+    }
+    return buf[0..n];
+}
+
 fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
     if (w.title()) |t| return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
     // Rex generated the label, so the first pane's says more.
@@ -2729,6 +2821,12 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         const cmd = it.next() orelse continue;
         const rest = std.mem.trim(u8, line[cmd.len..], " ");
         // App actions don't need a pane.
+        if (std.mem.eql(u8, cmd, "rex")) {
+            // A Rex action by name, as a key binding would run it: rex pane.go_to
+            const name = it.next() orelse continue;
+            if (a.current) |h| _ = App.perform(h, name, null, null);
+            continue;
+        }
         if (std.mem.eql(u8, cmd, "action")) {
             const name = it.next() orelse continue;
             const z = gpa.dupeSentinel(u8, name, 0) catch continue;

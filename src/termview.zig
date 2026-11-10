@@ -689,6 +689,13 @@ pub const TermView = struct {
         if (keyval == 0xff1b) setKeyMode("");
     }
 
+    pub fn selectAll(v: *TermView) void {
+        const t = v.term() orelse return;
+        t.selectAll();
+        v.selectionMade();
+        v.widget().queueDraw();
+    }
+
     /// Jumps between shell prompts, which the shell has to mark.
     pub fn jumpPrompt(v: *TermView, delta: isize) void {
         const t = v.term() orelse return;

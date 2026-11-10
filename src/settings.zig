@@ -57,7 +57,25 @@ pub const Settings = struct {
     /// Empty uses this computer's name.
     client_label: []u8,
     hosts: std.ArrayList(Host) = .empty,
+    /// Folders panes were in lately, newest first, for Go to Anything.
+    recent_paths: std.ArrayList([]u8) = .empty,
+    recent_paths_shown: bool = true,
 };
+
+/// Puts a folder first among the recent ones, keeping at most 30.
+pub fn addRecentPath(path: []const u8) void {
+    const list = &current.recent_paths;
+    for (list.items, 0..) |p, i| if (std.mem.eql(u8, p, path)) {
+        if (i == 0) return;
+        const keep = list.orderedRemove(i);
+        list.insert(gpa, 0, keep) catch gpa.free(keep);
+        return save();
+    };
+    const copy = gpa.dupe(u8, path) catch return;
+    list.insert(gpa, 0, copy) catch return gpa.free(copy);
+    while (list.items.len > 30) gpa.free(list.pop().?);
+    save();
+}
 
 pub var current: Settings = undefined;
 
@@ -141,6 +159,16 @@ pub fn load() void {
     s.visual_bell = boolean(kf, "visual-bell", true);
     s.paste_warning = boolean(kf, "paste-warning", true);
     s.copy_on_select = boolean(kf, "copy-on-select", true);
+    s.recent_paths_shown = boolean(kf, "recent-paths", true);
+    {
+        var n: usize = 0;
+        if (kf.getStringList("paths", "recent", &n, null)) |list| {
+            defer glib.strfreev(@ptrCast(list));
+            for (0..n) |i| if (std.mem.span(list[i])) |p| {
+                s.recent_paths.append(gpa, gpa.dupe(u8, p) catch continue) catch {};
+            };
+        }
+    }
 
     // Hosts are stored as matching lists of labels and addresses.
     var n_labels: usize = 0;
@@ -230,7 +258,7 @@ pub fn save() void {
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
         .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
-        .{ "key-hints", s.key_hints },         .{ "tab-fill", s.tab_fill },
+        .{ "key-hints", s.key_hints },         .{ "recent-paths", s.recent_paths_shown },         .{ "tab-fill", s.tab_fill },
         .{ "tab-processes", s.tab_processes },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
@@ -263,6 +291,15 @@ pub fn save() void {
     }
     kf.setStringList("hosts", "labels", @ptrCast(labels.items.ptr), labels.items.len);
     kf.setStringList("hosts", "urls", @ptrCast(urls.items.ptr), urls.items.len);
+
+    var recent: std.ArrayList(?[*:0]const u8) = .empty;
+    defer recent.deinit(gpa);
+    for (s.recent_paths.items) |p| {
+        const z = gpa.dupeSentinel(u8, p, 0) catch return;
+        owned.append(gpa, z) catch return;
+        recent.append(gpa, z.ptr) catch return;
+    }
+    kf.setStringList("paths", "recent", @ptrCast(recent.items.ptr), recent.items.len);
 
     const d = dir() orelse return;
     defer gpa.free(d);
