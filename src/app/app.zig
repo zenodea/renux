@@ -4428,6 +4428,9 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
     const width: f64 = @floatFromInt(w.getWidth());
     const height: f64 = @floatFromInt(w.getHeight());
     const snap = gtk.Snapshot.new();
+    // RENUX_SHOT_SCALE=2 saves the picture at twice the size, as a HiDPI screen shows it.
+    const scale: f32 = if (std.c.getenv("RENUX_SHOT_SCALE")) |v| std.fmt.parseFloat(f32, std.mem.span(v)) catch 1 else 1;
+    if (scale != 1) snap.scale(scale, scale);
     paintable.as(gdk.Paintable).snapshot(snap.as(gdk.Snapshot), width, height);
     const node = snap.freeToNode() orelse return 1;
     defer node.unref();

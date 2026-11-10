@@ -1,10 +1,61 @@
+<p align="center"><img src="data/icons/dev.renux.png" width="128" alt="Renux icon: a penguin seen close up"></p>
+
 # Renux
 
 A native Linux client for [Rex](https://rex.superlogical.com), written in Zig with GTK4 and
 libadwaita. It shows a Rex server's sessions, windows and panes, with live terminals drawn
 through libghostty-vt.
 
-The program it builds is called `renux`, and its desktop ID is `dev.renux`.
+![Three panes side by side: a shell, and two coding agents at work](docs/screenshots/panes.png)
+
+## What it does
+
+- **Your Rex sessions, as they are.** Sessions, tabs and panes live on the Rex server, so they
+  are the same here, in the Rex app and on a phone. Key bindings come from your Rex config.
+- **Fast terminals.** Text is drawn with libghostty-vt, with selection, find, links, box
+  drawing, and your own font and theme.
+- **An eye on your agents.** Panes running coding agents show what they are doing. The agent
+  board sorts them into Idle, Running, Attention and Done; the eye in the sidebar lists only
+  agents, with a dot when one needs you.
+- **Several servers.** Connect to more than one Rex server, on this computer or over Tailscale,
+  and be told when one could be updated.
+
+| The agent board | Only agents in the sidebar |
+|---|---|
+| ![Agents sorted into four columns by state](docs/screenshots/board.png) | ![The sidebar listing each agent with its task and state](docs/screenshots/agents.png) |
+
+![The Settings window on its Themes page](docs/screenshots/settings.png)
+
+## Installing
+
+There are no packages yet, so Renux is built from source. You need a Rex server to connect to;
+see [Rex's installation guide](https://www.superlogical.com/rex/docs/linux/installation.md).
+
+1. Install Zig 0.17 and the libraries, with their development files:
+
+   | Distribution | Command |
+   |---|---|
+   | Fedora | `sudo dnf install gtk4-devel libadwaita-devel librsvg2-devel` |
+   | Debian, Ubuntu | `sudo apt install libgtk-4-dev libadwaita-1-dev librsvg2-dev` |
+   | Arch Linux | `sudo pacman -S gtk4 libadwaita librsvg` |
+
+2. Build and install into `~/.local`, which puts the program, its desktop entry and its icon
+   where your desktop looks for them:
+
+   ```sh
+   git clone --recurse-submodules <the address of this repository> renux
+   cd renux
+   zig build -Doptimize=ReleaseFast -p ~/.local
+   ```
+
+3. Start Renux from your applications menu, or run `renux`. On first start it asks for your
+   Rex server's address.
+
+`renux --toggle` shows or hides the running window, for a desktop shortcut.
+`renux --version` prints the version.
+
+The program is called `renux`, and its desktop ID is `dev.renux`. Settings are kept in
+`~/.config/renux`.
 
 ## Building
 
