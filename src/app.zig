@@ -438,12 +438,7 @@ pub const App = struct {
         if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
         // `compy --toggle` finds this process by its ID and signals it.
         if (std.c.getenv("COMPY_SHOT") == null) {
-            var pbuf: [512]u8 = undefined;
-            if (@import("main.zig").pidPath(&pbuf)) |path| {
-                var nbuf: [32]u8 = undefined;
-                const text = std.fmt.bufPrint(&nbuf, "{d}\n", .{std.c.getpid()}) catch "";
-                _ = glib.fileSetContents(path.ptr, @ptrCast(text.ptr), @intCast(text.len), null);
-            }
+            @import("main.zig").claimToggle();
             _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
         }
         if (std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
