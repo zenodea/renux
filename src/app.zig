@@ -241,6 +241,15 @@ pub const App = struct {
     filter: ?*Host = null,
     next_page: usize = 0,
     filter_button: *gtk.MenuButton = undefined,
+    /// The sidebar's buttons that give way as it gets narrow; see `fitSidebar`.
+    head_more: *gtk.Widget = undefined,
+    header_room: *gtk.Widget = undefined,
+    head_search: *gtk.Widget = undefined,
+    foot_session: *gtk.Widget = undefined,
+    foot_host: *gtk.Widget = undefined,
+    foot_more: *gtk.Widget = undefined,
+    /// Session rows show only their menu, which then holds what their other buttons did.
+    narrow_rows: bool = false,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
     mode_chip: *gtk.Label = undefined,
@@ -358,10 +367,13 @@ pub const App = struct {
         side_header.setShowTitle(0);
         side_header.setShowStartTitleButtons(0);
         const header_room = gtk.Box.new(.horizontal, 0);
-        corner_size.addWidget(header_room.as(gtk.Widget));
+        // As wide as the corner while the sidebar has that much room; see `fitSidebar`.
+        a.header_room = header_room.as(gtk.Widget);
         side_header.packStart(header_room.as(gtk.Widget));
-        side_header.packEnd(menuButton(appMenu(), "More").as(gtk.Widget));
-        side_header.packEnd(icons.button(.search, "Commands", "app.palette").as(gtk.Widget));
+        a.head_more = menuButton(appMenu(), "More").as(gtk.Widget);
+        side_header.packEnd(a.head_more);
+        a.head_search = icons.button(.search, "Commands", "app.palette").as(gtk.Widget);
+        side_header.packEnd(a.head_search);
         // The footer, like Rex's: narrow the sidebar to one host, a new session, and another host.
         const footer = gtk.Box.new(.horizontal, 2);
         footer.as(gtk.Widget).addCssClass("sidebar-footer");
@@ -383,8 +395,14 @@ pub const App = struct {
         const spacer = gtk.Box.new(.horizontal, 0);
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
-        footer.append(icons.button(.new_session, "New session", "app.new-session").as(gtk.Widget));
-        footer.append(icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget));
+        a.foot_session = icons.button(.new_session, "New session", "app.new-session").as(gtk.Widget);
+        footer.append(a.foot_session);
+        a.foot_host = icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget);
+        footer.append(a.foot_host);
+        // The header's menu moves down here when the sidebar is too narrow to hold it up there.
+        a.foot_more = menuButton(appMenu(), "More").as(gtk.Widget);
+        a.foot_more.setVisible(0);
+        footer.append(a.foot_more);
         const side = adw.ToolbarView.new();
         side.as(gtk.Widget).addCssClass("compy-sidebar");
         side.addTopBar(side_header.as(gtk.Widget));
@@ -582,10 +600,38 @@ pub const App = struct {
     var sidebar_drag_start: f64 = 0;
 
     fn setSidebarWidth(a: *App, width: f64) void {
-        const w = std.math.clamp(width, 180, 480);
+        const w = std.math.clamp(width, settings.sidebar_min, 480);
         a.split.setMaxSidebarWidth(w);
         a.split.setMinSidebarWidth(w);
         a.split.setSidebarWidthFraction(1);
+        a.fitSidebar(w);
+        a.cornerChanged();
+    }
+
+    /// Shows the sidebar's buttons that fit at this width. The ones that don't are in a menu
+    /// instead: the header's search and menu give way to the window's corner buttons first, the
+    /// menu moving to the footer; then the footer's own buttons and each session's go, all of
+    /// which the menus offer too.
+    fn fitSidebar(a: *App, width: f64) void {
+        // The header keeps clear of the window's corner buttons, but never holds the sidebar
+        // wider than asked: narrower than the corner, the buttons reach over the first pane,
+        // whose title moves aside for them as it does when the sidebar is hidden.
+        const corner_w: f64 = if (a.corner.getWidth() > 0) @floatFromInt(a.corner.getWidth()) else 170;
+        a.header_room.setSizeRequest(@intFromFloat(@max(0, @min(corner_w, width - 16))), -1);
+        a.head_search.setVisible(@intFromBool(width >= 226));
+        const menu_up = width >= 196;
+        a.head_more.setVisible(@intFromBool(menu_up));
+        a.foot_more.setVisible(@intFromBool(!menu_up));
+        const roomy = width >= 172;
+        a.foot_session.setVisible(@intFromBool(roomy));
+        a.foot_host.setVisible(@intFromBool(roomy));
+        const narrow = width < 200;
+        if (narrow != a.narrow_rows) {
+            a.narrow_rows = narrow;
+            // Rows are built for one or the other, so they are made again.
+            a.row_marks.clearRetainingCapacity();
+            a.rebuildSidebar();
+        }
     }
 
     fn sidebarDragBegin(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
@@ -1361,12 +1407,13 @@ pub const App = struct {
                 const add = icons.button(.plus, "New window here", "app.new-window-in");
                 add.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
                 add.as(gtk.Widget).addCssClass("session-tool");
+                if (a.narrow_rows) add.as(gtk.Widget).setVisible(0);
                 head.append(add.as(gtk.Widget));
                 const fold = icons.button(if (want.collapsed) .right else .down, if (want.collapsed) "Show windows" else "Hide windows", "app.toggle-session");
                 fold.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
                 fold.as(gtk.Widget).addCssClass("session-tool");
                 if (want.collapsed) fold.as(gtk.Widget).addCssClass("folded");
-                if (above) fold.as(gtk.Widget).setVisible(0);
+                if (above or a.narrow_rows) fold.as(gtk.Widget).setVisible(0);
                 head.append(fold.as(gtk.Widget));
                 const session_more = menuButton(sessionMenu(session.id), "Session");
                 session_more.as(gtk.Widget).addCssClass("session-tool");
@@ -3570,6 +3617,7 @@ fn appMenu() *gio.MenuModel {
     other.append("Find…", "app.find");
     other.append("New window", "app.new-window");
     other.append("New session", "app.new-session");
+    other.append("Add remote host…", "app.add-host");
     other.append("Settings…", "app.settings");
     menu.appendSection(null, other.as(gio.MenuModel));
     return menu.as(gio.MenuModel);
@@ -3592,7 +3640,7 @@ fn sessionMenu(session_id: []const u8) *gio.MenuModel {
     const z = gpa.dupeSentinel(u8, session_id, 0) catch return gio.Menu.new().as(gio.MenuModel);
     defer gpa.free(z);
     const menu = gio.Menu.new();
-    inline for (.{ .{ "Rename…", "app.rename-session" }, .{ "Move Up", "app.move-session-up" }, .{ "Move Down", "app.move-session-down" } }) |e| {
+    inline for (.{ .{ "New Window Here", "app.new-window-in" }, .{ "Show or Hide Windows", "app.toggle-session" }, .{ "Rename…", "app.rename-session" }, .{ "Move Up", "app.move-session-up" }, .{ "Move Down", "app.move-session-down" } }) |e| {
         const item = gio.MenuItem.new(e[0], null);
         item.setActionAndTargetValue(e[1], glib.Variant.newString(z.ptr));
         menu.appendItem(item);

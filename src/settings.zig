@@ -5,6 +5,8 @@ const glib = @import("glib");
 
 const gpa = std.heap.c_allocator;
 
+/// The narrowest the sidebar goes: room for a row's icon, a few letters and its menu.
+pub const sidebar_min: f64 = 130;
 pub const ColorScheme = enum { auto, light, dark };
 pub const CursorStyle = enum { program, block, bar, underline };
 /// Where a session's windows show as tabs: in the sidebar on the left or right, or above the panes.
@@ -186,7 +188,7 @@ const ranges = [_]struct { []const u8, f64, f64 }{
     .{ "letter_spacing", -2, 6 },
     .{ "window_opacity", 0.2, 1 },
     .{ "terminal_opacity", 0.2, 1 },
-    .{ "sidebar_width", 180, 480 },
+    .{ "sidebar_width", sidebar_min, 480 },
     .{ "sidebar_text_scale", 0.8, 1.4 },
     .{ "fade_inactive", 0, 0.6 },
     .{ "highlight_opacity", 0.1, 1 },
