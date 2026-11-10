@@ -33,6 +33,7 @@ KINDS = [
     ("filter", "filter_list", ""),
     ("minimize", "remove", ""),
     ("board", "view_kanban", ""),
+    ("eye", "visibility", ""),
 ]
 
 folder = sys.argv[1]

@@ -392,16 +392,7 @@ pub const Board = struct {
 
         const since_us: i64 = if (info) |i| i.since else 0;
         c.since_us = since_us;
-        if (col == .idle or since_us == 0) setLabel(c.since, "") else {
-            const mins = @divTrunc(glib.getMonotonicTime() - since_us, 60 * std.time.us_per_s);
-            const text = if (mins < 1)
-                std.fmt.bufPrintSentinel(&zbuf, "now", .{}, 0) catch ""
-            else if (mins < 60)
-                std.fmt.bufPrintSentinel(&zbuf, "{d} min", .{mins}, 0) catch ""
-            else
-                std.fmt.bufPrintSentinel(&zbuf, "{d} h", .{@divTrunc(mins, 60)}, 0) catch "";
-            setLabel(c.since, text);
-        }
+        setLabel(c.since, if (col == .idle) "" else ago(&zbuf, since_us));
 
         // The icon carries the program and its status dot; it is made again when either changes.
         var hasher = std.hash.Wyhash.init(0);
@@ -493,6 +484,17 @@ pub const Board = struct {
         b.app.jumpTo(c.host, c.session_id, c.window_id, c.block_id);
     }
 };
+
+/// How long ago a moment on the monotonic clock was, in a word: "now", "4 min", "2 h", "3 d".
+/// Empty for a moment that was never set.
+pub fn ago(buf: []u8, since_us: i64) [:0]const u8 {
+    if (since_us == 0) return "";
+    const mins = @divTrunc(glib.getMonotonicTime() - since_us, 60 * std.time.us_per_s);
+    if (mins < 1) return "now";
+    if (mins < 60) return std.fmt.bufPrintSentinel(buf, "{d} min", .{mins}, 0) catch "";
+    if (mins < 24 * 60) return std.fmt.bufPrintSentinel(buf, "{d} h", .{@divTrunc(mins, 60)}, 0) catch "";
+    return std.fmt.bufPrintSentinel(buf, "{d} d", .{@divTrunc(mins, 24 * 60)}, 0) catch "";
+}
 
 /// `text` with the zero at its end that GTK reads to, cut short if it's longer than `buf`.
 fn zt(buf: []u8, text: []const u8) [:0]const u8 {

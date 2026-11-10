@@ -118,6 +118,8 @@ fn show(ctx: *Ctx) void {
         made.setAutohide(0);
         made.setHasArrow(0);
         made.setPosition(.right);
+        // Its top lines up with the row's, as Rex's does, rather than its middle.
+        made.as(gtk.Widget).setValign(.start);
         made.as(gtk.Widget).setCanFocus(0);
         made.as(gtk.Widget).setCanTarget(0);
         made.as(gtk.Widget).addCssClass("hover-card");
@@ -136,6 +138,7 @@ fn show(ctx: *Ctx) void {
     const heading = gtk.Label.new(ctx.title.getText());
     heading.setXalign(0);
     heading.setEllipsize(.end);
+    heading.setMaxWidthChars(max_chars);
     heading.as(gtk.Widget).addCssClass("hover-title");
     box.append(heading.as(gtk.Widget));
     var shown: usize = 0;
@@ -160,6 +163,7 @@ fn show(ctx: *Ctx) void {
         const name_label = gtk.Label.new(zt(&zbuf, name).ptr);
         name_label.setXalign(0);
         name_label.setEllipsize(.end);
+        name_label.setMaxWidthChars(max_chars - 12);
         name_label.as(gtk.Widget).setHexpand(1);
         name_label.as(gtk.Widget).addCssClass("hover-name");
         top.append(name_label.as(gtk.Widget));
@@ -202,9 +206,17 @@ fn zt(buf: []u8, text: []const u8) [:0]const u8 {
     return buf[0..n :0];
 }
 
+/// How wide the card's text may run before it is cut short, in characters.
+const max_chars = 44;
+
+/// A dimmer line of the card; a long one wraps onto a second line and is cut after that.
 fn dim(text: [:0]const u8) *gtk.Widget {
     const l = gtk.Label.new(text.ptr);
     l.setXalign(0);
+    l.setWrap(1);
+    l.setWrapMode(.word_char);
+    l.setLines(2);
+    l.setMaxWidthChars(max_chars);
     l.setEllipsize(.end);
     l.as(gtk.Widget).addCssClass("hover-dim");
     return l.as(gtk.Widget);

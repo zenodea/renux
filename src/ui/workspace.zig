@@ -138,6 +138,7 @@ pub const Workspace = struct {
     line: *gtk.Widget,
     line_at: ?usize = null,
     restored: std.ArrayList(Restored) = .empty,
+    keyboard_idle: c_uint = 0,
     swap_arrows: *gtk.Widget,
     target_cur: [4]f64 = .{ 0, 0, 0, 0 },
     target_vel: [4]f64 = .{ 0, 0, 0, 0 },
@@ -314,6 +315,7 @@ pub const Workspace = struct {
         if (ws.resizing != null) ws.followDivider();
         ws.joinLayers();
         ws.markFocus();
+        ws.syncKeyboard();
         // A minimize that never happened gives the card its outline back.
         const now = glib.getMonotonicTime();
         for (ws.panes.items) |*p| if (p.minimizing_until != 0 and now > p.minimizing_until and p.face == null) {
@@ -444,6 +446,7 @@ pub const Workspace = struct {
         ws.leaving.deinit(gpa);
         for (ws.restored.items) |r| gpa.free(r.layer_id);
         ws.restored.deinit(gpa);
+        if (ws.keyboard_idle != 0) _ = glib.Source.remove(ws.keyboard_idle);
         inline for (.{ ws.session_id, ws.window_id, ws.focused }) |slot| if (slot) |v| gpa.free(v);
         gpa.destroy(ws);
     }
@@ -891,6 +894,30 @@ pub const Workspace = struct {
             }
         }
         ws.markBackdropFocus();
+    }
+
+    /// The keyboard goes with the highlight: when another pane becomes the highlighted one (a
+    /// new split, a pane closing), its terminal takes the keyboard from the pane that had it,
+    /// so the cursor that blinks is the one that types. Done a moment later, once a new pane
+    /// is on screen. A text field, menu or dialog that has the keyboard keeps it.
+    fn syncKeyboard(ws: *Workspace) void {
+        if (ws.keyboard_idle == 0) ws.keyboard_idle = glib.idleAdd(&keyboardLater, ws);
+    }
+
+    fn keyboardLater(data: ?*anyopaque) callconv(.c) c_int {
+        const ws: *Workspace = @ptrCast(@alignCast(data.?));
+        ws.keyboard_idle = 0;
+        const target = (ws.focusedView() orelse return 0).widget();
+        if (target.getMapped() == 0) return 0;
+        const root = ws.root.getRoot() orelse return 0;
+        const holder = root.getFocus();
+        if (holder == target) return 0;
+        var from_pane = holder == null;
+        if (holder) |f| for (ws.panes.items) |p| {
+            if (p.term.widget() == f) from_pane = true;
+        };
+        if (from_pane) _ = target.grabFocus();
+        return 0;
     }
 
     /// The card behind a joined layer is lit while one of its panes has the focus.

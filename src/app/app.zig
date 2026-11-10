@@ -14,6 +14,7 @@ const adw = @import("adw");
 const server_mod = @import("../rex/server.zig");
 const view = @import("../rex/view.zig");
 const termview = @import("../terminal/termview.zig");
+const programs = @import("../icons/programs.zig");
 const Server = server_mod.Server;
 const Workspace = @import("../ui/workspace.zig").Workspace;
 const settings = @import("../settings/settings.zig");
@@ -48,12 +49,20 @@ const css =
     \\.pick-card { padding: 5px 5px 7px 5px; border-radius: 13px; font-weight: 400; color: @compy_secondary; transition: box-shadow 140ms ease-out, background-color 140ms ease-out; }
     \\.pick-card:checked { background-color: alpha(@accent_bg_color, 0.12); box-shadow: inset 0 0 0 2px @accent_bg_color; color: @window_fg_color; font-weight: 700; }
     \\.settings-sample-row { padding: 12px; }
-    \\.board { background-color: @window_bg_color; padding: 14px 14px 12px 14px; }
+    \\.board { background-color: @compy_shell; padding: 14px 14px 12px 14px; }
     \\.board-title { font-weight: 700; font-size: 1.15em; margin-left: 4px; }
     \\.board-column { background-color: alpha(@window_fg_color, 0.035); border-radius: 14px; padding: 10px 8px 8px 8px; }
     \\.board-column-head { padding: 0 6px 2px 4px; }
     \\.board-column-title { font-weight: 700; }
     \\.board-count { color: @compy_secondary; font-size: 0.9em; }
+    \\.agent-row { min-height: 44px; }
+    \\.agent-status { font-size: 0.86em; color: @compy_secondary; }
+    \\.agent-status.blocked { color: @warning_color; }
+    \\.agent-status.failed { color: @error_color; }
+    \\.eye-dot { min-width: 7px; min-height: 7px; border-radius: 99px; margin: -2px -3px 0 0; background-color: @accent_bg_color; box-shadow: 0 0 0 1.5px @compy_shell; }
+    \\.eye-dot.done { background-color: #3b82f6; }
+    \\.eye-dot.blocked { background-color: #f59e0b; }
+    \\.eye-dot.failed { background-color: #ef4444; }
     \\.board-session { font-size: 0.82em; font-weight: 600; color: @compy_secondary; margin: 6px 0 -2px 6px; }
     \\.board-session:first-child { margin-top: 0; }
     \\.board-grouping button { min-height: 26px; padding: 0 12px; font-size: 0.88em; }
@@ -184,11 +193,11 @@ const css =
     \\.connect-box { margin: 0 24px; }
 ;
 
-const Row = struct { host: *Host, session_id: []u8, window_id: []u8, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
+const Row = struct { host: *Host, session_id: []u8, window_id: []u8, block_id: []u8 = &.{}, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
 
 /// One row the sidebar should have, worked out from the servers before any widget is touched.
 const RowPlan = struct {
-    kind: enum { host, session, window },
+    kind: enum { host, session, window, agent },
     /// Everything about the row that is built into its widgets. Rows whose keys match what is
     /// on screen are updated where they are, so menus stay open and hover and scroll are kept.
     key: u64,
@@ -197,6 +206,8 @@ const RowPlan = struct {
     view: ?*const view.SessionView = null,
     window: ?*const view.Window = null,
     collapsed: bool = false,
+    /// For an agent's row: the pane it runs in.
+    block_id: []const u8 = "",
 };
 
 /// What a sidebar row or a tab shows now, to update it in place.
@@ -208,6 +219,9 @@ const RowMark = struct {
     /// The panes the tile was made for; another set needs another tile.
     tile_for: u64 = 0,
     button: ?*gtk.Widget = null,
+    /// For an agent's row: its status in a word, and how long it has been so.
+    sub: ?*gtk.Label = null,
+    when: ?*gtk.Label = null,
 };
 
 fn hashParts(parts: []const []const u8) u64 {
@@ -283,6 +297,11 @@ pub const App = struct {
     narrow_rows: bool = false,
     board: *@import("../ui/board.zig").Board = undefined,
     board_button: *gtk.ToggleButton = undefined,
+    eye_button: *gtk.ToggleButton = undefined,
+    eye_dot: *gtk.Widget = undefined,
+    /// The sidebar lists only agents, each with its status.
+    agents_only: bool = false,
+    agents_clock: c_uint = 0,
     config_timer: c_uint = 0,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
@@ -417,6 +436,24 @@ pub const App = struct {
         side_header.packEnd(a.head_more);
         a.head_search = icons.button(.search, "Commands", "app.palette").as(gtk.Widget);
         side_header.packEnd(a.head_search);
+        // The eye: with it on, the sidebar lists only agents and how each is doing. Its dot
+        // says, also while it is off, that an agent needs you, failed, or has finished unseen.
+        a.eye_button = gtk.ToggleButton.new();
+        const eye_art = gtk.Overlay.new();
+        eye_art.setChild(icons.image(.eye, 16));
+        a.eye_dot = gtk.Box.new(.horizontal, 0).as(gtk.Widget);
+        a.eye_dot.addCssClass("eye-dot");
+        a.eye_dot.setHalign(.end);
+        a.eye_dot.setValign(.start);
+        a.eye_dot.setVisible(0);
+        eye_art.addOverlay(a.eye_dot);
+        a.eye_button.as(gtk.Button).setChild(eye_art.as(gtk.Widget));
+        a.eye_button.as(gtk.Widget).setTooltipText("Show only agents");
+        a.eye_button.as(gtk.Widget).addCssClass("icon-button");
+        a.eye_button.as(gtk.Widget).addCssClass("flat");
+        a.eye_button.as(gtk.Widget).setValign(.center);
+        _ = gtk.ToggleButton.signals.toggled.connect(a.eye_button, *App, &eyeToggled, a, .{});
+        side_header.packEnd(a.eye_button.as(gtk.Widget));
         // The footer, like Rex's: narrow the sidebar to one host, a new session, and another host.
         const footer = gtk.Box.new(.horizontal, 2);
         footer.as(gtk.Widget).addCssClass("sidebar-footer");
@@ -695,7 +732,7 @@ pub const App = struct {
 
     /// Whether the sidebar's edge can be dragged, and the width it has while it can't.
     const sidebar_resizable = false;
-    const sidebar_standard: f64 = 260;
+    const sidebar_standard: f64 = 292;
 
     /// Watches the settings file and the themes folder, so a change made outside this window
     /// takes effect at once: a script that switches color themes, another Compy window, an
@@ -755,6 +792,50 @@ pub const App = struct {
         // left to do.
         a.board_button.setActive(@intFromBool(on));
         if (!on) if (a.workspace) |ws| ws.grabFocus();
+    }
+
+    fn toggleAgents(a: *App) void {
+        a.eye_button.setActive(@intFromBool(a.eye_button.getActive() == 0));
+    }
+
+    fn eyeToggled(button: *gtk.ToggleButton, a: *App) callconv(.c) void {
+        a.agents_only = button.getActive() != 0;
+        // "4 min" beside each agent is kept up to date while they are listed.
+        if (a.agents_clock != 0) _ = glib.Source.remove(a.agents_clock);
+        a.agents_clock = if (a.agents_only) glib.timeoutAddSeconds(30, &agentsTick, a) else 0;
+        a.rebuildSidebar();
+    }
+
+    fn agentsTick(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.rebuildSidebar();
+        return 1;
+    }
+
+    /// Colors the eye's dot for the most pressing thing any agent reports: one needs you, one
+    /// failed, or one finished and hasn't been looked at. No dot when there is none of those.
+    fn updateEye(a: *App) void {
+        var worst: enum { none, done, failed, blocked } = .none;
+        for (a.hosts.items) |h| {
+            var it = h.server.blocks.valueIterator();
+            while (it.next()) |b| {
+                if (!b.has_status) continue;
+                switch (b.status) {
+                    .blocked => worst = .blocked,
+                    .failed => if (worst != .blocked) {
+                        worst = .failed;
+                    },
+                    .done => if (worst == .none and b.attention) {
+                        worst = .done;
+                    },
+                    else => {},
+                }
+            }
+        }
+        a.eye_dot.setVisible(@intFromBool(worst != .none));
+        inline for (.{ "blocked", "failed", "done" }) |class| {
+            if (std.mem.eql(u8, class, @tagName(worst))) a.eye_dot.addCssClass(class) else a.eye_dot.removeCssClass(class);
+        }
     }
 
     fn boardToggled(button: *gtk.ToggleButton, a: *App) callconv(.c) void {
@@ -861,7 +942,11 @@ pub const App = struct {
         var y: f64 = 0;
         const root = a.card.getRoot() orelse return;
         if (a.card.translateCoordinates(root.as(gtk.Widget), 0, 0, &x, &y) == 0) return;
-        const room: c_int = @intFromFloat(@round(std.math.clamp(a.cornerRight() + 4 - x, 0, 400)));
+        // While the sidebar slides away the card's place is a frame behind, which would leave
+        // the heading under the corner for a moment; with the sidebar hidden the room it will
+        // need in the end is known, and it gets at least that from the start.
+        const settled: f64 = if (a.split.getShowSidebar() == 0) a.cornerRight() + 4 else 0;
+        const room: c_int = @intFromFloat(@round(std.math.clamp(@max(settled, a.cornerRight() + 4 - x), 0, 400)));
         const tabs_above = strip.getVisible() != 0;
         const want: c_int = if (tabs_above) room else 0;
         if (strip.getMarginStart() != want) strip.setMarginStart(want);
@@ -1067,6 +1152,7 @@ pub const App = struct {
                 a.rebuildSidebar();
                 a.activity.changed();
                 a.board.changed();
+                a.updateEye();
                 if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
                     if (!shown) a.showSelected();
                     a.finishMinimize();
@@ -1079,6 +1165,7 @@ pub const App = struct {
                 a.refreshRows();
                 a.activity.changed();
                 a.board.changed();
+                a.updateEye();
                 a.updateBadge();
                 if (h.server.blockInfo(block)) |info| if (info.folder) |f| {
                     var pbuf: [1024]u8 = undefined;
@@ -1438,6 +1525,7 @@ pub const App = struct {
     /// then its sessions, each followed by its windows unless they are folded away or shown as
     /// tabs above the panes.
     fn planSidebar(a: *App, plan: *std.ArrayList(RowPlan)) void {
+        if (a.agents_only) return a.planAgents(plan);
         const several = a.hosts.items.len > 1 and a.filter == null;
         const above = settings.current.tab_position == .above;
         for (a.hosts.items) |h| {
@@ -1467,6 +1555,76 @@ pub const App = struct {
         }
     }
 
+    /// The sidebar with the eye on: only agents, each on a row of its own with its status,
+    /// under the session it runs in. Sessions without an agent are left out.
+    fn planAgents(a: *App, plan: *std.ArrayList(RowPlan)) void {
+        const several = a.hosts.items.len > 1 and a.filter == null;
+        for (a.hosts.items) |h| {
+            if (a.filter) |f| if (f != h) continue;
+            if (several) plan.append(gpa, .{ .kind = .host, .host = h, .key = hashParts(&.{ "host", h.page }) }) catch return;
+            const s = h.server;
+            for (s.sessions.items) |*session| {
+                const v = s.sessionView(session.id) orelse continue;
+                var headed = false;
+                for (v.windows) |*w| for (w.layers) |l| for (l.blocks) |blk| {
+                    if (!blk.isTerminal()) continue;
+                    const info = s.blockInfo(blk.id) orelse continue;
+                    if (!info.has_status and !programs.isAgent(info.program)) continue;
+                    if (!headed) {
+                        headed = true;
+                        plan.append(gpa, .{ .kind = .session, .host = h, .session = session, .key = hashParts(&.{ "session", h.page, session.id, "agents" }) }) catch return;
+                    }
+                    plan.append(gpa, .{ .kind = .agent, .host = h, .session = session, .view = v, .window = w, .block_id = blk.id, .key = hashParts(&.{ "agent", h.page, session.id, blk.id }) }) catch return;
+                };
+            }
+        }
+    }
+
+    /// Writes an agent row's text from what its pane reports now.
+    fn fillAgent(mark: *RowMark, h: *Host, block_id: []const u8) void {
+        const info = h.server.blockInfo(block_id);
+        var buf: [320]u8 = undefined;
+        var zbuf: [321]u8 = undefined;
+        const prog: ?[]const u8 = if (info) |i| ((if (i.has_status) i.status_app else null) orelse i.program) else null;
+        const is_shell = if (prog) |p| termview.TermView.isShell(programs.programName(p)) else true;
+        const task: ?[]const u8 = if (info) |i| (if (i.has_status) (if (i.task) |t| (if (t.len > 0) t else null) else null) else null) else null;
+        const own: ?[]const u8 = if (is_shell) null else if (info) |i| (if (i.title) |t| (if (t.len > 0) t else null) else null) else null;
+        const name = task orelse own orelse programs.displayTitle(&buf, prog, null);
+        const n = @min(name.len, zbuf.len - 1);
+        @memcpy(zbuf[0..n], name[0..n]);
+        zbuf[n] = 0;
+        setLabel(mark.label, zbuf[0..n :0]);
+        const status = if (info) |i| (if (i.has_status) i.status else .other) else .other;
+        if (mark.sub) |sub| {
+            setLabel(sub, switch (status) {
+                .working => "Working",
+                .blocked => "Needs you",
+                .failed => "Failed",
+                .done => "Done",
+                .other => "Idle",
+            });
+            inline for (.{ "blocked", "failed" }, .{ server_mod.StatusKind.blocked, server_mod.StatusKind.failed }) |class, kind| {
+                if (status == kind) sub.as(gtk.Widget).addCssClass(class) else sub.as(gtk.Widget).removeCssClass(class);
+            }
+        }
+        var tbuf: [32]u8 = undefined;
+        setLabel(mark.when, if (status == .other) "" else @import("../ui/board.zig").ago(&tbuf, if (info) |i| i.since else 0));
+        // The tile carries the program and its status dot; it is made again when either changes.
+        var hasher = std.hash.Wyhash.init(1);
+        hasher.update(prog orelse "");
+        hasher.update(std.mem.asBytes(&status));
+        if (info) |i| hasher.update(std.mem.asBytes(&i.attention));
+        const key = hasher.final() | 1;
+        if (key != mark.tile_for) if (mark.line) |line| {
+            mark.tile_for = key;
+            if (mark.tile) |old| line.remove(old);
+            const tile = @import("../icons/blockicon.zig").create(h.server, block_id, 20);
+            tile.setValign(.center);
+            line.prepend(tile);
+            mark.tile = tile;
+        };
+    }
+
     /// Makes the sidebar show what the servers have now. While the same rows are wanted in the
     /// same order, which is nearly always, each is updated where it is; only when rows come, go
     /// or move is the list built again.
@@ -1488,6 +1646,7 @@ pub const App = struct {
             for (a.rows.items) |r| if (r) |row| {
                 gpa.free(row.session_id);
                 gpa.free(row.window_id);
+                if (row.block_id.len > 0) gpa.free(row.block_id);
             };
             a.rows.clearRetainingCapacity();
             a.row_marks.clearRetainingCapacity();
@@ -1520,6 +1679,10 @@ pub const App = struct {
         switch (want.kind) {
             .host => setLabel(mark.label, hostHeading(&buf, want.host)),
             .session => setLabel(mark.label, sessionHeading(&buf, want.session.?)),
+            .agent => {
+                fillAgent(mark, want.host, want.block_id);
+                if (row.*) |*r| r.tile = mark.tile;
+            },
             .window => {
                 setLabel(mark.label, rowTitle(want.host, &buf, want.window.?, want.view.?));
                 a.updateTile(mark, want.host.server, want.window.?);
@@ -1592,6 +1755,42 @@ pub const App = struct {
                 a.sidebar.append(head_row.as(gtk.Widget));
                 a.rows.appendAssumeCapacity(picked);
                 a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = label });
+            },
+            .agent => {
+                const session_id = gpa.dupe(u8, want.session.?.id) catch return;
+                const window_id = gpa.dupe(u8, want.window.?.id) catch return gpa.free(session_id);
+                const block_id = gpa.dupe(u8, want.block_id) catch {
+                    gpa.free(session_id);
+                    return gpa.free(window_id);
+                };
+                const title = gtk.Label.new("");
+                title.setXalign(0);
+                title.setEllipsize(.end);
+                title.as(gtk.Widget).addCssClass("row-title");
+                const sub = gtk.Label.new("");
+                sub.setXalign(0);
+                sub.as(gtk.Widget).setHexpand(1);
+                sub.as(gtk.Widget).addCssClass("agent-status");
+                const when = gtk.Label.new("");
+                when.as(gtk.Widget).addCssClass("agent-status");
+                const foot = gtk.Box.new(.horizontal, 6);
+                foot.append(sub.as(gtk.Widget));
+                foot.append(when.as(gtk.Widget));
+                const text = gtk.Box.new(.vertical, 0);
+                text.as(gtk.Widget).setHexpand(1);
+                text.as(gtk.Widget).setValign(.center);
+                text.append(title.as(gtk.Widget));
+                text.append(foot.as(gtk.Widget));
+                const line = gtk.Box.new(.horizontal, 8);
+                line.append(text.as(gtk.Widget));
+                const row = gtk.ListBoxRow.new();
+                row.as(gtk.Widget).addCssClass("agent-row");
+                row.setChild(line.as(gtk.Widget));
+                a.sidebar.append(row.as(gtk.Widget));
+                var mark: RowMark = .{ .key = want.key, .label = title, .line = line, .sub = sub, .when = when };
+                fillAgent(&mark, h, want.block_id);
+                a.rows.appendAssumeCapacity(.{ .host = h, .session_id = session_id, .window_id = window_id, .block_id = block_id, .label = title, .line = line, .tile = mark.tile });
+                a.row_marks.appendAssumeCapacity(mark);
             },
             .window => {
                 const session = want.session.?;
@@ -1821,6 +2020,9 @@ pub const App = struct {
 
     /// Updates row titles and tiles in place, since block details change often.
     fn refreshRows(a: *App) void {
+        // Agent rows are written from their panes, not their windows; the sidebar's own pass
+        // updates them where they are.
+        if (a.agents_only) return a.rebuildSidebar();
         for (a.rows.items) |r| if (r) |row| {
             const v = row.host.server.sessionView(row.session_id) orelse continue;
             const w = v.window(row.window_id) orelse continue;
@@ -1898,7 +2100,9 @@ pub const App = struct {
         const sid = a.session_id orelse return null;
         const shown = a.shownWindow() orelse return null;
         for (a.rows.items, 0..) |r, i| if (r) |row| {
-            const matches = if (row.window_id.len == 0) true else std.mem.eql(u8, row.window_id, shown.id);
+            // With only agents listed, the row of the pane with the keyboard is the one lit.
+            const here_block: []const u8 = if (a.workspace) |ws| (ws.focusedBlock() orelse "") else "";
+            const matches = if (row.block_id.len > 0) std.mem.eql(u8, row.block_id, here_block) else if (row.window_id.len == 0) true else std.mem.eql(u8, row.window_id, shown.id);
             if (row.host == here and std.mem.eql(u8, row.session_id, sid) and matches) return a.sidebar.getRowAtIndex(@intCast(i));
         };
         return null;
@@ -2125,6 +2329,8 @@ pub const App = struct {
         const r = a.rows.items[index] orelse return;
         a.selectHost(r.host);
         a.auto_picked = false;
+        // An agent's row goes to its very pane.
+        if (r.block_id.len > 0) return a.jumpTo(r.host, r.session_id, r.window_id, r.block_id);
         if (r.window_id.len == 0) return a.showSession(r.session_id);
         setSlot(&a.session_id, r.session_id);
         setSlot(&a.window_id, r.window_id);
@@ -2887,6 +3093,7 @@ pub const App = struct {
             .{ "pane-float-focused", floatPane, "" },
             .{ "find", openFind, "" },
             .{ "board", toggleBoard, "" },
+            .{ "agents", toggleAgents, "" },
             .{ "prompt-prev", promptPrev, "" },
             .{ "prompt-next", promptNext, "" },
             .{ "find-next", findNext, "" },

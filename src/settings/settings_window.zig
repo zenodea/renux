@@ -251,7 +251,9 @@ fn cardStrip(g: *adw.PreferencesGroup, title: [:0]const u8) *gtk.Box {
     heading.setXalign(0);
     heading.as(gtk.Widget).addCssClass("settings-cards-title");
     column.append(heading.as(gtk.Widget));
+    // The cards share the row's whole width evenly.
     const strip = gtk.Box.new(.horizontal, 10);
+    strip.setHomogeneous(1);
     column.append(strip.as(gtk.Widget));
     plainRow(g, column.as(gtk.Widget));
     return strip;
@@ -261,11 +263,14 @@ fn cardStrip(g: *adw.PreferencesGroup, title: [:0]const u8) *gtk.Box {
 fn pickCard(ctx: *Ctx, kind: art.Art, label: [:0]const u8) *gtk.ToggleButton {
     const b = gtk.ToggleButton.new();
     const column = gtk.Box.new(.vertical, 6);
-    column.append(keepDrawing(ctx, art.card(kind, 104, 68)));
+    const picture = keepDrawing(ctx, art.card(kind, 104, 68));
+    picture.setHexpand(1);
+    column.append(picture);
     const name = gtk.Label.new(label.ptr);
     column.append(name.as(gtk.Widget));
     b.as(gtk.Button).setChild(column.as(gtk.Widget));
     b.as(gtk.Widget).addCssClass("pick-card");
+    b.as(gtk.Widget).setHexpand(1);
     b.as(gtk.Widget).addCssClass("flat");
     return b;
 }
