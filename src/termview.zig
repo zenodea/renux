@@ -961,7 +961,7 @@ pub const TermView = struct {
     }
 
     fn pasteAnswered(_: *adw.AlertDialog, response: [*:0]const u8, p: *PendingPaste) callconv(.c) void {
-        if (std.mem.eql(u8, std.mem.span(response), "paste")) p.server.paste(p.session_id, p.block_id, p.text);
+        if (std.mem.eql(u8, std.mem.span(response), "paste") and p.server.isLive()) p.server.paste(p.session_id, p.block_id, p.text);
         gpa.free(p.session_id);
         gpa.free(p.block_id);
         gpa.free(p.text);
@@ -979,6 +979,8 @@ pub const TermView = struct {
         const text = clipboard.readTextFinish(result, null) orelse return;
         defer glib.free(text);
         const body = std.mem.span(text);
+        // The host may have been removed while the clipboard was being read.
+        if (!t.server.isLive()) return;
         // Without bracketed paste, each pasted line runs as typed, so several lines ask first.
         const lines = std.mem.count(u8, std.mem.trimEnd(u8, body, "\n"), "\n") + 1;
         const bracketed = if (t.server.streams.get(t.block_id)) |st| if (st.term) |tm| tm.frame.bracketed_paste else false else false;

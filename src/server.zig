@@ -37,6 +37,9 @@ pub const Binding = struct { keys: []const []const u8, action: []const u8, args:
 pub const ListedHost = struct { label: []const u8, url: []const u8 };
 
 /// An action from the person's Rex config that Compy can run, with the keys bound to it.
+/// Every server there is, for `Server.isLive`. Main thread only.
+var live: std.ArrayList(*const Server) = .empty;
+
 pub const Action = struct {
     name: []const u8,
     title: []const u8,
@@ -149,11 +152,19 @@ pub const Server = struct {
             .url = try gpa.dupe(u8, std.mem.trimEnd(u8, url, "/")),
             .client_label = try gpa.dupe(u8, client_label),
         };
+        live.append(gpa, s) catch {};
         s.startConnecting();
         return s;
     }
 
+    /// Whether `s` is a server that still exists, for work that outlives the widget that
+    /// started it, such as a clipboard read that answers after its host was removed.
+    pub fn isLive(s: *const Server) bool {
+        return std.mem.indexOfScalar(*const Server, live.items, s) != null;
+    }
+
     pub fn destroy(s: *Server) void {
+        if (std.mem.indexOfScalar(*const Server, live.items, s)) |i| _ = live.swapRemove(i);
         s.wanted = false;
         s.observer = null;
         s.performer = null;

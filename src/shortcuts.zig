@@ -291,7 +291,9 @@ fn startRecord(_: *gtk.Button, e: *Entry) callconv(.c) void {
             }
             if (rr.seq.items.len >= 4) return 1;
             var buf: [48]u8 = undefined;
-            const name = keys.rexName(&buf, keyval, gdk.keyvalToUnicode(keyval), mods) orelse return 1;
+            // Caps Lock makes a capital without Shift; a shortcut records the key, not the lock.
+            const plain = keys.uncapsed(keyval, mods);
+            const name = keys.rexName(&buf, plain, gdk.keyvalToUnicode(plain), mods) orelse return 1;
             const copy = gpa.dupe(u8, name) catch return 1;
             rr.seq.append(gpa, copy) catch {
                 gpa.free(copy);
