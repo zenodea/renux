@@ -9,6 +9,7 @@ const app_mod = @import("app.zig");
 const settings = @import("settings.zig");
 const programs = @import("programs.zig");
 const Server = @import("server.zig").Server;
+const filterdialog = @import("filterdialog.zig");
 
 const gpa = std.heap.c_allocator;
 const App = app_mod.App;
@@ -18,7 +19,8 @@ const Kind = enum { session, tab, pane, folder, detached };
 
 const Item = struct {
     kind: Kind,
-    host: *Host,
+    /// The host it is on; a recent folder belongs to none.
+    host: ?*Host,
     session_id: []u8,
     window_id: []u8,
     block_id: []u8,
@@ -31,12 +33,27 @@ const Item = struct {
 
 /// The open Go to Anything dialog; there is only ever one.
 var current: ?*Anything = null;
+/// Counts the dialogs opened, so a late answer finds the one that asked and no other.
+var opened: usize = 0;
+
+/// The folder browsers that are open, so one whose server goes away can close.
+var browsers: std.ArrayList(*Browser) = .empty;
+
+/// A host is about to be removed: nothing open here may reach for it or its server again.
+pub fn hostRemoved(server: *Server) void {
+    if (current) |g| _ = g.dialog.close();
+    for (browsers.items) |b| if (b.server == server) {
+        b.gone = true;
+        _ = b.dialog.close();
+    };
+}
 
 const Anything = struct {
     app: *App,
     dialog: *adw.Dialog,
     entry: *gtk.SearchEntry,
     list: *gtk.ListBox,
+    serial: usize,
     items: std.ArrayList(Item) = .empty,
 
     fn deinit(g: *Anything) void {
@@ -51,7 +68,7 @@ const Anything = struct {
         gpa.destroy(g);
     }
 
-    fn add(g: *Anything, kind: Kind, h: *Host, sid: []const u8, wid: []const u8, bid: []const u8, title: []const u8, detail: []const u8) void {
+    fn add(g: *Anything, kind: Kind, h: ?*Host, sid: []const u8, wid: []const u8, bid: []const u8, title: []const u8, detail: []const u8) void {
         const hay = std.fmt.allocPrint(gpa, "{s} {s} {s}", .{ @tagName(kind), title, detail }) catch return;
         for (hay) |*c| c.* = std.ascii.toLower(c.*);
         const line = gtk.Box.new(.horizontal, 10);
@@ -99,22 +116,11 @@ const Anything = struct {
         }) catch return;
     }
 
-    fn matches(g: *Anything, it: *const Item) bool {
-        const q = std.mem.span(g.entry.as(gtk.Editable).getText());
-        var words = std.mem.tokenizeScalar(u8, q, ' ');
-        var buf: [128]u8 = undefined;
-        while (words.next()) |w| {
-            const n = @min(w.len, buf.len);
-            for (w[0..n], 0..) |c, i| buf[i] = std.ascii.toLower(c);
-            if (std.mem.indexOf(u8, it.haystack, buf[0..n]) == null) return false;
-        }
-        return true;
-    }
-
     fn refilter(g: *Anything) void {
+        const query = filterdialog.query(g.entry);
         var first: ?*gtk.ListBoxRow = null;
         for (g.items.items) |*it| {
-            const show = g.matches(it);
+            const show = filterdialog.matchesWords(it.haystack, query);
             it.row.as(gtk.Widget).setVisible(@intFromBool(show));
             if (show and first == null) first = it.row;
         }
@@ -126,12 +132,17 @@ const Anything = struct {
             if (i.row == row) break i;
         } else return;
         const a = g.app;
-        switch (it.kind) {
-            .session => a.openSession(it.host, it.session_id),
-            .tab => a.openWindow(it.host, it.session_id, it.window_id),
-            .pane => a.jumpTo(it.host, it.session_id, it.window_id, it.block_id),
-            .folder => a.changeDirectory(it.path),
-            .detached => a.placeDetached(it.host, it.session_id, it.block_id),
+        if (it.kind == .folder) {
+            a.changeDirectory(it.path);
+        } else if (it.host) |h| {
+            // The host may have been removed since the list was made.
+            if (std.mem.indexOfScalar(*Host, a.hosts.items, h) != null) switch (it.kind) {
+                .session => a.openSession(h, it.session_id),
+                .tab => a.openWindow(h, it.session_id, it.window_id),
+                .pane => a.jumpTo(h, it.session_id, it.window_id, it.block_id),
+                .detached => a.placeDetached(h, it.session_id, it.block_id),
+                .folder => {},
+            };
         }
         _ = g.dialog.close();
     }
@@ -141,31 +152,17 @@ const Anything = struct {
 pub fn openAnything(a: *App) void {
     if (current) |g| _ = g.dialog.close();
     const g = gpa.create(Anything) catch return;
-    const dialog = adw.Dialog.new();
-    dialog.setTitle("Go to Anything");
-    dialog.setContentWidth(560);
-    dialog.setContentHeight(460);
-    const box = gtk.Box.new(.vertical, 8);
-    box.as(gtk.Widget).addCssClass("goto");
-    const entry = gtk.SearchEntry.new();
-    entry.setPlaceholderText("Sessions, tabs, panes and folders");
-    box.append(entry.as(gtk.Widget));
-    const list = gtk.ListBox.new();
-    list.as(gtk.Widget).addCssClass("navigation-sidebar");
-    list.setActivateOnSingleClick(1);
-    const scroller = gtk.ScrolledWindow.new();
-    scroller.setPolicy(.never, .automatic);
-    scroller.as(gtk.Widget).setVexpand(1);
-    scroller.setChild(list.as(gtk.Widget));
-    box.append(scroller.as(gtk.Widget));
-    dialog.setChild(box.as(gtk.Widget));
-    g.* = .{ .app = a, .dialog = dialog, .entry = entry, .list = list };
+    const parts = filterdialog.build("Go to Anything", "Sessions, tabs, panes and folders", 560, 460, "goto");
+    const dialog = parts.dialog;
+    const entry = parts.entry;
+    const list = parts.list;
+    opened += 1;
+    g.* = .{ .app = a, .dialog = dialog, .entry = entry, .list = list, .serial = opened };
     current = g;
 
     var tbuf: [256]u8 = undefined;
     var wbuf: [256]u8 = undefined;
     var dbuf: [256]u8 = undefined;
-    var fbuf: [256]u8 = undefined;
     for (a.hosts.items) |h| {
         const s = h.server;
         for (s.sessions.items) |session| {
@@ -177,9 +174,9 @@ pub fn openAnything(a: *App) void {
                 g.add(.tab, h, session.id, w.id, "", wt, label);
                 for (w.layers) |l| for (l.blocks) |b| {
                     const info = s.blockInfo(b.id);
-                    const prog = if (info) |i| ((if (i.has_status) i.status_app else null) orelse i.program orelse "shell") else "shell";
-                    const name = std.mem.trimStart(u8, prog[0 .. std.mem.indexOfScalar(u8, prog, '/') orelse prog.len], "-");
-                    const title = if (info) |i| (if (i.folder) |f| std.fmt.bufPrint(&tbuf, "{s} {s}", .{ name, programs.shortFolder(&fbuf, f) }) catch name else name) else name;
+                    // The app that reported, such as claude, says more than the shell it runs in.
+                    const prog = if (info) |i| ((if (i.has_status) i.status_app else null) orelse i.program) else null;
+                    const title = programs.displayTitle(&tbuf, prog, if (info) |i| i.folder else null);
                     const detail = std.fmt.bufPrint(&dbuf, "{s} · {s}", .{ label, wt }) catch label;
                     g.add(.pane, h, session.id, w.id, b.id, title, detail);
                 };
@@ -188,10 +185,10 @@ pub fn openAnything(a: *App) void {
     }
     // Panes running outside any window arrive from each session a moment later.
     for (a.hosts.items) |h| for (h.server.sessions.items) |session| {
-        h.server.listDetached(session.id, g, gotDetached);
+        h.server.listDetached(session.id, @ptrFromInt(g.serial), gotDetached);
     };
     if (settings.current.recent_paths_shown) for (settings.current.recent_paths.items) |p| {
-        g.add(.folder, a.hosts.items[0], "", "", "", p, "Change to this folder in the focused pane");
+        g.add(.folder, null, "", "", "", p, "Change to this folder in the focused pane");
     };
     const Handlers = struct {
         fn changed(_: *gtk.SearchEntry, gg: *Anything) callconv(.c) void {
@@ -207,49 +204,20 @@ pub fn openAnything(a: *App) void {
             if (current == gg) current = null;
             gg.deinit();
         }
-        fn key(ctl: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, _: gdk_mod.ModifierType, gg: *Anything) callconv(.c) c_int {
-            _ = ctl;
-            // Up and down move through what's shown while typing goes on in the search.
-            const down = keyval == 0xff54;
-            const up = keyval == 0xff52;
-            if (!down and !up) return 0;
-            const sel = gg.list.getSelectedRow();
-            var i: usize = 0;
-            var at: ?usize = null;
-            var shown: [512]*gtk.ListBoxRow = undefined;
-            var n: usize = 0;
-            for (gg.items.items) |*it| if (it.row.as(gtk.Widget).getVisible() != 0 and n < shown.len) {
-                if (sel == it.row) at = n;
-                shown[n] = it.row;
-                n += 1;
-            };
-            if (n == 0) return 1;
-            i = if (at) |p| (if (down) @min(p + 1, n - 1) else if (p > 0) p - 1 else 0) else 0;
-            gg.list.selectRow(shown[i]);
-            _ = shown[i].as(gtk.Widget).grabFocus();
-            _ = gg.entry.as(gtk.Widget).grabFocus();
-            return 1;
-        }
     };
-    _ = gtk.SearchEntry.signals.search_changed.connect(entry, *Anything, &Handlers.changed, g, .{});
+    filterdialog.onQuery(entry, *Anything, &Handlers.changed, g);
     _ = gtk.SearchEntry.signals.activate.connect(entry, *Anything, &Handlers.activate, g, .{});
     _ = gtk.ListBox.signals.row_activated.connect(list, *Anything, &Handlers.rowActivated, g, .{});
     _ = adw.Dialog.signals.closed.connect(dialog, *Anything, &Handlers.closed, g, .{});
-    const keys_ctl = gtk.EventControllerKey.new();
-    keys_ctl.as(gtk.EventController).setPropagationPhase(.capture);
-    _ = gtk.EventControllerKey.signals.key_pressed.connect(keys_ctl, *Anything, &Handlers.key, g, .{});
-    entry.as(gtk.Widget).addController(keys_ctl.as(gtk.EventController));
     g.refilter();
     dialog.present(a.window.as(gtk.Widget));
     _ = entry.as(gtk.Widget).grabFocus();
 }
 
-const gdk_mod = @import("gdk");
-
 fn gotDetached(ctx: *anyopaque, session_id: []const u8, ids: []const []const u8, labels: []const []const u8) void {
-    const g: *Anything = @ptrCast(@alignCast(ctx));
     // The dialog may have closed, or another opened, while the answer was on its way.
-    if (current != g) return;
+    const g = current orelse return;
+    if (g.serial != @intFromPtr(ctx)) return;
     var found: ?*Host = null;
     for (g.app.hosts.items) |x| for (x.server.sessions.items) |session| if (std.mem.eql(u8, session.id, session_id)) {
         found = x;
@@ -282,6 +250,8 @@ const Browser = struct {
     files: std.ArrayList(bool) = .empty,
     rows: std.ArrayList(*gtk.ListBoxRow) = .empty,
     closed: bool = false,
+    /// The server went away; the dialog is closing and must not use it again.
+    gone: bool = false,
     /// Listings still on their way; the browser is freed once it's closed and none are left.
     waiting: u32 = 0,
 
@@ -306,13 +276,14 @@ const Browser = struct {
     }
 
     fn go(b: *Browser, path: []const u8) void {
+        if (b.gone) return;
         b.waiting += 1;
         b.server.listDir(b.session_id, b.block_id, path, b.mode == .insert, .{ .ctx = b, .done = listed });
     }
 
     fn listed(ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool) void {
         const b: *Browser = @ptrCast(@alignCast(ctx));
-        b.waiting -= 1;
+        b.waiting -|= 1;
         if (b.closed) {
             if (b.waiting == 0) b.deinit();
             return;
@@ -377,12 +348,12 @@ const Browser = struct {
 
     /// Changes to the folder, or types the path, then closes.
     fn finish(b: *Browser, path: []const u8) void {
-        b.app.usePath(b.server, b.session_id, b.block_id, path, b.mode == .insert);
+        if (!b.gone) b.app.usePath(b.server, b.session_id, b.block_id, path, b.mode == .insert);
         _ = b.dialog.close();
     }
 
     fn refilter(b: *Browser) void {
-        const q = std.mem.span(b.entry.as(gtk.Editable).getText());
+        const q = filterdialog.query(b.entry);
         var first: ?*gtk.ListBoxRow = null;
         for (b.rows.items, b.names.items) |r, n| {
             // Hidden folders stay out of the way until a filter starts with a dot.
@@ -391,59 +362,52 @@ const Browser = struct {
             r.as(gtk.Widget).setVisible(@intFromBool(show));
             if (show and first == null and !std.mem.eql(u8, n, "..")) first = r;
         }
-        if (first) |r| b.list.selectRow(r);
+        // With nothing to match, nothing stays selected for Enter to take.
+        if (first) |r| b.list.selectRow(r) else b.list.unselectAll();
     }
 };
 
 /// Browses folders from the focused pane's working directory, to change to one or insert a path.
 pub fn openBrowser(a: *App, server: *Server, session_id: []const u8, block_id: []const u8, start: []const u8, mode: BrowseMode) void {
     const b = gpa.create(Browser) catch return;
-    const dialog = adw.Dialog.new();
-    dialog.setTitle(if (mode == .cd) "Go to Directory" else "Insert Path");
-    dialog.setContentWidth(520);
-    dialog.setContentHeight(480);
-    const box = gtk.Box.new(.vertical, 8);
-    box.as(gtk.Widget).addCssClass("goto");
+    const owned_session = gpa.dupe(u8, session_id) catch return gpa.destroy(b);
+    const owned_block = gpa.dupe(u8, block_id) catch {
+        gpa.free(owned_session);
+        return gpa.destroy(b);
+    };
+    const parts = filterdialog.build(if (mode == .cd) "Go to Directory" else "Insert Path", "Filter; Enter opens the first match, or this folder", 520, 480, "goto");
+    const dialog = parts.dialog;
+    const entry = parts.entry;
+    const list = parts.list;
     const path_label = gtk.Label.new("");
     path_label.setXalign(0);
     path_label.setEllipsize(.start);
     path_label.as(gtk.Widget).addCssClass("goto-path");
-    box.append(path_label.as(gtk.Widget));
-    const entry = gtk.SearchEntry.new();
-    entry.setPlaceholderText("Filter; Enter opens the first match, or this folder");
-    box.append(entry.as(gtk.Widget));
-    const list = gtk.ListBox.new();
-    list.as(gtk.Widget).addCssClass("navigation-sidebar");
-    list.setActivateOnSingleClick(1);
-    const scroller = gtk.ScrolledWindow.new();
-    scroller.setPolicy(.never, .automatic);
-    scroller.as(gtk.Widget).setVexpand(1);
-    scroller.setChild(list.as(gtk.Widget));
-    box.append(scroller.as(gtk.Widget));
+    parts.box.prepend(path_label.as(gtk.Widget));
     const here = gtk.Button.newWithLabel(if (mode == .cd) "Open This Folder" else "Insert This Folder");
     here.as(gtk.Widget).addCssClass("suggested-action");
     here.as(gtk.Widget).addCssClass("pill");
     here.as(gtk.Widget).setHalign(.end);
-    box.append(here.as(gtk.Widget));
-    dialog.setChild(box.as(gtk.Widget));
+    parts.box.append(here.as(gtk.Widget));
     b.* = .{
         .app = a,
         .mode = mode,
         .server = server,
-        .session_id = gpa.dupe(u8, session_id) catch return,
-        .block_id = gpa.dupe(u8, block_id) catch return,
+        .session_id = owned_session,
+        .block_id = owned_block,
         .dialog = dialog,
         .path_label = path_label,
         .entry = entry,
         .list = list,
     };
+    browsers.append(gpa, b) catch {};
     const Handlers = struct {
         fn changed(_: *gtk.SearchEntry, bb: *Browser) callconv(.c) void {
             bb.refilter();
         }
         fn activate(_: *gtk.SearchEntry, bb: *Browser) callconv(.c) void {
             // With nothing typed, Enter takes the folder shown; otherwise the first match.
-            if (std.mem.span(bb.entry.as(gtk.Editable).getText()).len == 0) return bb.finish(bb.path.items);
+            if (filterdialog.query(bb.entry).len == 0) return bb.finish(bb.path.items);
             if (bb.list.getSelectedRow()) |r| bb.rowPicked(r);
         }
         fn rowActivated(_: *gtk.ListBox, row: *gtk.ListBoxRow, bb: *Browser) callconv(.c) void {
@@ -454,10 +418,14 @@ pub fn openBrowser(a: *App, server: *Server, session_id: []const u8, block_id: [
         }
         fn closed(_: *adw.Dialog, bb: *Browser) callconv(.c) void {
             bb.closed = true;
+            for (browsers.items, 0..) |x, i| if (x == bb) {
+                _ = browsers.swapRemove(i);
+                break;
+            };
             if (bb.waiting == 0) bb.deinit();
         }
     };
-    _ = gtk.SearchEntry.signals.search_changed.connect(entry, *Browser, &Handlers.changed, b, .{});
+    filterdialog.onQuery(entry, *Browser, &Handlers.changed, b);
     _ = gtk.SearchEntry.signals.activate.connect(entry, *Browser, &Handlers.activate, b, .{});
     _ = gtk.ListBox.signals.row_activated.connect(list, *Browser, &Handlers.rowActivated, b, .{});
     _ = gtk.Button.signals.clicked.connect(here, *Browser, &Handlers.useHere, b, .{});
