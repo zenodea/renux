@@ -795,6 +795,8 @@ pub const Server = struct {
             v.destroy();
             return;
         };
+        // A session whose last window just closed has nothing left in it, and goes too.
+        const emptied = v.windows.len == 0 and if (s.views.get(v.session_id)) |old| old.windows.len > 0 else false;
         const entry = s.views.getOrPut(gpa, v.session_id) catch return v.destroy();
         if (entry.found_existing) entry.value_ptr.*.destroy();
         // The key points into the view, so replace it with the new one's.
@@ -808,6 +810,7 @@ pub const Server = struct {
         };
         for (v.windows) |w| for (w.layers) |l| for (l.blocks) |blk| if (blk.isTerminal()) s.readDetails(v.session_id, blk.id);
         s.notify(.view, v.session_id);
+        if (emptied) s.destroySession(v.session_id);
     }
 
     // Terminals.
