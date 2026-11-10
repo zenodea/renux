@@ -30,6 +30,50 @@ pub const builtins = [_]Theme{
     .{ .name = "Catppuccin Latte", .bg = 0xeff1f5, .fg = 0x4c4f69, .cursor = 0xdc8a78, .ansi = .{ 0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be, 0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc } },
 };
 
+/// Remakes colors 16 to 255 from the first 16, like Ghostty's generated palette: the 6x6x6
+/// cube blends between the background, the six base colors and the foreground, and the 24
+/// grays run from the background to the foreground.
+pub fn extendPalette(p: *[256]u32, bg: u32, fg: u32) void {
+    const ch = struct {
+        fn get(c: u32, shift: u5) f64 {
+            return @floatFromInt((c >> shift) & 0xff);
+        }
+        fn mix(a: u32, b: u32, t: f64) [3]f64 {
+            return .{ get(a, 16) + (get(b, 16) - get(a, 16)) * t, get(a, 8) + (get(b, 8) - get(a, 8)) * t, get(a, 0) + (get(b, 0) - get(a, 0)) * t };
+        }
+        fn lerp3(a: [3]f64, b: [3]f64, t: f64) [3]f64 {
+            return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t };
+        }
+        fn pack(c: [3]f64) u32 {
+            var out: u32 = 0xFF000000;
+            for (c, 0..) |v, i| out |= @as(u32, @intFromFloat(@round(std.math.clamp(v, 0, 255)))) << @intCast(16 - 8 * i);
+            return out;
+        }
+    };
+    // Corners of the cube: black is the background and white the foreground.
+    const k000 = bg;
+    const k100 = p[1];
+    const k010 = p[2];
+    const k110 = p[3];
+    const k001 = p[4];
+    const k101 = p[5];
+    const k011 = p[6];
+    const k111 = fg;
+    for (0..6) |r| for (0..6) |g| for (0..6) |b| {
+        const tr = @as(f64, @floatFromInt(r)) / 5;
+        const tg = @as(f64, @floatFromInt(g)) / 5;
+        const tb = @as(f64, @floatFromInt(b)) / 5;
+        const c00 = ch.mix(k000, k100, tr);
+        const c10 = ch.mix(k010, k110, tr);
+        const c01 = ch.mix(k001, k101, tr);
+        const c11 = ch.mix(k011, k111, tr);
+        const c0 = ch.lerp3(c00, c10, tg);
+        const c1 = ch.lerp3(c01, c11, tg);
+        p[16 + r * 36 + g * 6 + b] = ch.pack(ch.lerp3(c0, c1, tb));
+    };
+    for (0..24) |i| p[232 + i] = ch.pack(ch.mix(bg, fg, @as(f64, @floatFromInt(i + 1)) / 25));
+}
+
 pub fn colorsOf(t: Theme) Colors {
     var p = stream.builtin_palette;
     for (t.ansi, 0..) |c, i| p[i] = c | 0xFF000000;

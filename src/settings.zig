@@ -9,6 +9,8 @@ pub const ColorScheme = enum { auto, light, dark };
 pub const CursorStyle = enum { program, block, bar, underline };
 /// Where a session's windows show as tabs: in the sidebar on the left or right, or above the panes.
 pub const TabPosition = enum { left, right, above };
+pub const BoldItalic = enum { fonts, plain };
+pub const PaddingColor = enum { terminal, theme };
 
 pub const Host = struct { label: []u8, url: []u8 };
 
@@ -56,6 +58,24 @@ pub const Settings = struct {
     /// A pane's frame takes its program's background color.
     match_program_bg: bool = false,
     rounded_selection: bool = true,
+    ligatures: bool = true,
+    font_smoothing: bool = true,
+    /// Bold and italic text in their own faces, or all in the regular one.
+    bold_italic: BoldItalic = .fonts,
+    cursor_blink_ms: f64 = 530,
+    /// The character under a block cursor; 0 uses the terminal's background.
+    cursor_text_color: u32 = 0,
+    /// 0 swaps the text's own colors.
+    selection_bg: u32 = 0,
+    selection_fg: u32 = 0,
+    pad_x: f64 = 8,
+    pad_y: f64 = 8,
+    padding_color: PaddingColor = .terminal,
+    /// Colors 16 to 255 made from the theme's own 16, so they match it.
+    extended_palette: bool = false,
+    copy_animation: bool = true,
+    /// Link schemes, such as vscode, that open their app without asking.
+    trusted_schemes: std.ArrayList([]u8) = .empty,
     tab_position: TabPosition = .left,
     /// Tabs above the panes share the width between them.
     tab_fill: bool = true,
@@ -195,6 +215,27 @@ pub fn load() void {
     s.autobalance = boolean(kf, "autobalance", false);
     s.match_program_bg = boolean(kf, "match-program-bg", false);
     s.rounded_selection = boolean(kf, "rounded-selection", true);
+    s.ligatures = boolean(kf, "ligatures", true);
+    s.font_smoothing = boolean(kf, "font-smoothing", true);
+    s.bold_italic = enumOf(BoldItalic, kf, "bold-italic", .fonts);
+    s.cursor_blink_ms = number(kf, "cursor-blink-ms", 530, 200, 2000);
+    s.cursor_text_color = @intFromFloat(number(kf, "cursor-text-color", 0, 0, 0xffffff));
+    s.selection_bg = @intFromFloat(number(kf, "selection-bg", 0, 0, 0xffffff));
+    s.selection_fg = @intFromFloat(number(kf, "selection-fg", 0, 0, 0xffffff));
+    s.pad_x = number(kf, "padding-x", 8, 0, 40);
+    s.pad_y = number(kf, "padding-y", 8, 0, 40);
+    s.padding_color = enumOf(PaddingColor, kf, "padding-color", .terminal);
+    s.extended_palette = boolean(kf, "extended-palette", false);
+    s.copy_animation = boolean(kf, "copy-animation", true);
+    {
+        var n: usize = 0;
+        if (kf.getStringList("links", "trusted", &n, null)) |list| {
+            defer glib.strfreev(@ptrCast(list));
+            for (0..n) |i| if (std.mem.span(list[i])) |t| {
+                s.trusted_schemes.append(gpa, gpa.dupe(u8, t) catch continue) catch {};
+            };
+        }
+    }
     s.tab_position = enumOf(TabPosition, kf, "tab-position", .left);
     s.tab_fill = boolean(kf, "tab-fill", true);
     s.tab_processes = boolean(kf, "tab-processes", false);
@@ -324,7 +365,9 @@ pub fn save() void {
         .{ "key-hints", s.key_hints },         .{ "focus-follows-mouse", s.focus_follows_mouse },
         .{ "fade-inactive-window", s.fade_inactive_window }, .{ "highlight-border", s.highlight_border },
         .{ "highlight-animate", s.highlight_animate }, .{ "autobalance", s.autobalance },
-        .{ "match-program-bg", s.match_program_bg }, .{ "rounded-selection", s.rounded_selection },         .{ "recent-paths", s.recent_paths_shown },         .{ "tab-fill", s.tab_fill },
+        .{ "match-program-bg", s.match_program_bg }, .{ "rounded-selection", s.rounded_selection },
+        .{ "ligatures", s.ligatures },         .{ "font-smoothing", s.font_smoothing },
+        .{ "extended-palette", s.extended_palette }, .{ "copy-animation", s.copy_animation },         .{ "recent-paths", s.recent_paths_shown },         .{ "tab-fill", s.tab_fill },
         .{ "tab-processes", s.tab_processes },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
@@ -340,6 +383,14 @@ pub fn save() void {
     kf.setDouble("compy", "fade-inactive", s.fade_inactive);
     kf.setDouble("compy", "highlight-opacity", s.highlight_opacity);
     kf.setDouble("compy", "highlight-color", @floatFromInt(s.highlight_color));
+    kf.setDouble("compy", "cursor-blink-ms", s.cursor_blink_ms);
+    kf.setDouble("compy", "cursor-text-color", @floatFromInt(s.cursor_text_color));
+    kf.setDouble("compy", "selection-bg", @floatFromInt(s.selection_bg));
+    kf.setDouble("compy", "selection-fg", @floatFromInt(s.selection_fg));
+    kf.setDouble("compy", "padding-x", s.pad_x);
+    kf.setDouble("compy", "padding-y", s.pad_y);
+    kf.setString("compy", "bold-italic", @tagName(s.bold_italic));
+    kf.setString("compy", "padding-color", @tagName(s.padding_color));
 
     var labels: std.ArrayList(?[*:0]const u8) = .empty;
     var urls: std.ArrayList(?[*:0]const u8) = .empty;
@@ -369,6 +420,14 @@ pub fn save() void {
         recent.append(gpa, z.ptr) catch return;
     }
     kf.setStringList("paths", "recent", @ptrCast(recent.items.ptr), recent.items.len);
+    var trusted: std.ArrayList(?[*:0]const u8) = .empty;
+    defer trusted.deinit(gpa);
+    for (s.trusted_schemes.items) |t| {
+        const z = gpa.dupeSentinel(u8, t, 0) catch return;
+        owned.append(gpa, z) catch return;
+        trusted.append(gpa, z.ptr) catch return;
+    }
+    kf.setStringList("links", "trusted", @ptrCast(trusted.items.ptr), trusted.items.len);
     var shortcut_lines: std.ArrayList(?[*:0]const u8) = .empty;
     defer shortcut_lines.deinit(gpa);
     for (s.shortcuts.items) |sc| {

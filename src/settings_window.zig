@@ -170,44 +170,49 @@ fn percentChanged(row: *adw.SpinRow, _: *gobject.ParamSpec, n: *Percent) callcon
     n.ctx.app.applyLook();
 }
 
-/// The highlight's color: the theme's accent, or one picked here.
-fn colorRow(ctx: *Ctx, g: *adw.PreferencesGroup) void {
+const ColorCtx = struct { ctx: *Ctx, field: *u32, after: *const fn (*App) void };
+
+/// A color setting: a picked color, or none (0) for the default that `reset` names.
+fn colorPicker(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, subtitle: ?[:0]const u8, field: *u32, reset: [:0]const u8, after: *const fn (*App) void) void {
     const row = adw.ActionRow.new();
-    row.as(adw.PreferencesRow).setTitle("Highlight color");
-    row.setSubtitle("The theme's accent unless one is picked");
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    if (subtitle) |sub| row.setSubtitle(sub.ptr);
     const button = gtk.ColorDialogButton.new(gtk.ColorDialog.new());
     button.as(gtk.Widget).setValign(.center);
-    const c = settings.current.highlight_color;
+    const c = field.*;
     if (c != 0) {
         const rgba: gdk.RGBA = .{ .f_red = @as(f32, @floatFromInt((c >> 16) & 0xff)) / 255, .f_green = @as(f32, @floatFromInt((c >> 8) & 0xff)) / 255, .f_blue = @as(f32, @floatFromInt(c & 0xff)) / 255, .f_alpha = 1 };
         button.setRgba(&rgba);
     }
-    const accent = gtk.Button.newWithLabel("Use Accent");
-    accent.as(gtk.Widget).addCssClass("flat");
-    accent.as(gtk.Widget).setValign(.center);
-    row.addSuffix(accent.as(gtk.Widget));
+    const default = gtk.Button.newWithLabel(reset.ptr);
+    default.as(gtk.Widget).addCssClass("flat");
+    default.as(gtk.Widget).setValign(.center);
+    row.addSuffix(default.as(gtk.Widget));
     row.addSuffix(button.as(gtk.Widget));
+    const cc = gpa.create(ColorCtx) catch return;
+    cc.* = .{ .ctx = ctx, .field = field, .after = after };
     const H = struct {
-        fn picked(b: *gtk.ColorDialogButton, _: *gobject.ParamSpec, cx: *Ctx) callconv(.c) void {
+        fn picked(b: *gtk.ColorDialogButton, _: *gobject.ParamSpec, x: *ColorCtx) callconv(.c) void {
             const v = b.getRgba();
             const byte = struct {
-                fn f(x: f32) u32 {
-                    return @intFromFloat(@round(std.math.clamp(x, 0, 1) * 255));
+                fn f(t: f32) u32 {
+                    return @intFromFloat(@round(std.math.clamp(t, 0, 1) * 255));
                 }
             }.f;
-            settings.current.highlight_color = (byte(v.f_red) << 16) | (byte(v.f_green) << 8) | byte(v.f_blue);
-            if (settings.current.highlight_color == 0) settings.current.highlight_color = 1;
+            x.field.* = (byte(v.f_red) << 16) | (byte(v.f_green) << 8) | byte(v.f_blue);
+            // Pure black is kept as the next shade up, since 0 means the default.
+            if (x.field.* == 0) x.field.* = 1;
             settings.save();
-            cx.app.applyLook();
+            x.after(x.ctx.app);
         }
-        fn useAccent(_: *gtk.Button, cx: *Ctx) callconv(.c) void {
-            settings.current.highlight_color = 0;
+        fn cleared(_: *gtk.Button, x: *ColorCtx) callconv(.c) void {
+            x.field.* = 0;
             settings.save();
-            cx.app.applyLook();
+            x.after(x.ctx.app);
         }
     };
-    _ = gobject.Object.signals.notify.connect(button, *Ctx, &H.picked, ctx, .{ .detail = "rgba" });
-    _ = gtk.Button.signals.clicked.connect(accent, *Ctx, &H.useAccent, ctx, .{});
+    _ = gobject.Object.signals.notify.connect(button, *ColorCtx, &H.picked, cc, .{ .detail = "rgba" });
+    _ = gtk.Button.signals.clicked.connect(default, *ColorCtx, &H.cleared, cc, .{});
     g.add(row.as(gtk.Widget));
 }
 
@@ -341,7 +346,7 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, hl, "Show border on active pane", null, &settings.current.highlight_border, App.applyLook);
     switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);
     rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
-    colorRow(ctx, hl);
+    colorPicker(ctx, hl, "Highlight color", "The theme's accent unless one is picked", &settings.current.highlight_color, "Use Accent", App.applyLook);
     const go = group(p, "Go to Anything", null);
     switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     const look = group(p, "Appearance", null);
@@ -478,6 +483,14 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     fontRows(ctx, g);
     numberRow(ctx, g, "Line height", "Row height as a multiple of the font's own", &settings.current.line_height, 0.8, 2, 0.05, 2, App.fontChanged);
     numberRow(ctx, g, "Letter spacing", "Extra pixels between characters", &settings.current.letter_spacing, -2, 6, 0.5, 1, App.fontChanged);
+    switchRow(ctx, g, "Font ligatures", "Join character pairs such as => when the font has them", &settings.current.ligatures, App.terminalChanged);
+    switchRow(ctx, g, "Font smoothing", "Off draws glyphs without antialiasing, for pixel fonts", &settings.current.font_smoothing, App.terminalChanged);
+    segments(ctx, g, "Bold and italic", settings.BoldItalic, &settings.current.bold_italic, &.{ "Own Faces", "Regular" }, App.terminalChanged);
+
+    const padding = group(p, "Padding", null);
+    numberRow(ctx, padding, "Horizontal padding", "Points left and right of the text", &settings.current.pad_x, 0, 40, 1, 0, App.terminalChanged);
+    numberRow(ctx, padding, "Vertical padding", "Points above and below the text", &settings.current.pad_y, 0, 40, 1, 0, App.terminalChanged);
+    segments(ctx, padding, "Padding color", settings.PaddingColor, &settings.current.padding_color, &.{ "Terminal", "Theme" }, App.terminalChanged);
 
     const look = group(p, "Transparency", "Below 100%, the desktop shows through. On Linux, KDE and Hyprland blur it; GNOME doesn't.");
     percentRow(ctx, look, "Window", "Behind the panes and the sidebar", &settings.current.window_opacity);
@@ -488,11 +501,17 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
     numberRow(ctx, c, "Bar width", "In pixels, for the bar and underline cursors. The cursor takes the theme's accent color", &settings.current.cursor_width, 1, 6, 0.5, 1, App.redrawAll);
     switchRow(ctx, c, "Blink", "In the pane with the keyboard", &settings.current.cursor_blink, App.redrawAll);
+    numberRow(ctx, c, "Blink interval", "Milliseconds between blinks", &settings.current.cursor_blink_ms, 200, 2000, 50, 0, App.terminalChanged);
+    colorPicker(ctx, c, "Cursor text color", "The character under a block cursor", &settings.current.cursor_text_color, "Default", App.redrawAllPub);
 
     const colors = group(p, "Colors and Bell", null);
     switchRow(ctx, colors, "Improve text contrast", "Adjust text that would be hard to read against its background", &settings.current.improve_contrast, App.redrawAll);
+    colorPicker(ctx, colors, "Selection background", "Selected text swaps its colors unless one is picked", &settings.current.selection_bg, "Default", App.redrawAllPub);
+    colorPicker(ctx, colors, "Selection foreground", null, &settings.current.selection_fg, "Default", App.redrawAllPub);
+    switchRow(ctx, colors, "Extended theme palette", "Make colors 16 to 255 from the theme's own colors", &settings.current.extended_palette, App.terminalChanged);
     switchRow(ctx, colors, "Flash on bell", "Briefly light up a pane when its program rings the bell", &settings.current.visual_bell, null);
     const paste = group(p, "Copy and Paste", null);
+    switchRow(ctx, paste, "Animation on copy", "A Copied badge on the pane", &settings.current.copy_animation, null);
     switchRow(ctx, paste, "Copy on select", "Selected text goes straight to the clipboard. Programs that handle the mouse themselves, such as Claude Code, copy their own selections", &settings.current.copy_on_select, null);
     switchRow(ctx, paste, "Ask before pasting several lines", "Unless the program knows it's a paste, each line could run as a command", &settings.current.paste_warning, null);
     return p.as(gtk.Widget);

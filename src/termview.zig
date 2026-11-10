@@ -6,6 +6,7 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const gio = @import("gio");
 const gtk = @import("gtk");
+const adw = @import("adw");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
 const pango = @import("pango");
@@ -23,7 +24,11 @@ const programs = @import("programs.zig");
 
 const gpa = std.heap.c_allocator;
 
-const pad = 8.0;
+/// The space around the text, from the settings.
+pub var pad_x: f64 = 8;
+pub var pad_y: f64 = 8;
+/// The theme's own background, for padding drawn in the theme's color.
+pub var theme_bg: u32 = 0;
 const size_debounce_ms = 200;
 
 pub const Font = struct {
@@ -65,6 +70,7 @@ pub const Font = struct {
     }
 
     fn pick(f: Font, flags: term.Flags) *pango.FontDescription {
+        if (@import("settings.zig").current.bold_italic == .plain) return f.regular;
         if (flags.bold and flags.italic) return f.bold_italic;
         if (flags.bold) return f.bold;
         if (flags.italic) return f.italic;
@@ -480,8 +486,8 @@ pub const TermView = struct {
     // Size.
 
     fn resized(v: *TermView, width: c_int, height: c_int) void {
-        const cols: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(width)) - 2 * pad) / v.cell_w)));
-        const rows: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(height)) - 2 * pad) / v.cell_h)));
+        const cols: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(width)) - 2 * pad_x) / v.cell_w)));
+        const rows: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(height)) - 2 * pad_y) / v.cell_h)));
         if (cols == v.want_cols and rows == v.want_rows) return;
         v.want_cols = cols;
         v.want_rows = rows;
@@ -939,8 +945,8 @@ pub const TermView = struct {
     }
 
     fn cellAt(v: *TermView, x: f64, y: f64) struct { u16, u16 } {
-        const col = @max(0, @floor((x - pad) / v.cell_w));
-        const row = @max(0, @floor((y - pad - v.draw_frac) / v.cell_h));
+        const col = @max(0, @floor((x - pad_x) / v.cell_w));
+        const row = @max(0, @floor((y - pad_y - v.draw_frac) / v.cell_h));
         return .{ @intFromFloat(@min(col, 65535)), @intFromFloat(@min(row, 65535)) };
     }
 
@@ -1013,8 +1019,7 @@ pub const TermView = struct {
         if (mods & keys.ctrl != 0) {
             if (v.linkAt(t, cell[0], cell[1])) |url| {
                 defer gpa.free(url);
-                const launcher = gtk.UriLauncher.new(url.ptr);
-                launcher.launch(@ptrCast(@alignCast(v.widget().getRoot())), null, null, null);
+                v.openLink(url);
                 return;
             }
         }
@@ -1097,7 +1102,7 @@ pub const TermView = struct {
     }
 
     fn extendTo(v: *TermView, t: *term_mod.Term, x: f64, y: f64, first: bool) void {
-        const cell = v.cellAt(x, @max(pad, y));
+        const cell = v.cellAt(x, @max(pad_y, y));
         const last_col = t.frame.cols -| 1;
         const last_row = t.frame.rows -| 1;
         const cx = @min(cell[0], last_col);
@@ -1227,8 +1232,54 @@ pub const TermView = struct {
 
     fn menuOpenLink(v: *TermView) void {
         const l = v.menu_link orelse return;
-        const launcher = gtk.UriLauncher.new(l.ptr);
-        launcher.launch(@ptrCast(@alignCast(v.widget().getRoot())), null, null, null);
+        v.openLink(l);
+    }
+
+    /// Opens a link. Web, mail and file links open at once; one that opens an app, such as
+    /// vscode:, asks first unless its scheme was trusted with Always Open.
+    fn openLink(v: *TermView, url: [:0]const u8) void {
+        const colon = std.mem.indexOfScalar(u8, url, ':') orelse return;
+        const scheme = url[0..colon];
+        const plain = for ([_][]const u8{ "http", "https", "mailto", "file" }) |w| {
+            if (std.ascii.eqlIgnoreCase(scheme, w)) break true;
+        } else false;
+        const trusted = for (@import("settings.zig").current.trusted_schemes.items) |t| {
+            if (std.ascii.eqlIgnoreCase(t, scheme)) break true;
+        } else false;
+        const root: ?*gtk.Window = @ptrCast(@alignCast(v.widget().getRoot()));
+        if (plain or trusted) {
+            gtk.UriLauncher.new(url.ptr).launch(root, null, null, null);
+            return;
+        }
+        const body = std.fmt.allocPrintSentinel(gpa, "{s}", .{url}, 0) catch return;
+        defer gpa.free(body);
+        const heading = std.fmt.allocPrintSentinel(gpa, "Open a {s} link?", .{scheme}, 0) catch return;
+        defer gpa.free(heading);
+        const dialog = adw.AlertDialog.new(heading.ptr, body.ptr);
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("always", "Always Open");
+        dialog.addResponse("open", "Open");
+        dialog.setResponseAppearance("open", .suggested);
+        dialog.setDefaultResponse("open");
+        const keep = gpa.dupeSentinel(u8, url, 0) catch return;
+        const Done = struct {
+            fn run(d: *adw.AlertDialog, response: [*:0]const u8, link: [*:0]u8) callconv(.c) void {
+                defer gpa.free(std.mem.span(link));
+                const r = std.mem.span(response);
+                if (std.mem.eql(u8, r, "cancel")) return;
+                const l = std.mem.span(link);
+                if (std.mem.eql(u8, r, "always")) {
+                    const st = @import("settings.zig");
+                    const sch = l[0 .. std.mem.indexOfScalar(u8, l, ':') orelse return];
+                    st.current.trusted_schemes.append(gpa, gpa.dupe(u8, sch) catch return) catch return;
+                    st.save();
+                }
+                const w: ?*gtk.Window = @ptrCast(@alignCast(d.as(gtk.Widget).getRoot()));
+                gtk.UriLauncher.new(link).launch(w, null, null, null);
+            }
+        };
+        _ = adw.AlertDialog.signals.response.connect(dialog, [*:0]u8, &Done.run, keep.ptr, .{});
+        dialog.as(adw.Dialog).present(v.widget());
     }
 
     fn menuCopyLink(v: *TermView) void {
@@ -1306,10 +1357,21 @@ fn fillRect(sn: *gtk.Snapshot, color: u32, alpha: f64, x: f64, y: f64, w: f64, h
 /// Spreads characters apart by `px` (or closer, when negative), so runs of text stay on a grid
 /// of the wider cells: Pango leaves the space off a run's first and last character.
 fn setSpacing(layout: *pango.Layout, px: f64) void {
-    if (px == 0) return layout.setAttributes(null);
+    const prefs = &@import("settings.zig").current;
+    // Font smoothing off draws glyphs without antialiasing, for crisp pixel fonts.
+    {
+        const ctx = layout.getContext();
+        const opts = cairo.FontOptions.create();
+        defer opts.destroy();
+        opts.setAntialias(if (prefs.font_smoothing) .default else .none);
+        pangocairo.contextSetFontOptions(ctx, opts);
+        layout.contextChanged();
+    }
+    if (px == 0 and prefs.ligatures) return layout.setAttributes(null);
     const list = pango.AttrList.new();
     defer list.unref();
-    list.insert(pango.attrLetterSpacingNew(@intFromFloat(@round(px * pango.SCALE))));
+    if (px != 0) list.insert(pango.attrLetterSpacingNew(@intFromFloat(@round(px * pango.SCALE))));
+    if (!prefs.ligatures) list.insert(pango.AttrFontFeatures.new("liga 0, clig 0, calt 0, dlig 0"));
     layout.setAttributes(list);
 }
 
@@ -1359,7 +1421,7 @@ fn snapshotEmpty(v: *TermView, sn: *gtk.Snapshot, w: f64, h: f64, message: [:0]c
 fn rowHash(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) u64 {
     var hasher = std.hash.Wyhash.init(0);
     const prefs = &@import("settings.zig").current;
-    hasher.update(std.mem.asBytes(&[_]u64{ @intFromPtr(f_font.regular), @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection) }));
+    hasher.update(std.mem.asBytes(&[_]u64{ @intFromPtr(f_font.regular), @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection), @bitCast(pad_x), @intFromBool(prefs.ligatures), @intFromEnum(prefs.bold_italic), prefs.selection_bg, prefs.selection_fg, @intFromBool(prefs.font_smoothing) }));
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
@@ -1392,7 +1454,7 @@ fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.Re
         const colors = cellColors(f, cl);
         if (colors.bg == f.bg) continue;
         const span: f64 = if (cl.flags.wide) 2 else 1;
-        fillRect(sn, colors.bg, 1, pad + @as(f64, @floatFromInt(x)) * v.cell_w, 0, v.cell_w * span + 0.5, v.cell_h);
+        fillRect(sn, colors.bg, 1, pad_x + @as(f64, @floatFromInt(x)) * v.cell_w, 0, v.cell_w * span + 0.5, v.cell_h);
     }
     // A selection reads as one soft-cornered shape for each run of selected cells.
     if (rounded) {
@@ -1405,7 +1467,7 @@ fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.Re
             const start = x;
             const color = cellColors(f, f.cell(x, y)).bg;
             while (x < f.cols and f.cell(x, y).flags.selected) x += 1;
-            const rect: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(pad + @as(f64, @floatFromInt(start)) * v.cell_w), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(@as(f64, @floatFromInt(x - start)) * v.cell_w), .f_height = @floatCast(v.cell_h) } };
+            const rect: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(pad_x + @as(f64, @floatFromInt(start)) * v.cell_w), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(@as(f64, @floatFromInt(x - start)) * v.cell_w), .f_height = @floatCast(v.cell_h) } };
             var rr: gsk.RoundedRect = undefined;
             _ = rr.initFromRect(&rect, @floatCast(@min(4, v.cell_h / 4)));
             sn.pushRoundedClip(&rr);
@@ -1426,7 +1488,7 @@ fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.Re
             continue;
         }
         if (boxdraw.handles(cl.cp)) {
-            const left = pad + @as(f64, @floatFromInt(x)) * v.cell_w;
+            const left = pad_x + @as(f64, @floatFromInt(x)) * v.cell_w;
             const cr = sn.appendCairo(&.{ .f_origin = .{ .f_x = @floatCast(left - 1), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(v.cell_w + 2), .f_height = @floatCast(v.cell_h) } });
             setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
             boxdraw.draw(cr, cl.cp, left, 0, v.cell_w, v.cell_h);
@@ -1446,7 +1508,7 @@ fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.Re
             x += if (n.flags.wide) 2 else 1;
             if (n.cp >= 0x80) break;
         }
-        const left = pad + @as(f64, @floatFromInt(start)) * v.cell_w;
+        const left = pad_x + @as(f64, @floatFromInt(start)) * v.cell_w;
         layout.setFontDescription(f_font.pick(cl.flags));
         text.append(gpa, 0) catch break;
         layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
@@ -1498,7 +1560,11 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
 
-    fillRect(sn, f.bg, if (v.floating) 1 else term_opacity, 0, 0, w, h);
+    const bg_alpha: f64 = if (v.floating) 1 else term_opacity;
+    if (@import("settings.zig").current.padding_color == .theme and theme_bg != 0) {
+        fillRect(sn, theme_bg, bg_alpha, 0, 0, w, h);
+        fillRect(sn, f.bg, bg_alpha, pad_x, pad_y, @max(0, @as(f64, @floatFromInt(f.cols)) * v.cell_w), @max(0, @as(f64, @floatFromInt(f.rows)) * v.cell_h));
+    } else fillRect(sn, f.bg, bg_alpha, 0, 0, w, h);
     sn.pushClip(&.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
     defer sn.pop();
 
@@ -1518,13 +1584,13 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     if (frac > 0.01 and rows_up < max_up) {
         t.scroll(-1);
         _ = t.render(true);
-        placeRow(sn, rowNode(v, t.frame.rows, &t.frame, 0, f_font), pad + frac - v.cell_h);
+        placeRow(sn, rowNode(v, t.frame.rows, &t.frame, 0, f_font), pad_y + frac - v.cell_h);
         t.scroll(1);
         _ = t.render(true);
     }
     var y: usize = 0;
     while (y < f.rows) : (y += 1) {
-        const top = pad + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
+        const top = pad_y + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
         if (top > h) break;
         placeRow(sn, rowNode(v, y, f, y, f_font), top);
     }
@@ -1538,8 +1604,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
             while (row <= m.y1 and row < f.rows) : (row += 1) {
                 const from: usize = if (m.y0 == row) m.x0 else 0;
                 const to: usize = if (m.y1 == row) m.x1 else f.cols -| 1;
-                const top = pad + frac + @as(f64, @floatFromInt(row)) * v.cell_h;
-                fillRect(sn, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.45 else 0.25, pad + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
+                const top = pad_y + frac + @as(f64, @floatFromInt(row)) * v.cell_h;
+                fillRect(sn, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.45 else 0.25, pad_x + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
             }
         }
     }
@@ -1547,8 +1613,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     // Input methods place their candidate popup by the cursor.
     {
         var r: gdk.Rectangle = .{
-            .f_x = @intFromFloat(pad + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w),
-            .f_y = @intFromFloat(pad + v.draw_frac + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h),
+            .f_x = @intFromFloat(pad_x + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w),
+            .f_y = @intFromFloat(pad_y + v.draw_frac + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h),
             .f_width = @intFromFloat(v.cell_w),
             .f_height = @intFromFloat(v.cell_h),
         };
@@ -1557,8 +1623,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
 
     // The cursor, hollow when the pane doesn't have the keyboard.
     if (f.cursor_visible and f.cursor_y < f.rows and f.cursor_x < f.cols and f.scroll_offset + f.scroll_len >= f.scroll_total) {
-        const cx = pad + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w;
-        const cy = pad + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
+        const cx = pad_x + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w;
+        const cy = pad_y + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
         // A program's own cursor color wins; otherwise the theme's accent, like Rex.
         const color = if (f.cursor_color != 0 and f.cursor_color != f.fg) f.cursor_color else if (cursor_accent != 0) cursor_accent else f.fg;
         const focused = v.widget().hasFocus() != 0;
@@ -1593,7 +1659,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
                     const layout = TermDraw.layoutOf(v);
                     layout.setFontDescription(f_font.pick(under.flags));
                     layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
-                    layoutOnBaseline(sn, layout, rgba(f.bg, 1), cx, cy + v.baseline);
+                    const under_color = if (prefs.cursor_text_color != 0) prefs.cursor_text_color else f.bg;
+                    layoutOnBaseline(sn, layout, rgba(under_color, 1), cx, cy + v.baseline);
                 }
             },
         }
@@ -1657,7 +1724,16 @@ fn cellColors(f: *const term.Frame, cl: term.Cell) Colors {
     var fg = if (cl.fg != 0) cl.fg else f.fg;
     var bg = if (cl.bg != 0) cl.bg else f.bg;
     if (cl.flags.inverse) std.mem.swap(u32, &fg, &bg);
-    if (cl.flags.selected) std.mem.swap(u32, &fg, &bg);
+    if (cl.flags.selected) {
+        const prefs = &@import("settings.zig").current;
+        if (prefs.selection_bg != 0) {
+            bg = prefs.selection_bg;
+            if (prefs.selection_fg != 0) fg = prefs.selection_fg;
+        } else {
+            std.mem.swap(u32, &fg, &bg);
+            if (prefs.selection_fg != 0) fg = prefs.selection_fg;
+        }
+    }
     if (@import("settings.zig").current.improve_contrast) fg = readable(fg, bg);
     return .{ .fg = fg, .bg = bg };
 }

@@ -206,6 +206,7 @@ pub const App = struct {
     auto_picked: bool = false,
     theme_css: ?*gtk.CssProvider = null,
     look_css: ?*gtk.CssProvider = null,
+    blink_timer: c_uint = 0,
     /// The shown window's tiled pane count, to balance splits when it changes.
     balance_count: usize = 0,
     balance_window: [64]u8 = undefined,
@@ -228,6 +229,8 @@ pub const App = struct {
         // GTK may have reset it while starting up.
         if (builtin.os.tag == .macos and std.c.getenv("COMPY_NOFOCUS") != null) @import("macos.zig").neverActivate();
         settings.load();
+        termview.pad_x = settings.current.pad_x;
+        termview.pad_y = settings.current.pad_y;
         termview.font = termview.Font.init(gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch "Monospace 11");
         const provider = gtk.CssProvider.new();
         provider.loadFromString(css);
@@ -407,7 +410,7 @@ pub const App = struct {
         themes.active = themes.resolve(settings.current.theme);
         @import("workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
-        _ = glib.timeoutAdd(530, &blinkTick, a);
+        a.blink_timer = glib.timeoutAdd(@intFromFloat(settings.current.cursor_blink_ms), &blinkTick, a);
         installShotHook(a);
 
         // $COMPY_SERVER, for testing, names hosts to use without saving them, separated by commas.
@@ -711,6 +714,8 @@ pub const App = struct {
             },
         }
         const palette = theme.Palette.from(source);
+        const cv = palette.canvas;
+        termview.theme_bg = (@as(u32, @intFromFloat(@round(cv.r * 255))) << 16) | (@as(u32, @intFromFloat(@round(cv.g * 255))) << 8) | @as(u32, @intFromFloat(@round(cv.b * 255)));
         const ac = palette.accent;
         termview.cursor_accent = (@as(u32, @intFromFloat(@round(ac.r * 255))) << 16) | (@as(u32, @intFromFloat(@round(ac.g * 255))) << 8) | @as(u32, @intFromFloat(@round(ac.b * 255)));
         a.redrawAll();
@@ -2507,6 +2512,20 @@ pub const App = struct {
     fn markHeaders(a: *App) void {
         const w = a.window.as(gtk.Widget);
         if (settings.current.show_headers) w.removeCssClass("no-headers") else w.addCssClass("no-headers");
+    }
+
+    /// Applies the terminal options: padding, blink speed, palette, and the rest that redraw.
+    pub fn terminalChanged(a: *App) void {
+        termview.pad_x = settings.current.pad_x;
+        termview.pad_y = settings.current.pad_y;
+        if (a.blink_timer != 0) _ = glib.Source.remove(a.blink_timer);
+        a.blink_timer = glib.timeoutAdd(@intFromFloat(settings.current.cursor_blink_ms), &blinkTick, a);
+        for (a.hosts.items) |h| {
+            var it = h.server.streams.valueIterator();
+            while (it.next()) |st| st.*.hostColorsChanged();
+        }
+        a.fontChanged();
+        a.redrawAllPub();
     }
 
     pub fn redrawAllPub(a: *App) void {

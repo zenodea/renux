@@ -575,6 +575,7 @@ pub const Workspace = struct {
     fn showCopied(ctx: *anyopaque, block_id: []const u8) void {
         const ws: *Workspace = @ptrCast(@alignCast(ctx));
         const p = ws.paneOf(block_id) orelse return;
+        if (!@import("settings.zig").current.copy_animation) return;
         p.copied.addCssClass("shown");
         if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         const Hide = struct {
