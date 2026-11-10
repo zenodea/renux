@@ -11,6 +11,7 @@ const cairo = @import("cairo");
 const pango = @import("pango");
 const pangocairo = @import("pangocairo");
 const gsk = @import("gsk");
+const graphene = @import("graphene");
 const keys = @import("keys.zig");
 const term = @import("term.zig");
 const term_mod = term;
@@ -207,6 +208,11 @@ pub const TermView = struct {
     spacing: f64 = 0,
     /// Floating panes stay solid when terminals are see-through, so what's below doesn't show.
     floating: bool = false,
+    /// Whether this pane has the window's keyboard focus, for fading the others.
+    active_pane: bool = true,
+    /// The background the program last drew with, to tell the frame when it changes.
+    last_bg: u32 = 0,
+    on_bg: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8, bg: u32) void } = null,
     server: *Server,
     session_id: []u8,
     block_id: []u8,
@@ -1353,7 +1359,7 @@ fn snapshotEmpty(v: *TermView, sn: *gtk.Snapshot, w: f64, h: f64, message: [:0]c
 fn rowHash(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) u64 {
     var hasher = std.hash.Wyhash.init(0);
     const prefs = &@import("settings.zig").current;
-    hasher.update(std.mem.asBytes(&[_]u64{ @intFromPtr(f_font.regular), @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast) }));
+    hasher.update(std.mem.asBytes(&[_]u64{ @intFromPtr(f_font.regular), @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection) }));
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
@@ -1378,13 +1384,35 @@ fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.Re
     const sn = gtk.Snapshot.new();
     const layout = TermDraw.layoutOf(v);
     // Backgrounds first, so wide glyphs can overhang into the next cell.
+    const rounded = @import("settings.zig").current.rounded_selection;
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
+        if (rounded and cl.flags.selected) continue;
         const colors = cellColors(f, cl);
         if (colors.bg == f.bg) continue;
         const span: f64 = if (cl.flags.wide) 2 else 1;
         fillRect(sn, colors.bg, 1, pad + @as(f64, @floatFromInt(x)) * v.cell_w, 0, v.cell_w * span + 0.5, v.cell_h);
+    }
+    // A selection reads as one soft-cornered shape for each run of selected cells.
+    if (rounded) {
+        x = 0;
+        while (x < f.cols) {
+            if (!f.cell(x, y).flags.selected) {
+                x += 1;
+                continue;
+            }
+            const start = x;
+            const color = cellColors(f, f.cell(x, y)).bg;
+            while (x < f.cols and f.cell(x, y).flags.selected) x += 1;
+            const rect: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(pad + @as(f64, @floatFromInt(start)) * v.cell_w), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(@as(f64, @floatFromInt(x - start)) * v.cell_w), .f_height = @floatCast(v.cell_h) } };
+            var rr: gsk.RoundedRect = undefined;
+            _ = rr.initFromRect(&rect, @floatCast(@min(4, v.cell_h / 4)));
+            sn.pushRoundedClip(&rr);
+            const c = rgba(color, 1);
+            sn.appendColor(&c, &rect);
+            sn.pop();
+        }
     }
     // Then text, in runs of one style. Anything outside ASCII is placed on its own cell, since
     // fallback fonts don't keep to the grid.
@@ -1569,6 +1597,20 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
                 }
             },
         }
+    }
+
+    // Panes without the keyboard, or every pane while the window isn't active, fade back.
+    {
+        const prefs = &@import("settings.zig").current;
+        const window_active = if (v.widget().getRoot()) |r| gtk.Window.isActive(@ptrCast(@alignCast(r))) != 0 else true;
+        var fade: f64 = 0;
+        if (!v.active_pane) fade = prefs.fade_inactive;
+        if (prefs.fade_inactive_window and !window_active) fade = @max(fade, if (prefs.fade_inactive > 0) prefs.fade_inactive else 0.35);
+        if (fade > 0) fillRect(sn, f.bg, fade, 0, 0, w, h);
+    }
+    if (f.bg != v.last_bg) {
+        v.last_bg = f.bg;
+        if (v.on_bg) |cb| cb.f(cb.ctx, v.block_id, f.bg);
     }
 
     // The bell's flash, fading over its last moments.

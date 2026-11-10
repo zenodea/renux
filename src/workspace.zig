@@ -63,6 +63,8 @@ const Pane = struct {
     drag_start: view.Rect = .{},
     /// One of several panes in a floating layer, drawn joined as one card.
     joined: bool = false,
+    /// The program's own background, for frames that match it.
+    program_bg: u32 = 0,
     seen: bool = false,
     /// Where the card is drawn now, in pixels, and how fast that is moving toward `rect`.
     cur: [4]f64 = .{ 0, 0, 0, 0 },
@@ -92,6 +94,7 @@ pub const Workspace = struct {
         return tight;
     }
 
+    bg_idle: c_uint = 0,
     root: *gtk.Widget,
     /// While a tiled pane is carried: a small card under the pointer, and where it would land.
     ghost: *gtk.Widget,
@@ -399,6 +402,7 @@ pub const Workspace = struct {
         };
         const tv = TermView.create(ws.server, session_id, block_id) catch return;
         tv.floating = floating;
+        tv.on_bg = .{ .ctx = ws, .f = programBg };
         tv.on_focus = .{ .ctx = ws, .f = clicked };
         tv.on_copied = .{ .ctx = ws, .f = showCopied };
         const owned = gpa.dupe(u8, block_id) catch return;
@@ -508,6 +512,11 @@ pub const Workspace = struct {
         const frame = frame_overlay.as(gtk.Widget);
         frame.addCssClass("pane-card");
         frame.setOverflow(.hidden);
+        gobject.Object.setData(frame.as(gobject.Object), "compy-block", owned.ptr);
+        // Focus follows the mouse when that's on: pointing at a pane gives it the keyboard.
+        const enter = gtk.EventControllerMotion.new();
+        _ = gtk.EventControllerMotion.signals.enter.connect(enter, *Workspace, &pointerEntered, ws, .{});
+        frame.addController(enter.as(gtk.EventController));
         if (floating) frame.addCssClass("floating");
         frame.setOpacity(0);
         frame.setParent(ws.root);
@@ -588,6 +597,10 @@ pub const Workspace = struct {
         for (ws.panes.items) |p| {
             const on = if (ws.focused) |f| std.mem.eql(u8, f, p.block_id) else false;
             if (on) p.frame.addCssClass("focused") else p.frame.removeCssClass("focused");
+            if (p.term.active_pane != on) {
+                p.term.active_pane = on;
+                p.term.widget().queueDraw();
+            }
         }
         for (ws.backdrops.items) |bd| {
             var on = false;
@@ -914,6 +927,62 @@ pub const Workspace = struct {
     }
 
     // Carrying a pane by its title.
+
+    fn pointerEntered(ctl: *gtk.EventControllerMotion, _: f64, _: f64, ws: *Workspace) callconv(.c) void {
+        if (!@import("settings.zig").current.focus_follows_mouse) return;
+        if (ws.moving != null or ws.resizing != null) return;
+        const w = ctl.as(gtk.EventController).getWidget() orelse return;
+        const i = ws.paneOfWidget(w) orelse return;
+        const p = ws.panes.items[i];
+        if (ws.focused) |f| if (std.mem.eql(u8, f, p.block_id)) return;
+        ws.focus(p.block_id);
+        _ = p.term.widget().grabFocus();
+    }
+
+    /// A program changed its background; with frames matching programs, the card follows it.
+    fn programBg(ctx: *anyopaque, block_id: []const u8, bg: u32) void {
+        const ws: *Workspace = @ptrCast(@alignCast(ctx));
+        for (ws.panes.items) |*p| if (std.mem.eql(u8, p.block_id, block_id)) {
+            p.program_bg = bg;
+        };
+        // Styles can't change while drawing, so this waits for the next idle moment.
+        if (ws.bg_idle == 0) ws.bg_idle = glib.idleAdd(&applyProgramBgs, ws);
+    }
+
+    fn applyProgramBgs(data: ?*anyopaque) callconv(.c) c_int {
+        const ws: *Workspace = @ptrCast(@alignCast(data.?));
+        ws.bg_idle = 0;
+        ws.refreshProgramBgs();
+        return 0;
+    }
+
+    pub fn refreshProgramBgs(ws: *Workspace) void {
+        const on = @import("settings.zig").current.match_program_bg;
+        var css: std.ArrayList(u8) = .empty;
+        defer css.deinit(gpa);
+        for (ws.panes.items, 0..) |p, i| {
+            var name_buf: [16]u8 = undefined;
+            const name = std.fmt.bufPrintSentinel(&name_buf, "pbg-{d}", .{i}, 0) catch continue;
+            // Drop any old class, then add this pane's.
+            var k: usize = 0;
+            while (k < 64) : (k += 1) {
+                var old: [16]u8 = undefined;
+                const o = std.fmt.bufPrintSentinel(&old, "pbg-{d}", .{k}, 0) catch break;
+                if (p.frame.hasCssClass(o.ptr) != 0) p.frame.removeCssClass(o.ptr);
+            }
+            if (!on or p.program_bg == 0) continue;
+            p.frame.addCssClass(name.ptr);
+            css.print(gpa, ".pane-card.{s}, .pane-card.{s} .pane-title {{ background-color: #{x:0>6}; }}\n", .{ name, name, p.program_bg & 0xffffff }) catch {};
+        }
+        css.append(gpa, 0) catch return;
+        const provider = bg_css orelse blk: {
+            const pr = gtk.CssProvider.new();
+            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, pr.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+            bg_css = pr;
+            break :blk pr;
+        };
+        provider.loadFromString(@ptrCast(css.items.ptr));
+    }
 
     fn paneOfWidget(ws: *Workspace, w: *gtk.Widget) ?usize {
         const data = gobject.Object.getData(w.as(gobject.Object), "compy-block") orelse return null;
@@ -1326,6 +1395,9 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
 /// Places a card at its animated rect. The card takes that size rather than being scaled: scaling
 /// makes the GPU redraw every glyph at a new size each frame, which cost 6 to 300 ms a frame.
 /// The terminal inside keeps its grid until the size settles, since resizes are debounced.
+/// The colors of frames that match their programs.
+var bg_css: ?*gtk.CssProvider = null;
+
 /// How many workspaces are animating, for COMPY_PERF.
 pub var ticking: u32 = 0;
 

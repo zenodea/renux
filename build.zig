@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
         .{ "gsk", "gsk4" },
         .{ "glibunix", "glibunix2" },
         .{ "rsvg", "rsvg2" },
+        .{ "graphene", "graphene1" },
     }) |import| {
         mod.addImport(import[0], gobject.module(import[1]));
     }

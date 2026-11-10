@@ -150,9 +150,13 @@ const Percent = struct { ctx: *Ctx, field: *f64 };
 
 /// A 20 to 100 percent spinner for an opacity, stored as 0.2 to 1.
 fn percentRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, subtitle: [:0]const u8, field: *f64) void {
-    const row = adw.SpinRow.newWithRange(20, 100, 5);
+    rangePercentRow(ctx, g, title, subtitle, field, 20, 100);
+}
+
+fn rangePercentRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, subtitle: ?[:0]const u8, field: *f64, min: f64, max: f64) void {
+    const row = adw.SpinRow.newWithRange(min, max, 5);
     row.as(adw.PreferencesRow).setTitle(title.ptr);
-    row.as(adw.ActionRow).setSubtitle(subtitle.ptr);
+    if (subtitle) |sub| row.as(adw.ActionRow).setSubtitle(sub.ptr);
     row.setValue(@round(field.* * 100));
     const n = gpa.create(Percent) catch return;
     n.* = .{ .ctx = ctx, .field = field };
@@ -164,6 +168,47 @@ fn percentChanged(row: *adw.SpinRow, _: *gobject.ParamSpec, n: *Percent) callcon
     n.field.* = row.getValue() / 100;
     settings.save();
     n.ctx.app.applyLook();
+}
+
+/// The highlight's color: the theme's accent, or one picked here.
+fn colorRow(ctx: *Ctx, g: *adw.PreferencesGroup) void {
+    const row = adw.ActionRow.new();
+    row.as(adw.PreferencesRow).setTitle("Highlight color");
+    row.setSubtitle("The theme's accent unless one is picked");
+    const button = gtk.ColorDialogButton.new(gtk.ColorDialog.new());
+    button.as(gtk.Widget).setValign(.center);
+    const c = settings.current.highlight_color;
+    if (c != 0) {
+        const rgba: gdk.RGBA = .{ .f_red = @as(f32, @floatFromInt((c >> 16) & 0xff)) / 255, .f_green = @as(f32, @floatFromInt((c >> 8) & 0xff)) / 255, .f_blue = @as(f32, @floatFromInt(c & 0xff)) / 255, .f_alpha = 1 };
+        button.setRgba(&rgba);
+    }
+    const accent = gtk.Button.newWithLabel("Use Accent");
+    accent.as(gtk.Widget).addCssClass("flat");
+    accent.as(gtk.Widget).setValign(.center);
+    row.addSuffix(accent.as(gtk.Widget));
+    row.addSuffix(button.as(gtk.Widget));
+    const H = struct {
+        fn picked(b: *gtk.ColorDialogButton, _: *gobject.ParamSpec, cx: *Ctx) callconv(.c) void {
+            const v = b.getRgba();
+            const byte = struct {
+                fn f(x: f32) u32 {
+                    return @intFromFloat(@round(std.math.clamp(x, 0, 1) * 255));
+                }
+            }.f;
+            settings.current.highlight_color = (byte(v.f_red) << 16) | (byte(v.f_green) << 8) | byte(v.f_blue);
+            if (settings.current.highlight_color == 0) settings.current.highlight_color = 1;
+            settings.save();
+            cx.app.applyLook();
+        }
+        fn useAccent(_: *gtk.Button, cx: *Ctx) callconv(.c) void {
+            settings.current.highlight_color = 0;
+            settings.save();
+            cx.app.applyLook();
+        }
+    };
+    _ = gobject.Object.signals.notify.connect(button, *Ctx, &H.picked, ctx, .{ .detail = "rgba" });
+    _ = gtk.Button.signals.clicked.connect(accent, *Ctx, &H.useAccent, ctx, .{});
+    g.add(row.as(gtk.Widget));
 }
 
 /// Segmented buttons for an enum setting, like Rex's Comfortable / Compact.
@@ -285,6 +330,18 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     segments(ctx, tabs, "Tabs", settings.TabPosition, &settings.current.tab_position, &.{ "Left", "Right", "Above" }, App.tabsChanged);
     switchRow(ctx, tabs, "Fill available space", "Tabs above the panes share the width", &settings.current.tab_fill, App.tabsChanged);
     switchRow(ctx, tabs, "Show each process", "A tab lists every program in its window", &settings.current.tab_processes, App.tabsChanged);
+    const panes_group = group(p, "Pane Behavior", null);
+    switchRow(ctx, panes_group, "Focus follows mouse", "Pointing at a pane gives it the keyboard", &settings.current.focus_follows_mouse, null);
+    rangePercentRow(ctx, panes_group, "Fade inactive panes", "How much panes without the keyboard dim, in percent", &settings.current.fade_inactive, 0, 60);
+    switchRow(ctx, panes_group, "Fade panes for inactive windows", "Dim every pane while Compy isn't the window in use", &settings.current.fade_inactive_window, App.redrawAllPub);
+    switchRow(ctx, panes_group, "Autobalance splits", "Panes share space evenly after one opens or closes", &settings.current.autobalance, null);
+    switchRow(ctx, panes_group, "Match program backgrounds", "A pane's frame takes the background color of the program in it", &settings.current.match_program_bg, App.applyLook);
+    switchRow(ctx, panes_group, "Rounded selection corners", null, &settings.current.rounded_selection, App.redrawAllPub);
+    const hl = group(p, "Active Pane Highlight", null);
+    switchRow(ctx, hl, "Show border on active pane", null, &settings.current.highlight_border, App.applyLook);
+    switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);
+    rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
+    colorRow(ctx, hl);
     const go = group(p, "Go to Anything", null);
     switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     const look = group(p, "Appearance", null);

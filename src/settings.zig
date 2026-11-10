@@ -39,6 +39,23 @@ pub const Settings = struct {
     sidebar_width: f64 = 250,
     /// After a prefix such as ctrl+a, list the keys that can follow.
     key_hints: bool = true,
+    /// Pointing at a pane gives it the keyboard.
+    focus_follows_mouse: bool = false,
+    /// How much panes without the keyboard fade, 0 to 0.6.
+    fade_inactive: f64 = 0,
+    /// Fade every pane while Compy isn't the active window.
+    fade_inactive_window: bool = false,
+    /// The pane with the keyboard shows a colored border.
+    highlight_border: bool = true,
+    highlight_opacity: f64 = 0.85,
+    highlight_animate: bool = true,
+    /// 0 is the theme's accent; otherwise 0xRRGGBB.
+    highlight_color: u32 = 0,
+    /// Splits share space evenly after a pane comes or goes.
+    autobalance: bool = false,
+    /// A pane's frame takes its program's background color.
+    match_program_bg: bool = false,
+    rounded_selection: bool = true,
     tab_position: TabPosition = .left,
     /// Tabs above the panes share the width between them.
     tab_fill: bool = true,
@@ -168,6 +185,16 @@ pub fn load() void {
     s.blur = boolean(kf, "blur", true);
     s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
     s.key_hints = boolean(kf, "key-hints", true);
+    s.focus_follows_mouse = boolean(kf, "focus-follows-mouse", false);
+    s.fade_inactive = number(kf, "fade-inactive", 0, 0, 0.6);
+    s.fade_inactive_window = boolean(kf, "fade-inactive-window", false);
+    s.highlight_border = boolean(kf, "highlight-border", true);
+    s.highlight_opacity = number(kf, "highlight-opacity", 0.85, 0.1, 1);
+    s.highlight_animate = boolean(kf, "highlight-animate", true);
+    s.highlight_color = @intFromFloat(number(kf, "highlight-color", 0, 0, 0xffffff));
+    s.autobalance = boolean(kf, "autobalance", false);
+    s.match_program_bg = boolean(kf, "match-program-bg", false);
+    s.rounded_selection = boolean(kf, "rounded-selection", true);
     s.tab_position = enumOf(TabPosition, kf, "tab-position", .left);
     s.tab_fill = boolean(kf, "tab-fill", true);
     s.tab_processes = boolean(kf, "tab-processes", false);
@@ -294,7 +321,10 @@ pub fn save() void {
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
         .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
-        .{ "key-hints", s.key_hints },         .{ "recent-paths", s.recent_paths_shown },         .{ "tab-fill", s.tab_fill },
+        .{ "key-hints", s.key_hints },         .{ "focus-follows-mouse", s.focus_follows_mouse },
+        .{ "fade-inactive-window", s.fade_inactive_window }, .{ "highlight-border", s.highlight_border },
+        .{ "highlight-animate", s.highlight_animate }, .{ "autobalance", s.autobalance },
+        .{ "match-program-bg", s.match_program_bg }, .{ "rounded-selection", s.rounded_selection },         .{ "recent-paths", s.recent_paths_shown },         .{ "tab-fill", s.tab_fill },
         .{ "tab-processes", s.tab_processes },
     }) |e| kf.setBoolean("compy", e[0], @intFromBool(e[1]));
     kf.setString("compy", "color-scheme", @tagName(s.color_scheme));
@@ -307,6 +337,9 @@ pub fn save() void {
     kf.setDouble("compy", "terminal-opacity", s.terminal_opacity);
     kf.setBoolean("compy", "blur", @intFromBool(s.blur));
     kf.setDouble("compy", "sidebar-width", s.sidebar_width);
+    kf.setDouble("compy", "fade-inactive", s.fade_inactive);
+    kf.setDouble("compy", "highlight-opacity", s.highlight_opacity);
+    kf.setDouble("compy", "highlight-color", @floatFromInt(s.highlight_color));
 
     var labels: std.ArrayList(?[*:0]const u8) = .empty;
     var urls: std.ArrayList(?[*:0]const u8) = .empty;

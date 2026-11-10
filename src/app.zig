@@ -206,6 +206,10 @@ pub const App = struct {
     auto_picked: bool = false,
     theme_css: ?*gtk.CssProvider = null,
     look_css: ?*gtk.CssProvider = null,
+    /// The shown window's tiled pane count, to balance splits when it changes.
+    balance_count: usize = 0,
+    balance_window: [64]u8 = undefined,
+    balance_window_len: usize = 0,
     theme_for: ?@import("stream.zig").Colors = null,
 
     pub fn create() !*App {
@@ -419,6 +423,7 @@ pub const App = struct {
         if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
         if (std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
         a.applyLook();
+        _ = gobject.Object.signals.notify.connect(win, *App, &activeChanged, a, .{ .detail = "is-active" });
     }
 
     /// The desktop's button layout with every button on the left, such as "close" from GNOME's
@@ -652,6 +657,7 @@ pub const App = struct {
                 if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
                     a.showSelected();
                     a.finishMinimize();
+                    a.autobalance();
                 };
             },
             .block => {
@@ -1261,6 +1267,15 @@ pub const App = struct {
         a.showWindowAction(session_id, window_id);
     }
 
+    /// Puts a detached pane back, beside the focused pane of its session's shown tab.
+    pub fn placeDetached(a: *App, h: *Host, session_id: []const u8, block_id: []const u8) void {
+        a.selectHost(h);
+        if (!eqlOpt(a.session_id, session_id)) a.showSession(session_id);
+        const w = a.shownWindow() orelse return a.toast("Open a tab in that session first");
+        const anchor = w.focused_block_id orelse (if (w.tiled()) |l| (if (l.blocks.len > 0) l.blocks[0].id else null) else null) orelse return a.toast("That tab has no pane to place it beside");
+        h.server.moveBlock(session_id, block_id, anchor, true, false);
+    }
+
     /// Changes the focused pane's shell to a folder.
     pub fn changeDirectory(a: *App, path: []const u8) void {
         const t = a.target() orelse return;
@@ -1856,6 +1871,19 @@ pub const App = struct {
         return true;
     }
 
+    /// With autobalance on, splits even out when a pane comes or goes in the shown window.
+    fn autobalance(a: *App) void {
+        const w = a.shownWindow() orelse return;
+        var n: usize = 0;
+        if (w.tiled()) |l| n = l.blocks.len;
+        const same_window = std.mem.eql(u8, a.balance_window[0..a.balance_window_len], w.id[0..@min(w.id.len, a.balance_window.len)]);
+        const changed = same_window and n != a.balance_count;
+        a.balance_count = n;
+        a.balance_window_len = @min(w.id.len, a.balance_window.len);
+        @memcpy(a.balance_window[0..a.balance_window_len], w.id[0..a.balance_window_len]);
+        if (changed and n > 1 and settings.current.autobalance) _ = a.balance();
+    }
+
     fn closeOtherWindows(a: *App) bool {
         const s = a.server orelse return false;
         const sid = a.session_id orelse return false;
@@ -2422,6 +2450,10 @@ pub const App = struct {
         a.applyTheme();
     }
 
+    fn activeChanged(_: *gtk.Window, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
+        if (settings.current.fade_inactive_window) a.redrawAll();
+    }
+
     /// Applies the window and terminal opacity and the blur behind them.
     pub fn applyLook(a: *App) void {
         const prefs = &settings.current;
@@ -2434,17 +2466,34 @@ pub const App = struct {
         };
         var buf: [1024]u8 = undefined;
         const see_through = prefs.window_opacity < 1 or prefs.terminal_opacity < 1;
-        const css_text = if (!see_through) "" else std.fmt.bufPrintSentinel(&buf,
+        const look_text = if (!see_through) "" else std.fmt.bufPrintSentinel(&buf,
             \\window.compy {{ border-radius: {d}px; }}
             \\window.compy, window.compy .sidebar-pane {{ background-color: alpha(@compy_shell, {d:.2}); }}
             \\window.tight .workspace {{ background-color: alpha(@compy_stroke_subtle, {d:.2}); }}
             \\.pane-card:not(.floating) {{ background-color: transparent; }}
             \\.pane-card:not(.floating) .pane-title {{ background-color: alpha(@view_bg_color, {d:.2}); }}
         , .{ window_radius, prefs.window_opacity, prefs.window_opacity, prefs.terminal_opacity }, 0) catch "";
+        // The active pane's border: its color, how strong, whether it fades in, or none at all.
+        var color_buf: [32]u8 = undefined;
+        const color: []const u8 = if (prefs.highlight_color != 0) (std.fmt.bufPrint(&color_buf, "#{x:0>6}", .{prefs.highlight_color}) catch "@accent_bg_color") else "@accent_bg_color";
+        var hbuf: [1024]u8 = undefined;
+        const highlight = if (prefs.highlight_border) std.fmt.bufPrint(&hbuf,
+            \\.pane-card.focused, .layer-card.focused {{ border-color: alpha({s}, {d:.2}); }}
+            \\.pane-card.focused {{ box-shadow: 0 0 0 1px alpha({s}, {d:.2}); }}
+            \\.pane-card.floating.focused {{ box-shadow: 0 0 0 1px alpha({s}, {d:.2}), 0 8px 28px alpha(black, 0.45); }}
+            \\{s}
+        , .{ color, prefs.highlight_opacity, color, prefs.highlight_opacity * 0.4, color, prefs.highlight_opacity * 0.4, if (prefs.highlight_animate) ".pane-card, .layer-card { transition: border-color 220ms ease-out, box-shadow 220ms ease-out; }" else "" }) catch "" else
+            \\.pane-card.focused, .layer-card.focused { border-color: @compy_stroke_subtle; }
+            \\.pane-card.focused { box-shadow: none; }
+            \\.pane-card.floating.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
+        ;
+        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}\n{s}", .{ look_text, highlight }, 0) catch return;
+        defer gpa.free(css_text);
         provider.loadFromString(css_text.ptr);
         if (builtin.os.tag == .macos) if (a.window.as(gtk.Native).getSurface()) |surface| {
             @import("macos.zig").setBlur(surface, see_through and prefs.blur, window_radius);
         };
+        for (a.hosts.items) |h| h.workspace.refreshProgramBgs();
         a.redrawAll();
     }
 
@@ -2458,6 +2507,11 @@ pub const App = struct {
     fn markHeaders(a: *App) void {
         const w = a.window.as(gtk.Widget);
         if (settings.current.show_headers) w.removeCssClass("no-headers") else w.addCssClass("no-headers");
+    }
+
+    pub fn redrawAllPub(a: *App) void {
+        for (a.hosts.items) |h| h.workspace.fontChanged();
+        a.redrawAll();
     }
 
     pub fn redrawAll(a: *App) void {

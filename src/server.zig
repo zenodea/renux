@@ -862,6 +862,36 @@ pub const Server = struct {
         }
     }
 
+    /// Blocks that run without a place in any window.
+    pub const DetachedList = struct {
+        ctx: *anyopaque,
+        session_id: []u8,
+        done: *const fn (ctx: *anyopaque, session_id: []const u8, ids: []const []const u8, labels: []const []const u8) void,
+        fn deinit(d: *DetachedList) void {
+            gpa.free(d.session_id);
+        }
+    };
+
+    pub fn listDetached(s: *Server, session_id: []const u8, ctx: *anyopaque, done: *const fn (ctx: *anyopaque, session_id: []const u8, ids: []const []const u8, labels: []const []const u8) void) void {
+        s.call("session.list_blocks", .{ .session_id = session_id }, DetachedList, .{ .ctx = ctx, .session_id = gpa.dupe(u8, session_id) catch return, .done = done }, gotDetached);
+    }
+
+    fn gotDetached(_: *Server, d: *DetachedList, r: Result) void {
+        var ids: std.ArrayList([]const u8) = .empty;
+        defer ids.deinit(gpa);
+        var labels: std.ArrayList([]const u8) = .empty;
+        defer labels.deinit(gpa);
+        switch (r) {
+            .ok => |payload| for (json.array(payload, "blocks")) |b| {
+                if (!eql(json.str(b, "placement") orelse "", "detached")) continue;
+                ids.append(gpa, json.str(b, "block_id") orelse continue) catch break;
+                labels.append(gpa, json.str(b, "label") orelse "pane") catch break;
+            },
+            .err => {},
+        }
+        d.done(d.ctx, d.session_id, ids.items, labels.items);
+    }
+
     /// Folders (and files, if asked) in a directory as the terminal's shell sees it.
     pub const DirList = struct {
         ctx: *anyopaque,

@@ -14,7 +14,7 @@ const gpa = std.heap.c_allocator;
 const App = app_mod.App;
 const Host = app_mod.Host;
 
-const Kind = enum { session, tab, pane, folder };
+const Kind = enum { session, tab, pane, folder, detached };
 
 const Item = struct {
     kind: Kind,
@@ -78,6 +78,7 @@ const Anything = struct {
             .tab => "Tab",
             .pane => "Pane",
             .folder => "Folder",
+            .detached => "Detached",
         });
         chip.as(gtk.Widget).addCssClass("goto-kind");
         chip.as(gtk.Widget).setValign(.center);
@@ -130,6 +131,7 @@ const Anything = struct {
             .tab => a.openWindow(it.host, it.session_id, it.window_id),
             .pane => a.jumpTo(it.host, it.session_id, it.window_id, it.block_id),
             .folder => a.changeDirectory(it.path),
+            .detached => a.placeDetached(it.host, it.session_id, it.block_id),
         }
         _ = g.dialog.close();
     }
@@ -184,6 +186,10 @@ pub fn openAnything(a: *App) void {
             }
         }
     }
+    // Panes running outside any window arrive from each session a moment later.
+    for (a.hosts.items) |h| for (h.server.sessions.items) |session| {
+        h.server.listDetached(session.id, g, gotDetached);
+    };
     if (settings.current.recent_paths_shown) for (settings.current.recent_paths.items) |p| {
         g.add(.folder, a.hosts.items[0], "", "", "", p, "Change to this folder in the focused pane");
     };
@@ -239,6 +245,23 @@ pub fn openAnything(a: *App) void {
 }
 
 const gdk_mod = @import("gdk");
+
+fn gotDetached(ctx: *anyopaque, session_id: []const u8, ids: []const []const u8, labels: []const []const u8) void {
+    const g: *Anything = @ptrCast(@alignCast(ctx));
+    // The dialog may have closed, or another opened, while the answer was on its way.
+    if (current != g) return;
+    var found: ?*Host = null;
+    for (g.app.hosts.items) |x| for (x.server.sessions.items) |session| if (std.mem.eql(u8, session.id, session_id)) {
+        found = x;
+    };
+    const h = found orelse return;
+    var label: []const u8 = session_id;
+    for (h.server.sessions.items) |session| if (std.mem.eql(u8, session.id, session_id) and session.label.len > 0) {
+        label = session.label;
+    };
+    for (ids, labels) |id, l| g.add(.detached, h, session_id, "", id, l, label);
+    g.refilter();
+}
 
 // The folder browser.
 
