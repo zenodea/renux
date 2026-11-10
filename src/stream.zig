@@ -201,12 +201,7 @@ pub const Stream = struct {
         s.parser = null;
         s.received = 0;
         s.token = null;
-        var hello: [17]u8 = @splat(0);
-        hello[0] = hello_byte;
-        std.base64.url_safe_no_pad.Decoder.decode(hello[1..], std.mem.trimEnd(u8, ticket, "=")) catch {
-            s.scheduleRetry(gen, true);
-            return;
-        };
+        const hello = helloFor(ticket) orelse return s.scheduleRetry(gen, true);
         s.connect(&hello);
     }
 
@@ -364,6 +359,18 @@ pub const Stream = struct {
     }
 };
 
+/// The opening message for a ticket, or null unless the ticket is exactly the 16 bytes the
+/// protocol carries: the decoder itself doesn't check that what it decodes fits.
+fn helloFor(ticket: []const u8) ?[17]u8 {
+    const decoder = std.base64.url_safe_no_pad.Decoder;
+    const text = std.mem.trimEnd(u8, ticket, "=");
+    var hello: [17]u8 = @splat(0);
+    hello[0] = hello_byte;
+    if ((decoder.calcSizeForSlice(text) catch return null) != hello.len - 1) return null;
+    decoder.decode(hello[1..], text) catch return null;
+    return hello;
+}
+
 /// Splits a terminal stream into its three parts: the leading Ghostty snapshot, program output,
 /// and Rex's own messages. A Rex message is `ESC _ rex1;<nonce>;<json> ESC \`, and the first one
 /// comes straight after the snapshot, so its marker also shows where the snapshot ends.
@@ -515,4 +522,15 @@ test "theme colors" {
     try std.testing.expectEqual(@as(u32, 0xFF101010), c.bg);
     try std.testing.expectEqual(@as(u32, 0xFFFF0000), c.palette.?[1]);
     try std.testing.expectEqual(builtin_palette[2], c.palette.?[2]);
+}
+
+test "a ticket must be exactly sixteen bytes" {
+    const hello = helloFor("AAECAwQFBgcICQoLDA0ODw").?;
+    try std.testing.expectEqual(hello_byte, hello[0]);
+    for (hello[1..], 0..) |b, i| try std.testing.expectEqual(@as(u8, @intCast(i)), b);
+    try std.testing.expect(helloFor("AAECAwQFBgcICQoLDA0ODw==") != null);
+    try std.testing.expect(helloFor("AAECAwQFBgcICQoLDA0ODxAREhM") == null);
+    try std.testing.expect(helloFor("AAEC") == null);
+    try std.testing.expect(helloFor("") == null);
+    try std.testing.expect(helloFor("not base64!!!!!!!!!!!!") == null);
 }
