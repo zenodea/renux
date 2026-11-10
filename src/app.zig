@@ -311,7 +311,11 @@ pub const App = struct {
         termview.pad_y = settings.current.pad_y;
         a.applied_text = TextSetup.now();
         a.applied_extended = settings.current.extended_palette;
-        termview.font = termview.Font.init(gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch "Monospace 11");
+        {
+            const name: ?[:0]u8 = gpa.dupeSentinel(u8, if (std.c.getenv("COMPY_FONT")) |f| std.mem.span(f) else settings.current.font, 0) catch null;
+            defer if (name) |z| gpa.free(z);
+            termview.font = termview.Font.init(name orelse "Monospace 11");
+        }
         const provider = gtk.CssProvider.new();
         provider.loadFromString(css);
         gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -2342,6 +2346,8 @@ pub const App = struct {
 
     /// Opens another Compy window, a process of its own, optionally showing one tab.
     fn openAppWindow(a: *App, show: ?struct { []const u8, []const u8 }) bool {
+        // The new window reads the settings file as it starts, so it must hold every change made here.
+        settings.flush();
         var exe: [4096]u8 = undefined;
         const n = std.process.executablePath(@import("main.zig").io, &exe) catch return false;
         if (n >= exe.len) return false;
@@ -3589,9 +3595,7 @@ fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0
 }
 
 /// A program as rows and tabs name it: "-zsh" and "node/server.js" are "zsh" and "node".
-fn programName(program: []const u8) []const u8 {
-    return std.mem.trimStart(u8, program[0 .. std.mem.indexOfScalar(u8, program, '/') orelse program.len], "-");
-}
+const programName = @import("programs.zig").programName;
 
 /// A typed server address as a URL, with http:// when it names no scheme, or null when nothing
 /// was typed. The caller frees it.

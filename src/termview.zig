@@ -431,7 +431,7 @@ pub const TermView = struct {
         const info = v.server.blockInfo(v.block_id);
         var folder_buf: [256]u8 = undefined;
         const folder: ?[]const u8 = if (info) |b| if (b.folder) |f| programs.shortFolder(&folder_buf, f) else null else null;
-        const program: ?[]const u8 = if (info) |b| if (b.program) |p| std.mem.trimStart(u8, p[0 .. std.mem.indexOfScalar(u8, p, '/') orelse p.len], "-") else null else null;
+        const program: ?[]const u8 = if (info) |b| if (b.program) |p| programs.programName(p) else null else null;
         const shell = if (program) |p| isShell(p) else false;
         if (!shell) {
             var own_buf: [256]u8 = undefined;
@@ -653,7 +653,7 @@ pub const TermView = struct {
             png_decoder_set = true;
             term_mod.Term.setPngDecoder(&decodePng);
         }
-        perf_log = std.c.getenv("COMPY_PERF") != null;
+        perf_log = @import("build_options").dev and std.c.getenv("COMPY_PERF") != null;
     }
 
     /// A key press, from the keyboard or the development script.
