@@ -254,6 +254,7 @@ pub const App = struct {
     foot_more: *gtk.Widget = undefined,
     /// Session rows show only their menu, which then holds what their other buttons did.
     narrow_rows: bool = false,
+    config_timer: c_uint = 0,
     filter_label: *gtk.Label = undefined,
     filter_menu: *gio.Menu = undefined,
     mode_chip: *gtk.Label = undefined,
@@ -537,6 +538,7 @@ pub const App = struct {
         const dev_shot = build_options.dev and std.c.getenv("COMPY_SHOT") != null;
         if (dev_shot) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
         @import("warm.zig").start(win.as(gtk.Window));
+        a.watchConfig();
         // The sidebar's buttons are fitted again once the window's corner has its real width.
         _ = glib.idleAdd(&refitSidebar, a);
         // `compy --toggle` finds this process by its ID and signals it.
@@ -636,6 +638,52 @@ pub const App = struct {
     /// Whether the sidebar's edge can be dragged, and the width it has while it can't.
     const sidebar_resizable = false;
     const sidebar_standard: f64 = 260;
+
+    /// Watches the settings file and the themes folder, so a change made outside this window
+    /// takes effect at once: a script that switches color themes, another Compy window, an
+    /// editor. Folders are watched rather than files, since most programs save by writing a
+    /// new file over the old one.
+    fn watchConfig(a: *App) void {
+        const config = settings.folder() orelse return;
+        defer gpa.free(config);
+        _ = glib.mkdirWithParents(config.ptr, 0o700);
+        const themes_dir = @import("theme_editor.zig").dir();
+        defer if (themes_dir) |d| gpa.free(d);
+        if (themes_dir) |d| _ = glib.mkdirWithParents(d.ptr, 0o700);
+        inline for (.{ @as(?[:0]u8, config), themes_dir }) |maybe| if (maybe) |path| {
+            const folder = gio.File.newForPath(path.ptr);
+            defer folder.as(gobject.Object).unref();
+            // The monitor is kept for the life of the app.
+            if (folder.monitorDirectory(.{ .watch_moves = true }, null, null)) |monitor| {
+                _ = gio.FileMonitor.signals.changed.connect(monitor, *App, &configChanged, a, .{});
+            }
+        };
+    }
+
+    fn configChanged(_: *gio.FileMonitor, _: *gio.File, _: ?*gio.File, _: gio.FileMonitorEvent, a: *App) callconv(.c) void {
+        // A save is several events in a row; they are taken up together a moment later.
+        if (a.config_timer != 0) _ = glib.Source.remove(a.config_timer);
+        a.config_timer = glib.timeoutAdd(120, &configSettled, a);
+    }
+
+    fn configSettled(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.config_timer = 0;
+        if (settings.reload()) {
+            a.themeChanged();
+            a.fontChanged();
+            a.terminalChanged();
+            a.tabsChanged();
+            a.headersChanged();
+            a.applyLook();
+            a.setTight(settings.current.tight);
+            a.redrawAll();
+        } else if (std.mem.startsWith(u8, effectiveTheme(), "file:")) {
+            // The settings are the same, but the theme file in use may be what changed.
+            a.themeChanged();
+        }
+        return 0;
+    }
 
     fn refitSidebar(data: ?*anyopaque) callconv(.c) c_int {
         const a: *App = @ptrCast(@alignCast(data.?));

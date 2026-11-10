@@ -483,6 +483,48 @@ pub fn setString(slot: *[]u8, value: []const u8) void {
     save();
 }
 
+/// The folder the settings file lives in, for watching it. The caller frees it.
+pub fn folder() ?[:0]u8 {
+    return dir();
+}
+
+/// Reads the file again after something else wrote it: a script that switches themes, another
+/// Compy window, an editor. Whatever this window has yet to save is written first, so nothing
+/// is lost either way. Only plain settings are taken up, not the lists (hosts, shortcuts,
+/// recent folders), which a running window keeps as they are. True if any setting changed.
+pub fn reload() bool {
+    if (dirty) flush();
+    const kf = glib.KeyFile.new();
+    defer kf.unref();
+    if (readFile(kf) != .ok) return false;
+    var fresh: Settings = undefined;
+    readScalars(kf, &fresh);
+    var changed = false;
+    inline for (fields.field_names, fields.field_types) |name, T| {
+        if (comptime isList(T)) continue;
+        if (T == []u8) {
+            if (std.mem.eql(u8, @field(current, name), @field(fresh, name))) {
+                gpa.free(@field(fresh, name));
+            } else {
+                gpa.free(@field(current, name));
+                @field(current, name) = @field(fresh, name);
+                changed = true;
+            }
+        } else if (!std.meta.eql(@field(current, name), @field(fresh, name))) {
+            @field(current, name) = @field(fresh, name);
+            changed = true;
+        }
+    }
+    if (changed) {
+        // What was read is what the file holds, so the next save leaves those keys alone.
+        if (toKeyFile(&current)) |now| {
+            if (base) |old| old.unref();
+            base = now;
+        } else |_| {}
+    }
+    return changed;
+}
+
 /// Notes that a setting changed. The file is written a second later, so a burst of changes
 /// (a spinner held down, a pane changing folder over and over) is one write.
 pub fn save() void {
