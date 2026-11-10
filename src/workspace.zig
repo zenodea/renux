@@ -113,6 +113,9 @@ pub const Workspace = struct {
     /// While a tiled pane is carried: a small card under the pointer, and where it would land.
     ghost: *gtk.Widget,
     target: *gtk.Widget,
+    /// The line shown on a divider under the pointer or being dragged, and which divider.
+    line: *gtk.Widget,
+    line_at: ?usize = null,
     swap_arrows: *gtk.Widget,
     target_cur: [4]f64 = .{ 0, 0, 0, 0 },
     target_vel: [4]f64 = .{ 0, 0, 0, 0 },
@@ -167,6 +170,10 @@ pub const Workspace = struct {
         ghost.as(gtk.Widget).addCssClass("carry-ghost");
         ghost.as(gtk.Widget).setCanTarget(0);
         ghost.as(gtk.Widget).setVisible(0);
+        // A line between two panes while the pointer is on their divider or dragging it.
+        const line = gtk.Box.new(.horizontal, 0);
+        line.as(gtk.Widget).addCssClass("divider-line");
+        line.as(gtk.Widget).setCanTarget(0);
         const target = gtk.Box.new(.horizontal, 0);
         target.as(gtk.Widget).addCssClass("drop-target");
         target.as(gtk.Widget).setCanTarget(0);
@@ -186,6 +193,7 @@ pub const Workspace = struct {
         // The workspace owns these, since it moves them above the cards by re-parenting.
         _ = ghost.as(gobject.Object).refSink();
         _ = target.as(gobject.Object).refSink();
+        _ = line.as(gobject.Object).refSink();
         _ = tray.as(gobject.Object).refSink();
 
         // What a session without windows shows: a way to open one.
@@ -205,7 +213,7 @@ pub const Workspace = struct {
         ew.setVisible(0);
         ew.setParent(root);
 
-        ws.* = .{ .root = root, .ghost = ghost.as(gtk.Widget), .target = target.as(gtk.Widget), .swap_arrows = arrows.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
+        ws.* = .{ .root = root, .ghost = ghost.as(gtk.Widget), .target = target.as(gtk.Widget), .line = line.as(gtk.Widget), .swap_arrows = arrows.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
         gobject.Object.setData(root.as(gobject.Object), "compy-workspace", ws);
 
         const drag = gtk.GestureDrag.new();
@@ -216,6 +224,7 @@ pub const Workspace = struct {
         root.addController(drag.as(gtk.EventController));
         const motion = gtk.EventControllerMotion.new();
         _ = gtk.EventControllerMotion.signals.motion.connect(motion, *Workspace, &hover, ws, .{});
+        _ = gtk.EventControllerMotion.signals.leave.connect(motion, *Workspace, &hoverLeft, ws, .{});
         root.addController(motion.as(gtk.EventController));
         return ws;
     }
@@ -316,7 +325,7 @@ pub const Workspace = struct {
             if (!layer.floating or layer.minimized) continue;
             for (ws.panes.items) |p| if (p.floating and std.mem.eql(u8, p.layer_id, layer.id)) want.append(gpa, p.frame) catch {};
         };
-        want.appendSlice(gpa, &.{ ws.target, ws.ghost, ws.tray.as(gtk.Widget) }) catch {};
+        want.appendSlice(gpa, &.{ ws.line, ws.target, ws.ghost, ws.tray.as(gtk.Widget) }) catch {};
         // Compare with the children at the top, skipping the cards behind joined layers, which
         // `joinLayers` places itself.
         var child = ws.root.getLastChild();
@@ -394,7 +403,7 @@ pub const Workspace = struct {
         // The layout and the gestures on `root` find the workspace through this.
         gobject.Object.setData(ws.root.as(gobject.Object), "compy-workspace", null);
         ws.empty.unparent();
-        inline for (.{ ws.ghost, ws.target, ws.tray.as(gtk.Widget) }) |w| {
+        inline for (.{ ws.ghost, ws.target, ws.line, ws.tray.as(gtk.Widget) }) |w| {
             if (w.getParent() != null) w.unparent();
             w.as(gobject.Object).unref();
         }
@@ -1019,8 +1028,42 @@ pub const Workspace = struct {
 
     fn hover(_: *gtk.EventControllerMotion, x: f64, y: f64, ws: *Workspace) callconv(.c) void {
         if (ws.resizing != null or ws.moving != null) return;
-        const cursor: ?[*:0]const u8 = if (ws.dividerAt(x, y)) |i| (if (ws.dividers.items[i].horizontal) "col-resize" else "row-resize") else null;
+        const at = ws.dividerAt(x, y);
+        const cursor: ?[*:0]const u8 = if (at) |i| (if (ws.dividers.items[i].horizontal) "col-resize" else "row-resize") else null;
         ws.root.setCursorFromName(cursor);
+        ws.showLine(at);
+    }
+
+    fn hoverLeft(_: *gtk.EventControllerMotion, ws: *Workspace) callconv(.c) void {
+        if (ws.resizing == null) ws.showLine(null);
+    }
+
+    /// Shows the line on one divider, or fades it out. It keeps its last place while it fades.
+    fn showLine(ws: *Workspace, at: ?usize) void {
+        if (at) |i| {
+            if (ws.line_at != i) {
+                ws.line_at = i;
+                ws.root.queueAllocate();
+            }
+            ws.line.addCssClass("shown");
+        } else ws.line.removeCssClass("shown");
+    }
+
+    /// Where the line sits: along the middle of the gap between the divider's two sides, a
+    /// little short of its ends.
+    fn lineRect(ws: *Workspace) ?[4]f64 {
+        const i = ws.line_at orelse return null;
+        if (i >= ws.dividers.items.len) return null;
+        const d = ws.dividers.items[i];
+        const ratio = if (ws.resizing == i) ws.local_ratio else d.ratio;
+        const r = ws.pixels(d.rect);
+        const inset: f64 = 10;
+        if (d.horizontal) {
+            const x = (d.rect.x + d.rect.w * ratio) * (ws.width() + gap) - gap / 2;
+            return .{ x - 1.5, r[1] + inset, 3, @max(1, r[3] - 2 * inset) };
+        }
+        const y = (d.rect.y + d.rect.h * ratio) * (ws.height() + gap) - gap / 2;
+        return .{ r[0] + inset, y - 1.5, @max(1, r[2] - 2 * inset), 3 };
     }
 
     fn dividerBegin(g: *gtk.GestureDrag, x: f64, y: f64, ws: *Workspace) callconv(.c) void {
@@ -1103,6 +1146,7 @@ pub const Workspace = struct {
         if (ws.resizing == null) return;
         ws.sendDivider(dx, dy, true);
         ws.resizing = null;
+        ws.showLine(null);
     }
 
     /// The drag was taken away (a dialog opened, the compositor took the pointer) and no end
@@ -1110,6 +1154,7 @@ pub const Workspace = struct {
     fn dividerCancel(_: *gtk.GestureDrag, _: ?*gdk.EventSequence, ws: *Workspace) callconv(.c) void {
         const i = ws.resizing orelse return;
         ws.resizing = null;
+        ws.showLine(null);
         if (i >= ws.dividers.items.len) return;
         const d = ws.dividers.items[i];
         if (ws.session_id) |s| ws.server.resizePane(s, d.horizontal, d.before_id, d.after_id, ws.local_ratio);
@@ -1482,6 +1527,11 @@ pub const Workspace = struct {
         ws.moveEnd();
     }
 
+    /// Development: shows the line on the first divider, as the pointer over it would.
+    pub fn simulateLine(ws: *Workspace) void {
+        if (ws.dividers.items.len > 0) ws.showLine(0);
+    }
+
     pub fn simulateDivider(ws: *Workspace, dx: f64) void {
         if (ws.dividers.items.len == 0) return;
         const d = ws.dividers.items[0];
@@ -1609,6 +1659,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
         bd.widget.sizeAllocate(&a, -1);
     }
     if (ws.target.getVisible() != 0) allocateAt(ws.target, ws.target_cur);
+    if (ws.line.getParent() != null) allocateAt(ws.line, ws.lineRect() orelse .{ 0, 0, 1, 1 });
     if (ws.ghost.getVisible() != 0) allocateAt(ws.ghost, .{ ws.pointer[0] - 75, ws.pointer[1] - 46, 150, 92 });
     ws.snap = false;
     if (moving or ws.leaving.items.len > 0) ws.startTick();

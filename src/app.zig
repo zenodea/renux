@@ -35,6 +35,8 @@ const css =
     \\.copied-chip { opacity: 0; transform: translateY(-6px) scale(0.92); transition: opacity 180ms ease-out, transform 240ms cubic-bezier(0.2, 0.9, 0.3, 1.2); background-color: @accent_bg_color; color: @accent_fg_color; border-radius: 99px; padding: 3px 11px; font-size: 0.85em; font-weight: 600; box-shadow: 0 3px 12px alpha(black, 0.3); }
     \\.copied-chip.shown { opacity: 1; transform: none; }
     \\.font-preview { padding: 12px 14px; }
+    \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
+    \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
     \\.compy-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
     \\.compy-sidebar list { background: none; padding: 2px 8px 8px 8px; }
@@ -83,7 +85,7 @@ const css =
     \\.icon-button:hover { opacity: 1; background-color: alpha(@window_fg_color, 0.08); }
     \\.find-bar { margin: 16px 22px 18px 18px; padding: 4px 5px 4px 6px; min-width: 300px; border-radius: 13px; background-color: @popover_bg_color; box-shadow: 0 6px 22px alpha(black, 0.32), inset 0 0 0 1px @compy_stroke_subtle; }
     \\.find-bar entry { background: none; box-shadow: none; outline: none; border: none; min-height: 28px; padding-left: 6px; }
-    \\.find-bar entry > image:first-child { opacity: 0; margin: 0 -10px 0 -10px; }
+    \\.find-bar entry > image:first-child { opacity: 0; }
     \\.find-count { color: @compy_secondary; font-size: 0.9em; margin: 0 8px 0 4px; }
     \\.tray-chip { border-radius: 9px; padding: 4px 10px 4px 6px; background-color: @popover_bg_color; box-shadow: 0 2px 10px alpha(black, 0.3); }
     \\.tray-chip { transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
@@ -3772,6 +3774,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             benchWindow(a);
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
+        } else if (std.mem.eql(u8, cmd, "line")) {
+            ws.simulateLine();
         } else if (std.mem.eql(u8, cmd, "divider")) {
             const dx = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateDivider(dx);
