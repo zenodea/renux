@@ -157,7 +157,13 @@ pub const Host = struct {
     page: [:0]u8,
     /// Set for a host from $COMPY_SERVER, which isn't saved.
     temporary: bool = false,
+    /// Its number among every host this run, which no later host shares.
+    serial: usize = 0,
 };
+
+/// A host as a dialog remembers it. The host may be removed while the dialog is open, so the
+/// dialog asks `App.liveHost` for it again before acting.
+const HostRef = struct { host: *Host, serial: usize };
 
 pub const App = struct {
     app: *adw.Application,
@@ -624,7 +630,7 @@ pub const App = struct {
             gpa.destroy(h);
             return null;
         };
-        h.* = .{ .app = a, .label = host_label, .server = s, .workspace = ws, .page = page };
+        h.* = .{ .app = a, .label = host_label, .server = s, .workspace = ws, .page = page, .serial = a.next_page };
         a.next_page += 1;
         s.observer = .{ .ctx = h, .changed = serverChanged };
         s.performer = .{ .ctx = h, .perform = perform };
@@ -696,6 +702,16 @@ pub const App = struct {
         if (slot.found_existing and slot.value_ptr.* == now) return false;
         slot.value_ptr.* = now;
         return true;
+    }
+
+    fn refHost(h: *Host) HostRef {
+        return .{ .host = h, .serial = h.serial };
+    }
+
+    /// The host a dialog was opened for, unless it has been removed since.
+    fn liveHost(a: *App, ref: HostRef) ?*Host {
+        for (a.hosts.items) |h| if (h == ref.host and h.serial == ref.serial) return h;
+        return null;
     }
 
     fn hostOf(a: *App, s: *Server) ?*Host {
@@ -1871,26 +1887,8 @@ pub const App = struct {
         for (s.sessions.items) |session| if (std.mem.eql(u8, session.id, session_id)) {
             current = session.label;
         };
-        const dialog = adw.AlertDialog.new("Rename session", null);
-        const entry = gtk.Entry.new();
-        const z = gpa.dupeSentinel(u8, current, 0) catch return;
-        defer gpa.free(z);
-        entry.as(gtk.Editable).setText(z.ptr);
-        entry.setActivatesDefault(1);
-        dialog.setExtraChild(entry.as(gtk.Widget));
-        dialog.addResponse("cancel", "Cancel");
-        dialog.addResponse("rename", "Rename");
-        dialog.setResponseAppearance("rename", .suggested);
-        dialog.setDefaultResponse("rename");
-        const ctx = gpa.create(RenameCtx) catch return;
-        ctx.* = .{
-            .app = a,
-            .entry = entry,
-            .session_id = gpa.dupe(u8, session_id) catch return,
-            .window_id = gpa.dupe(u8, "") catch return,
-        };
-        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &renamed, ctx, .{});
-        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+        const ctx = a.renameCtx(session_id, "", "") orelse return;
+        a.askName("Rename session", current, null, "Rename", ctx);
     }
 
     /// Rex's pane actions, which each app performs itself.
@@ -2063,10 +2061,14 @@ pub const App = struct {
         const t = a.target() orelse return false;
         const v = t[0].sessionView(t[1]) orelse return false;
         if (index < 0 or index >= v.windows.len) return false;
-        const w = v.windows[@intCast(index)];
+        return a.moveBlockToTab(t[0], t[1], t[2], &v.windows[@intCast(index)]);
+    }
+
+    /// Puts a pane beside the first other tiled pane of a tab.
+    fn moveBlockToTab(a: *App, s: *Server, session_id: []const u8, block_id: []const u8, w: *const view.Window) bool {
         const layer = w.tiled() orelse return false;
-        for (layer.blocks) |b| if (!std.mem.eql(u8, b.id, t[2])) {
-            t[0].moveBlock(t[1], t[2], b.id, true, false);
+        for (layer.blocks) |b| if (!std.mem.eql(u8, b.id, block_id)) {
+            s.moveBlock(session_id, block_id, b.id, true, false);
             return true;
         };
         a.toast("That tab has no tiled pane to move beside");
@@ -2081,19 +2083,27 @@ pub const App = struct {
         const dialog = adw.AlertDialog.new("Move pane to tab", null);
         dialog.addResponse("cancel", "Cancel");
         var buf: [256]u8 = undefined;
-        var idbuf: [8]u8 = undefined;
-        for (v.windows, 0..) |*w, i| {
+        var idbuf: [300]u8 = undefined;
+        // Each choice is named by its tab, so the answer still means that tab if tabs have come
+        // or gone meanwhile, and it moves the pane that was focused when the question was asked.
+        for (v.windows) |*w| {
             const title = rowTitle(h, &buf, w, v);
-            const id = std.fmt.bufPrintSentinel(&idbuf, "{d}", .{i}, 0) catch continue;
+            const id = std.fmt.bufPrintSentinel(&idbuf, "tab:{s}", .{w.id}, 0) catch continue;
             dialog.addResponse(id.ptr, title.ptr);
         }
+        const ctx = a.renameCtx(t[1], "", t[2]) orelse return false;
         const Done = struct {
-            fn run(_: *adw.AlertDialog, response: [*:0]const u8, app: *App) callconv(.c) void {
-                const i = std.fmt.parseInt(i64, std.mem.span(response), 10) catch return;
-                _ = app.moveFocusedToTab(i);
+            fn run(_: *adw.AlertDialog, response: [*:0]const u8, c: *RenameCtx) callconv(.c) void {
+                defer c.free();
+                const answer = std.mem.span(response);
+                if (!std.mem.startsWith(u8, answer, "tab:")) return;
+                const host = c.app.liveHost(c.host) orelse return;
+                const view_now = host.server.sessionView(c.session_id) orelse return;
+                const w = view_now.window(answer[4..]) orelse return;
+                _ = c.app.moveBlockToTab(host.server, c.session_id, c.block_id, w);
             }
         };
-        _ = adw.AlertDialog.signals.response.connect(dialog, *App, &Done.run, a, .{});
+        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &Done.run, ctx, .{});
         dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
         return true;
     }
@@ -2191,19 +2201,17 @@ pub const App = struct {
         dialog.addResponse("close", "Close Session");
         dialog.setResponseAppearance("close", .destructive);
         dialog.setDefaultResponse("cancel");
-        const id = gpa.dupeSentinel(u8, sid, 0) catch return false;
+        // The session and its host as they are now: another may be shown by the time it's answered.
+        const ctx = a.renameCtx(sid, "", "") orelse return false;
         const Done = struct {
-            fn run(_: *adw.AlertDialog, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
-                const owned: [*:0]u8 = @ptrCast(data.?);
-                defer glib.free(@ptrCast(owned));
+            fn run(_: *adw.AlertDialog, response: [*:0]const u8, c: *RenameCtx) callconv(.c) void {
+                defer c.free();
                 if (!std.mem.eql(u8, std.mem.span(response), "close")) return;
-                const app = mode_app orelse return;
-                if (app.server) |srv| srv.destroySession(std.mem.span(owned));
+                const h = c.app.liveHost(c.host) orelse return;
+                h.server.destroySession(c.session_id);
             }
         };
-        const z = glib.strdup(id.ptr);
-        gpa.free(id);
-        _ = adw.AlertDialog.signals.response.connect(dialog, ?*anyopaque, &Done.run, @ptrCast(z), .{});
+        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &Done.run, ctx, .{});
         dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
         return true;
     }
@@ -2492,8 +2500,8 @@ pub const App = struct {
     /// Asks for the new session's name first; left empty, the server picks one.
     fn newSession(a: *App) void {
         if (a.server == null) return;
-        const ctx = gpa.create(RenameCtx) catch return;
-        ctx.* = .{ .app = a, .entry = undefined, .session_id = gpa.dupe(u8, "") catch return, .window_id = gpa.dupe(u8, "") catch return, .create = true };
+        const ctx = a.renameCtx("", "", "") orelse return;
+        ctx.create = true;
         a.askName("New session", "", "Name, or leave empty for a random one", "Create", ctx);
     }
 
@@ -2501,8 +2509,7 @@ pub const App = struct {
         const t = a.target() orelse return false;
         const info = t[0].blockInfo(t[2]);
         const current: []const u8 = if (info) |i| (i.title orelse "") else "";
-        const ctx = gpa.create(RenameCtx) catch return false;
-        ctx.* = .{ .app = a, .entry = undefined, .session_id = gpa.dupe(u8, t[1]) catch return false, .window_id = gpa.dupe(u8, "") catch return false, .block_id = gpa.dupe(u8, t[2]) catch return false };
+        const ctx = a.renameCtx(t[1], "", t[2]) orelse return false;
         a.askName("Rename pane", current, null, "Rename", ctx);
         return true;
     }
@@ -2521,47 +2528,53 @@ pub const App = struct {
         const w = v.window(window_id) orelse return;
         var buf: [256]u8 = undefined;
         const current = windowTitle(&buf, w, v);
-        const dialog = adw.AlertDialog.new("Rename window", null);
-        const entry = gtk.Entry.new();
-        entry.as(gtk.Editable).setText(current.ptr);
-        entry.setActivatesDefault(1);
-        dialog.setExtraChild(entry.as(gtk.Widget));
-        dialog.addResponse("cancel", "Cancel");
-        dialog.addResponse("rename", "Rename");
-        dialog.setResponseAppearance("rename", .suggested);
-        dialog.setDefaultResponse("rename");
-        const ctx = gpa.create(RenameCtx) catch return;
-        ctx.* = .{
-            .app = a,
-            .entry = entry,
-            .session_id = gpa.dupe(u8, session_id) catch return,
-            .window_id = gpa.dupe(u8, window_id) catch return,
-        };
-        _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &renamed, ctx, .{});
-        dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
+        const ctx = a.renameCtx(session_id, window_id, "") orelse return;
+        a.askName("Rename window", current, null, "Rename", ctx);
     }
 
     const RenameCtx = struct {
         app: *App,
+        /// The host shown when the dialog opened, which is the one the name is for.
+        host: HostRef,
         entry: *gtk.Entry,
         session_id: []u8,
         window_id: []u8,
         /// Set when a pane is renamed.
-        block_id: []u8 = &.{},
+        block_id: []u8,
         /// Set when the name is for a session about to be created.
         create: bool = false,
-    };
 
-    fn renamed(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *RenameCtx) callconv(.c) void {
-        defer {
+        fn free(ctx: *RenameCtx) void {
             gpa.free(ctx.session_id);
             gpa.free(ctx.window_id);
-            if (ctx.block_id.len > 0) gpa.free(ctx.block_id);
+            gpa.free(ctx.block_id);
             gpa.destroy(ctx);
         }
+    };
+
+    /// What a name dialog needs to act on the shown host later: the session, and the window or
+    /// pane when the name is for one of those. `askName` takes it over.
+    fn renameCtx(a: *App, session_id: []const u8, window_id: []const u8, block_id: []const u8) ?*RenameCtx {
+        const h = a.current orelse return null;
+        const ctx = gpa.create(RenameCtx) catch return null;
+        ctx.* = .{ .app = a, .host = refHost(h), .entry = undefined, .session_id = &.{}, .window_id = &.{}, .block_id = &.{} };
+        ctx.session_id = gpa.dupe(u8, session_id) catch return failed(ctx);
+        ctx.window_id = gpa.dupe(u8, window_id) catch return failed(ctx);
+        ctx.block_id = gpa.dupe(u8, block_id) catch return failed(ctx);
+        return ctx;
+    }
+
+    fn failed(ctx: *RenameCtx) ?*RenameCtx {
+        ctx.free();
+        return null;
+    }
+
+    fn renamed(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *RenameCtx) callconv(.c) void {
+        defer ctx.free();
         if (!std.mem.eql(u8, std.mem.span(response), "rename")) return;
         const label = std.mem.trim(u8, std.mem.span(ctx.entry.as(gtk.Editable).getText()), " ");
-        const s = ctx.app.server orelse return;
+        // The host the dialog was opened for, even if another is shown by now.
+        const s = (ctx.app.liveHost(ctx.host) orelse return).server;
         if (ctx.create) return s.createSession(label);
         if (ctx.block_id.len > 0) return s.renameBlock(ctx.session_id, ctx.block_id, label);
         // No window means the session itself is renamed.
@@ -2570,10 +2583,10 @@ pub const App = struct {
 
     /// Asks for a name in a small dialog, then acts on it as `ctx` says.
     fn askName(a: *App, title: [:0]const u8, current: []const u8, placeholder: ?[:0]const u8, ok: [:0]const u8, ctx: *RenameCtx) void {
+        const z = gpa.dupeSentinel(u8, current, 0) catch return ctx.free();
+        defer gpa.free(z);
         const dialog = adw.AlertDialog.new(title.ptr, null);
         const entry = gtk.Entry.new();
-        const z = gpa.dupeSentinel(u8, current, 0) catch return;
-        defer gpa.free(z);
         entry.as(gtk.Editable).setText(z.ptr);
         if (placeholder) |p| entry.setPlaceholderText(p.ptr);
         entry.setActivatesDefault(1);
