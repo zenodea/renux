@@ -58,6 +58,9 @@ const Pane = struct {
     /// chip's size (`face_w` wide) to its own.
     face: ?*gtk.Widget = null,
     face_w: f64 = 0,
+    /// Minimize was just asked for: the card drops its outline at once and keeps it off
+    /// until the server answers, or this moment passes if it never does.
+    minimizing_until: i64 = 0,
     minimize_button: ?*gtk.Widget = null,
     /// "Copied", shown for a moment after the pane's selection reaches the clipboard.
     copied: *gtk.Widget,
@@ -311,6 +314,12 @@ pub const Workspace = struct {
         if (ws.resizing != null) ws.followDivider();
         ws.joinLayers();
         ws.markFocus();
+        // A minimize that never happened gives the card its outline back.
+        const now = glib.getMonotonicTime();
+        for (ws.panes.items) |*p| if (p.minimizing_until != 0 and now > p.minimizing_until and p.face == null) {
+            p.minimizing_until = 0;
+            p.frame.removeCssClass("to-tray");
+        };
         ws.markTools();
         ws.cornerChanged();
         ws.root.queueAllocate();
@@ -503,6 +512,16 @@ pub const Workspace = struct {
             const id = gpa.dupe(u8, m.layer_id) catch continue;
             ws.restored.append(gpa, .{ .layer_id = id, .rect = ws.chipRect(m.layer_id) }) catch gpa.free(id);
         }
+    }
+
+    /// The pane is about to go to the tray: its outline and highlight go the moment it is
+    /// asked, without waiting for the server to say the layer is minimized.
+    pub fn startMinimize(ws: *Workspace, block_id: []const u8) void {
+        const p = ws.paneOf(block_id) orelse return;
+        p.minimizing_until = glib.getMonotonicTime() + 1_500_000;
+        p.frame.addCssClass("to-tray");
+        // The card behind a layer of several panes carries the same highlight.
+        for (ws.backdrops.items) |bd| if (std.mem.eql(u8, bd.layer_id, p.layer_id)) bd.widget.addCssClass("to-tray");
     }
 
     /// A chip's look to lay over a card: the same icon, name and shape as the chip in the tray.
@@ -1776,7 +1795,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
             face.setOpacity(shown);
             if (shown <= 0) {
                 @as(*gtk.Overlay, @ptrCast(p.frame)).removeOverlay(face);
-                p.frame.removeCssClass("to-tray");
+                if (p.minimizing_until == 0) p.frame.removeCssClass("to-tray");
                 p.face = null;
             }
         }
