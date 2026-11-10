@@ -207,6 +207,7 @@ pub const App = struct {
     theme_css: ?*gtk.CssProvider = null,
     look_css: ?*gtk.CssProvider = null,
     blink_timer: c_uint = 0,
+    last_dark: bool = true,
     /// The shown window's tiled pane count, to balance splits when it changes.
     balance_count: usize = 0,
     balance_window: [64]u8 = undefined,
@@ -407,7 +408,9 @@ pub const App = struct {
         a.addActions();
         a.setTight(settings.current.tight);
         a.tabsChanged();
-        themes.active = themes.resolve(settings.current.theme);
+        themes.active = themes.resolve(effectiveTheme());
+        a.last_dark = systemDark();
+        _ = glib.timeoutAddSeconds(3, &appearanceTick, a);
         @import("workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
         a.blink_timer = glib.timeoutAdd(@intFromFloat(settings.current.cursor_blink_ms), &blinkTick, a);
@@ -2445,8 +2448,42 @@ pub const App = struct {
     }
 
     /// Applies the theme setting: every terminal recolors, and so does the window.
+    /// Whether the computer is set to a dark appearance: the desktop's preference on Linux,
+    /// the system setting on the Mac.
+    fn systemDark() bool {
+        if (builtin.os.tag == .macos) return @import("macos.zig").systemDark();
+        const gs = gtk.Settings.getDefault() orelse return true;
+        var value = std.mem.zeroes(gobject.Value);
+        _ = value.init(gobject.ext.types.int);
+        defer value.unset();
+        gs.as(gobject.Object).getProperty("gtk-interface-color-scheme", &value);
+        // 2 is dark and 3 light; 0 and 1 mean no preference.
+        return value.getInt() != 3;
+    }
+
+    /// The theme in effect: the one picked, or with separate light and dark themes the one for
+    /// the system's appearance now.
+    fn effectiveTheme() []const u8 {
+        const st = &settings.current;
+        if (!st.theme_follow_system) return st.theme;
+        return if (systemDark()) st.theme_dark else st.theme_light;
+    }
+
+    /// Checks the system appearance every few seconds while themes follow it.
+    fn appearanceTick(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        if (!settings.current.theme_follow_system) return 1;
+        const dark = systemDark();
+        if (dark != a.last_dark) {
+            a.last_dark = dark;
+            a.themeChanged();
+        }
+        return 1;
+    }
+
     pub fn themeChanged(a: *App) void {
-        themes.active = themes.resolve(settings.current.theme);
+        a.last_dark = systemDark();
+        themes.active = themes.resolve(effectiveTheme());
         for (a.hosts.items) |h| {
             var it = h.server.streams.valueIterator();
             while (it.next()) |st| st.*.hostColorsChanged();

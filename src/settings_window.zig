@@ -5,6 +5,7 @@ const glib = @import("glib");
 const gobject = @import("gobject");
 const gio = @import("gio");
 const gtk = @import("gtk");
+const theme_editor = @import("theme_editor.zig");
 const gdk = @import("gdk");
 const cairo = @import("cairo");
 const adw = @import("adw");
@@ -381,9 +382,150 @@ const ThemePick = struct { ctx: *Ctx, value: [:0]const u8, check: *gtk.Widget };
 
 var theme_checks: std.ArrayList(*ThemePick) = .empty;
 
+/// Theme values for the light and dark pickers: "" follows the host.
+var theme_values: std.ArrayList([:0]u8) = .empty;
+
+fn themeNames(list: *gtk.StringList) void {
+    for (theme_values.items) |v| gpa.free(v);
+    theme_values.clearRetainingCapacity();
+    list.append("Follow host");
+    theme_values.append(gpa, gpa.dupeSentinel(u8, "", 0) catch return) catch return;
+    for (&themes.builtins) |*t| {
+        const z = gpa.dupeSentinel(u8, t.name, 0) catch continue;
+        list.append(z.ptr);
+        theme_values.append(gpa, z) catch {};
+    }
+    var custom: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (custom.items) |c| gpa.free(c);
+        custom.deinit(gpa);
+    }
+    theme_editor.list(&custom);
+    for (custom.items) |path| {
+        const base = gpa.dupeSentinel(u8, std.fs.path.basename(path), 0) catch continue;
+        defer gpa.free(base);
+        list.append(base.ptr);
+        theme_values.append(gpa, std.fmt.allocPrintSentinel(gpa, "file:{s}", .{path}, 0) catch continue) catch {};
+    }
+}
+
+const Slot = struct { ctx: *Ctx, field: *[]u8 };
+
+/// A drop-down of every theme, for the light or the dark appearance.
+fn slotRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, field: *[]u8) void {
+    const list = gtk.StringList.new(null);
+    themeNames(list);
+    const row = adw.ComboRow.new();
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    row.setModel(list.as(gio.ListModel));
+    for (theme_values.items, 0..) |v, i| if (std.mem.eql(u8, v, field.*)) row.setSelected(@intCast(i));
+    const slot = gpa.create(Slot) catch return;
+    slot.* = .{ .ctx = ctx, .field = field };
+    const H = struct {
+        fn picked(r: *adw.ComboRow, _: *gobject.ParamSpec, sl: *Slot) callconv(.c) void {
+            const i = r.getSelected();
+            if (i >= theme_values.items.len) return;
+            settings.setString(sl.field, theme_values.items[i]);
+            sl.ctx.app.themeChanged();
+        }
+    };
+    _ = gobject.Object.signals.notify.connect(row, *Slot, &H.picked, slot, .{ .detail = "selected" });
+    g.add(row.as(gtk.Widget));
+}
+
+fn customThemes(ctx: *Ctx, p: *adw.PreferencesPage) void {
+    const g = group(p, "Custom Themes", "Your own themes, saved in ~/.config/compy/themes");
+    const new_button = gtk.Button.newWithLabel("New Theme");
+    new_button.as(gtk.Widget).addCssClass("flat");
+    new_button.as(gtk.Widget).setValign(.center);
+    g.setHeaderSuffix(new_button.as(gtk.Widget));
+    _ = gtk.Button.signals.clicked.connect(new_button, *Ctx, &newTheme, ctx, .{});
+    var custom: std.ArrayList([:0]u8) = .empty;
+    defer custom.deinit(gpa);
+    theme_editor.list(&custom);
+    if (custom.items.len == 0) {
+        const row = adw.ActionRow.new();
+        row.as(adw.PreferencesRow).setTitle("No custom themes");
+        g.add(row.as(gtk.Widget));
+    }
+    for (custom.items) |path| {
+        const row = adw.ActionRow.new();
+        const base = gpa.dupeSentinel(u8, std.fs.path.basename(path), 0) catch continue;
+        defer gpa.free(base);
+        row.as(adw.PreferencesRow).setTitle(base.ptr);
+        const value = std.fmt.allocPrintSentinel(gpa, "file:{s}", .{path}, 0) catch continue;
+        const edit = gtk.Button.newWithLabel("Edit");
+        edit.as(gtk.Widget).addCssClass("flat");
+        edit.as(gtk.Widget).setValign(.center);
+        const del = gtk.Button.newFromIconName("user-trash-symbolic");
+        del.as(gtk.Widget).addCssClass("flat");
+        del.as(gtk.Widget).setValign(.center);
+        del.as(gtk.Widget).setTooltipText("Delete this theme");
+        const use = gtk.Button.newWithLabel("Use");
+        use.as(gtk.Widget).addCssClass("flat");
+        use.as(gtk.Widget).setValign(.center);
+        row.addSuffix(use.as(gtk.Widget));
+        row.addSuffix(edit.as(gtk.Widget));
+        row.addSuffix(del.as(gtk.Widget));
+        const ct = gpa.create(CustomTheme) catch continue;
+        ct.* = .{ .ctx = ctx, .path = path, .value = value };
+        _ = gtk.Button.signals.clicked.connect(edit, *CustomTheme, &editTheme, ct, .{});
+        _ = gtk.Button.signals.clicked.connect(del, *CustomTheme, &deleteTheme, ct, .{});
+        _ = gtk.Button.signals.clicked.connect(use, *CustomTheme, &useTheme, ct, .{});
+        g.add(row.as(gtk.Widget));
+    }
+}
+
+const CustomTheme = struct { ctx: *Ctx, path: [:0]u8, value: [:0]u8 };
+
+fn themeSaved(data: *anyopaque, path: []const u8) void {
+    const ctx: *Ctx = @ptrCast(@alignCast(data));
+    const value = std.fmt.allocPrint(gpa, "file:{s}", .{path}) catch return;
+    defer gpa.free(value);
+    settings.setString(&settings.current.theme, value);
+    ctx.app.themeChanged();
+    rebuildThemes(ctx);
+}
+
+fn newTheme(_: *gtk.Button, ctx: *Ctx) callconv(.c) void {
+    const start = themes.active orelse (if (ctx.app.server) |s| s.host_colors else null) orelse @import("stream.zig").Colors{};
+    theme_editor.open(ctx.dialog.as(gtk.Widget), null, start, ctx, &themeSaved);
+}
+
+fn editTheme(_: *gtk.Button, ct: *CustomTheme) callconv(.c) void {
+    theme_editor.open(ct.ctx.dialog.as(gtk.Widget), ct.path, .{}, ct.ctx, &themeSaved);
+}
+
+fn useTheme(_: *gtk.Button, ct: *CustomTheme) callconv(.c) void {
+    settings.setString(&settings.current.theme, ct.value);
+    ct.ctx.app.themeChanged();
+    rebuildThemes(ct.ctx);
+}
+
+fn deleteTheme(_: *gtk.Button, ct: *CustomTheme) callconv(.c) void {
+    _ = glib.unlink(ct.path.ptr);
+    if (std.mem.eql(u8, settings.current.theme, ct.value)) {
+        settings.setString(&settings.current.theme, "");
+        ct.ctx.app.themeChanged();
+    }
+    rebuildThemes(ct.ctx);
+}
+
+/// Builds the Themes page again, after a custom theme comes or goes.
+fn rebuildThemes(ctx: *Ctx) void {
+    const stack = ctx.stack;
+    if (stack.getChildByName("Themes")) |old| stack.remove(old);
+    _ = stack.addNamed(themesPage(ctx), "Themes");
+    stack.setVisibleChildName("Themes");
+}
+
 fn themesPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     theme_checks.clearRetainingCapacity();
+    const look = group(p, "Appearance", null);
+    switchRow(ctx, look, "Separate light and dark themes", "Follow the system's appearance with a theme for each", &settings.current.theme_follow_system, App.themeChanged);
+    slotRow(ctx, look, "Light theme", &settings.current.theme_light);
+    slotRow(ctx, look, "Dark theme", &settings.current.theme_dark);
     const g = group(p, "Terminal Theme", "Compy follows each host's theme unless you pick one here. A theme picked here only colors Compy; your Rex server keeps its own.");
     themeRow(ctx, g, "Follow host", "", null);
     for (&themes.builtins) |*t| themeRow(ctx, g, t.name, t.name, t);
@@ -391,6 +533,7 @@ fn themesPage(ctx: *Ctx) *gtk.Widget {
         const path = settings.current.theme["file:".len..];
         themeRow(ctx, g, std.fs.path.basename(path), settings.current.theme, null);
     }
+    customThemes(ctx, p);
     const imp = group(p, "Import Theme", null);
     const row = adw.ActionRow.new();
     row.as(adw.PreferencesRow).setTitle("Import a Ghostty theme file");

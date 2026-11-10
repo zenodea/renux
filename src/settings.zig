@@ -96,6 +96,10 @@ pub const Settings = struct {
     theme: []u8,
     /// Empty uses this computer's name.
     client_label: []u8,
+    /// Separate themes for a light and a dark system appearance, instead of `theme`.
+    theme_follow_system: bool = false,
+    theme_light: []u8,
+    theme_dark: []u8,
     hosts: std.ArrayList(Host) = .empty,
     /// Folders panes were in lately, newest first, for Go to Anything.
     recent_paths: std.ArrayList([]u8) = .empty,
@@ -189,6 +193,8 @@ pub fn load() void {
         .font = str(kf, "font", "Monospace 11"),
         .theme = str(kf, "theme", ""),
         .client_label = str(kf, "client-label", ""),
+        .theme_light = str(kf, "theme-light", "Solarized Light"),
+        .theme_dark = str(kf, "theme-dark", ""),
     };
     const s = &current;
     s.tight = boolean(kf, "tight", false);
@@ -205,6 +211,7 @@ pub fn load() void {
     s.blur = boolean(kf, "blur", true);
     s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
     s.key_hints = boolean(kf, "key-hints", true);
+    s.theme_follow_system = boolean(kf, "theme-follow-system", false);
     s.focus_follows_mouse = boolean(kf, "focus-follows-mouse", false);
     s.fade_inactive = number(kf, "fade-inactive", 0, 0, 0.6);
     s.fade_inactive_window = boolean(kf, "fade-inactive-window", false);
@@ -349,7 +356,7 @@ pub fn save() void {
     const kf = glib.KeyFile.new();
     defer kf.unref();
     const s = &current;
-    inline for (.{ .{ "font", s.font }, .{ "theme", s.theme }, .{ "client-label", s.client_label } }) |e| {
+    inline for (.{ .{ "font", s.font }, .{ "theme", s.theme }, .{ "client-label", s.client_label }, .{ "theme-light", s.theme_light }, .{ "theme-dark", s.theme_dark } }) |e| {
         const z = gpa.dupeSentinel(u8, e[1], 0) catch return;
         defer gpa.free(z);
         kf.setString("compy", e[0], z.ptr);
@@ -362,7 +369,7 @@ pub fn save() void {
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
         .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
-        .{ "key-hints", s.key_hints },         .{ "focus-follows-mouse", s.focus_follows_mouse },
+        .{ "key-hints", s.key_hints },         .{ "theme-follow-system", s.theme_follow_system },         .{ "focus-follows-mouse", s.focus_follows_mouse },
         .{ "fade-inactive-window", s.fade_inactive_window }, .{ "highlight-border", s.highlight_border },
         .{ "highlight-animate", s.highlight_animate }, .{ "autobalance", s.autobalance },
         .{ "match-program-bg", s.match_program_bg }, .{ "rounded-selection", s.rounded_selection },

@@ -74,3 +74,12 @@ pub fn neverActivate() void {
     const app = send(Id, objc_getClass("NSApplication"), "sharedApplication", .{});
     send(void, app, "setActivationPolicy:", .{@as(isize, 2)}); // prohibited
 }
+
+/// Whether macOS is set to Dark appearance, whatever Compy itself shows.
+pub fn systemDark() bool {
+    const defaults = send(Id, objc_getClass("NSUserDefaults"), "standardUserDefaults", .{});
+    const key = send(Id, objc_getClass("NSString"), "stringWithUTF8String:", .{@as([*:0]const u8, "AppleInterfaceStyle")});
+    const value = send(Id, defaults, "stringForKey:", .{key}) orelse return false;
+    const text = send(?[*:0]const u8, value, "UTF8String", .{}) orelse return false;
+    return std.mem.eql(u8, std.mem.span(text), "Dark");
+}
