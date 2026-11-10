@@ -137,6 +137,8 @@ const css =
     \\.goto-row { padding: 6px 8px; }
     \\.record-box { padding: 24px; }
     \\.record-keys { font-family: monospace; font-size: 1.6em; font-weight: 700; color: @accent_color; min-height: 40px; }
+    \\.welcome-icon { color: @accent_color; margin-bottom: 6px; }
+    \\.diagnostics-text { font-family: monospace; font-size: 0.92em; }
     \\.key-hints { background-color: alpha(@popover_bg_color, 0.96); border-radius: 14px; padding: 12px 16px; box-shadow: 0 8px 30px alpha(black, 0.4), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
     \\.hint-key { font-family: monospace; font-weight: 700; color: @accent_color; min-width: 18px; }
     \\.hint-desc { font-size: 0.92em; }
@@ -208,6 +210,7 @@ pub const App = struct {
     look_css: ?*gtk.CssProvider = null,
     blink_timer: c_uint = 0,
     last_dark: bool = true,
+    badge_count: u32 = 0,
     /// The shown window's tiled pane count, to balance splits when it changes.
     balance_count: usize = 0,
     balance_window: [64]u8 = undefined,
@@ -343,6 +346,12 @@ pub const App = struct {
 
         const card = gtk.Box.new(.vertical, 0);
         card.as(gtk.Widget).addCssClass("content");
+        // Two fingers sideways on a trackpad switch tabs, like Rex.
+        const swipe = gtk.EventControllerScroll.new(.{ .horizontal = true });
+        swipe.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.EventControllerScroll.signals.scroll.connect(swipe, *App, &swiped, a, .{});
+        _ = gtk.EventControllerScroll.signals.scroll_end.connect(swipe, *App, &swipeEnded, a, .{});
+        a.stack.as(gtk.Widget).addController(swipe.as(gtk.EventController));
         a.tab_strip = gtk.Box.new(.horizontal, 4);
         a.tab_strip.as(gtk.Widget).addCssClass("tab-strip");
         a.tab_strip.as(gtk.Widget).setVisible(0);
@@ -426,8 +435,19 @@ pub const App = struct {
         if (a.hosts.items.len == 0) a.stack.setVisibleChildName("connect");
         // When driven by tests, show the window without taking the keyboard from what the person
         // is using; otherwise their typing lands in Compy.
-        if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else win.present();
+        if (std.c.getenv("COMPY_SHOT") != null) win.as(gtk.Widget).setVisible(1) else if (settings.current.show_on_launch) win.present() else win.as(gtk.Widget).realize();
+        // `compy --toggle` finds this process by its ID and signals it.
+        if (std.c.getenv("COMPY_SHOT") == null) {
+            var pbuf: [512]u8 = undefined;
+            if (@import("main.zig").pidPath(&pbuf)) |path| {
+                var nbuf: [32]u8 = undefined;
+                const text = std.fmt.bufPrint(&nbuf, "{d}\n", .{std.c.getpid()}) catch "";
+                _ = glib.fileSetContents(path.ptr, @ptrCast(text.ptr), @intCast(text.len), null);
+            }
+            _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
+        }
         if (std.c.getenv("COMPY_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| FrameLog.watch(clock);
+        if (!settings.current.welcomed and std.c.getenv("COMPY_SHOT") == null) @import("manage.zig").openWelcome(a);
         a.applyLook();
         _ = gobject.Object.signals.notify.connect(win, *App, &activeChanged, a, .{ .detail = "is-active" });
     }
@@ -671,6 +691,7 @@ pub const App = struct {
                 h.workspace.blockChanged(block);
                 a.refreshRows();
                 a.activity.changed();
+                a.updateBadge();
                 if (h.server.blockInfo(block)) |info| if (info.folder) |f| {
                     var pbuf: [1024]u8 = undefined;
                     const path = folderPath(&pbuf, f);
@@ -1123,6 +1144,9 @@ pub const App = struct {
             if (collapsed) fold.as(gtk.Widget).addCssClass("folded");
             if (settings.current.tab_position == .above) fold.as(gtk.Widget).setVisible(0);
             head.append(fold.as(gtk.Widget));
+            const session_more = menuButton(sessionMenu(session.id), "Session");
+            session_more.as(gtk.Widget).addCssClass("session-tool");
+            head.append(session_more.as(gtk.Widget));
             const head_row = gtk.ListBoxRow.new();
             head_row.setChild(head.as(gtk.Widget));
             head_row.setActivatable(0);
@@ -1284,6 +1308,101 @@ pub const App = struct {
         h.server.moveBlock(session_id, block_id, anchor, true, false);
     }
 
+    /// Shows the server's address as a QR code for Compy on a phone to scan.
+    fn pairDevice(a: *App) bool {
+        const s = a.server orelse return false;
+        @import("pairing.zig").open(a.window.as(gtk.Widget), s.url);
+        return true;
+    }
+
+    var swipe_dx: f64 = 0;
+    var swipe_done = false;
+
+    fn swiped(_: *gtk.EventControllerScroll, dx: f64, dy: f64, a: *App) callconv(.c) c_int {
+        if (!settings.current.trackpad_gestures or @abs(dy) > @abs(dx)) return 0;
+        swipe_dx += dx;
+        // One tab for each swipe, once it has gone far enough.
+        if (!swipe_done and @abs(swipe_dx) > 60) {
+            swipe_done = true;
+            _ = a.stepWindow(if (swipe_dx > 0) 1 else -1);
+        }
+        return 0;
+    }
+
+    fn swipeEnded(_: *gtk.EventControllerScroll, _: *App) callconv(.c) void {
+        swipe_dx = 0;
+        swipe_done = false;
+    }
+
+    /// Hides the window, or brings it back to the front.
+    pub fn toggleVisible(a: *App) void {
+        const w = a.window.as(gtk.Widget);
+        if (w.getVisible() != 0 and a.window.as(gtk.Window).isActive() != 0) w.setVisible(0) else a.window.as(gtk.Window).present();
+    }
+
+    fn toggleSignal(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.toggleVisible();
+        return 1;
+    }
+
+    /// Moves the shown session one place up or down the sidebar.
+    fn moveSessionStep(a: *App, session_id: []const u8, down: bool) void {
+        const s = a.server orelse return;
+        for (s.sessions.items, 0..) |session, i| if (std.mem.eql(u8, session.id, session_id)) {
+            if (down) {
+                if (i + 1 >= s.sessions.items.len) return;
+                s.moveSession(session_id, if (i + 2 < s.sessions.items.len) s.sessions.items[i + 2].id else null);
+            } else {
+                if (i == 0) return;
+                s.moveSession(session_id, s.sessions.items[i - 1].id);
+            }
+            return;
+        };
+    }
+
+    fn moveSessionUp(a: *App, session_id: []const u8) void {
+        a.moveSessionStep(session_id, false);
+    }
+
+    fn moveSessionDown(a: *App, session_id: []const u8) void {
+        a.moveSessionStep(session_id, true);
+    }
+
+    fn renameSessionFromMenu(a: *App, session_id: []const u8) void {
+        a.renameSessionAction(session_id);
+    }
+
+    /// The number of panes that need you, as a badge on the Dock or the desktop's launcher.
+    fn updateBadge(a: *App) void {
+        var n: u32 = 0;
+        if (settings.current.unread_badge) for (a.hosts.items) |h| {
+            var it = h.server.blocks.valueIterator();
+            while (it.next()) |b| if (b.attention) {
+                n += 1;
+            };
+        };
+        if (n == a.badge_count) return;
+        a.badge_count = n;
+        if (builtin.os.tag == .macos) return @import("macos.zig").setBadge(n);
+        // Unity's launcher entry, which KDE, Plank and Dash to Dock show.
+        const bus = gio.busGetSync(.session, null, null) orelse return;
+        const props = glib.VariantBuilder.new(glib.VariantType.new("a{sv}"));
+        props.add("{sv}", "count", glib.Variant.newInt64(n));
+        props.add("{sv}", "count-visible", glib.Variant.newBoolean(@intFromBool(n > 0)));
+        const params = glib.Variant.newTuple(&[_]*glib.Variant{ glib.Variant.newString("application://dev.compy.linux.desktop"), props.end() }, 2);
+        _ = bus.emitSignal(null, "/dev/compy/linux", "com.canonical.Unity.LauncherEntry", "Update", params, null);
+    }
+
+    /// Opens a tab in the shown session that runs a command, such as `rex skill setup`.
+    pub fn runInNewTab(a: *App, command: []const u8) void {
+        const s = a.server orelse return;
+        const sid = a.session_id orelse return a.toast("Open a session first");
+        const line = std.fmt.allocPrint(gpa, "{s}\r", .{command}) catch return;
+        defer gpa.free(line);
+        s.newWindowRunning(sid, line);
+    }
+
     /// Changes the focused pane's shell to a folder.
     pub fn changeDirectory(a: *App, path: []const u8) void {
         const t = a.target() orelse return;
@@ -1354,7 +1473,7 @@ pub const App = struct {
     // client.* actions. Key bindings live in the person's Lua config on the server; the server
     // runs its own actions and asks the client for these.
 
-    fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
+    pub fn perform(ctx: *anyopaque, action: []const u8, args: ?@import("json.zig").Value, session_id: ?[]const u8) bool {
         const done = performInner(ctx, action, args, session_id);
         if (!done) std.log.warn("not performed: {s}", .{action});
         return done;
@@ -1481,7 +1600,7 @@ pub const App = struct {
             return true;
         }
         if (is(action, "client.visibility.toggle")) {
-            a.window.as(gtk.Window).minimize();
+            a.toggleVisible();
             return true;
         }
         if (is(action, "client.window.new")) return a.openAppWindow(null);
@@ -1524,6 +1643,23 @@ pub const App = struct {
             return true;
         }
         if (is(action, "client.notice.dismiss")) return true;
+        if (is(action, "client.diagnostics") or is(action, "client.debug.copy")) {
+            @import("manage.zig").openDiagnostics(a);
+            return true;
+        }
+        if (is(action, "client.onboarding")) {
+            @import("manage.zig").openWelcome(a);
+            return true;
+        }
+        if (is(action, "client.agents.setup")) {
+            @import("manage.zig").setupAgents(a);
+            return true;
+        }
+        if (is(action, "client.pair_device")) return a.pairDevice();
+        if (is(action, "client.config.copy_path")) {
+            a.runInNewTab("rex config path");
+            return true;
+        }
         if (is(action, "client.version.copy")) {
             a.window.as(gtk.Widget).getClipboard().setText("Compy for Linux");
             a.toast("Version copied");
@@ -2123,7 +2259,7 @@ pub const App = struct {
             _ = gio.SimpleAction.signals.activate.connect(action, *App, &Thunk.run, a, .{});
             a.app.as(gio.ActionMap).addAction(action.as(gio.Action));
         }
-        inline for (.{ .{ "new-window-in", newWindowIn }, .{ "toggle-session", toggleSession }, .{ "filter", filterAction } }) |e| {
+        inline for (.{ .{ "new-window-in", newWindowIn }, .{ "toggle-session", toggleSession }, .{ "filter", filterAction }, .{ "move-session-up", moveSessionUp }, .{ "move-session-down", moveSessionDown }, .{ "rename-session", renameSessionFromMenu } }) |e| {
             const action = gio.SimpleAction.new(e[0], glib.VariantType.new("s"));
             const Thunk = struct {
                 fn run(_: *gio.SimpleAction, param: ?*glib.Variant, app: *App) callconv(.c) void {
@@ -2529,7 +2665,9 @@ pub const App = struct {
             \\.pane-card.focused { box-shadow: none; }
             \\.pane-card.floating.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
         ;
-        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}\n{s}", .{ look_text, highlight }, 0) catch return;
+        var sbuf: [128]u8 = undefined;
+        const sidebar_text = std.fmt.bufPrint(&sbuf, ".compy-sidebar list {{ font-size: {d:.2}em; }}", .{prefs.sidebar_text_scale}) catch "";
+        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}\n{s}\n{s}", .{ look_text, highlight, sidebar_text }, 0) catch return;
         defer gpa.free(css_text);
         provider.loadFromString(css_text.ptr);
         if (builtin.os.tag == .macos) if (a.window.as(gtk.Native).getSurface()) |surface| {
@@ -2945,6 +3083,18 @@ fn windowMenu(session_id: []const u8, window_id: []const u8) *gio.MenuModel {
     inline for (.{ .{ "Rename…", "app.rename-window" }, .{ "Close window", "app.close-window" } }) |e| {
         const item = gio.MenuItem.new(e[0], null);
         item.setActionAndTargetValue(e[1], glib.Variant.newString(target.ptr));
+        menu.appendItem(item);
+    }
+    return menu.as(gio.MenuModel);
+}
+
+fn sessionMenu(session_id: []const u8) *gio.MenuModel {
+    const z = gpa.dupeSentinel(u8, session_id, 0) catch return gio.Menu.new().as(gio.MenuModel);
+    defer gpa.free(z);
+    const menu = gio.Menu.new();
+    inline for (.{ .{ "Rename…", "app.rename-session" }, .{ "Move Up", "app.move-session-up" }, .{ "Move Down", "app.move-session-down" } }) |e| {
+        const item = gio.MenuItem.new(e[0], null);
+        item.setActionAndTargetValue(e[1], glib.Variant.newString(z.ptr));
         menu.appendItem(item);
     }
     return menu.as(gio.MenuModel);

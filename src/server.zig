@@ -892,6 +892,34 @@ pub const Server = struct {
         d.done(d.ctx, d.session_id, ids.items, labels.items);
     }
 
+    const Running = struct {
+        session_id: []u8,
+        text: []u8,
+        fn deinit(r: *Running) void {
+            gpa.free(r.session_id);
+            gpa.free(r.text);
+        }
+    };
+
+    /// Opens a new window in a session and types a command into its shell.
+    pub fn newWindowRunning(s: *Server, session_id: []const u8, text: []const u8) void {
+        s.call("session.new_window", .{ .session_id = session_id, .layout = shell_layout, .focus = true }, Running, .{
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .text = gpa.dupe(u8, text) catch return,
+        }, runningWindowMade);
+    }
+
+    fn runningWindowMade(s: *Server, r: *Running, res: Result) void {
+        switch (res) {
+            .ok => |payload| {
+                const ids = json.array(payload, "block_ids");
+                if (ids.len == 0 or ids[0] != .string) return;
+                s.writeText(r.session_id, ids[0].string, r.text);
+            },
+            .err => |e| s.showMessage(e.message),
+        }
+    }
+
     /// Folders (and files, if asked) in a directory as the terminal's shell sees it.
     pub const DirList = struct {
         ctx: *anyopaque,
@@ -1056,6 +1084,13 @@ pub const Server = struct {
         if (before) |b| {
             s.act(session_id, "session.move_window", .{ .session_id = session_id, .window_id = window_id, .before_window_id = b });
         } else s.act(session_id, "session.move_window", .{ .session_id = session_id, .window_id = window_id });
+    }
+
+    /// Moves a session just before another in the list, or to the end.
+    pub fn moveSession(s: *Server, session_id: []const u8, before: ?[]const u8) void {
+        if (before) |b| {
+            s.act(session_id, "session.move", .{ .session_id = session_id, .before_session_id = b });
+        } else s.act(session_id, "session.move", .{ .session_id = session_id });
     }
 
     pub fn renameBlock(s: *Server, session_id: []const u8, block_id: []const u8, label: []const u8) void {

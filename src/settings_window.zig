@@ -294,6 +294,37 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
         g.add(status.as(gtk.Widget));
     }
 
+    if (a.server != null) {
+        const pair = group(p, "Pair a Phone", null);
+        const row = adw.ActionRow.new();
+        row.as(adw.PreferencesRow).setTitle("Pair device with QR code");
+        row.setSubtitle("Compy on Android scans this server's address");
+        const show = gtk.Button.newWithLabel("Show Code");
+        show.as(gtk.Widget).setValign(.center);
+        show.as(gtk.Widget).addCssClass("flat");
+        _ = gtk.Button.signals.clicked.connect(show, *Ctx, &showPairing, ctx, .{});
+        row.addSuffix(show.as(gtk.Widget));
+        pair.add(row.as(gtk.Widget));
+    }
+    @import("manage.zig").localServerGroup(p, a);
+    const more = group(p, "Help", null);
+    inline for (.{ .{ "Diagnostics", "What Compy knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
+        const row = adw.ActionRow.new();
+        row.as(adw.PreferencesRow).setTitle(e[0]);
+        row.setSubtitle(e[1]);
+        const open_button = gtk.Button.newWithLabel("Open");
+        open_button.as(gtk.Widget).setValign(.center);
+        open_button.as(gtk.Widget).addCssClass("flat");
+        const H = struct {
+            fn run(_: *gtk.Button, cx: *Ctx) callconv(.c) void {
+                if (cx.app.current) |h| _ = App.perform(h, e[2], null, null);
+            }
+        };
+        _ = gtk.Button.signals.clicked.connect(open_button, *Ctx, &H.run, ctx, .{});
+        row.addSuffix(open_button.as(gtk.Widget));
+        more.add(row.as(gtk.Widget));
+    }
+
     // This computer's Tailscale, which Rex servers often use to let it in.
     const tsg = group(p, "Tailscale", "Read from this computer. Rex's own Tailscale settings live in the Rex app on the server's machine.");
     var ts = @import("tailscale.zig").read();
@@ -348,6 +379,11 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);
     rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
     colorPicker(ctx, hl, "Highlight color", "The theme's accent unless one is picked", &settings.current.highlight_color, "Use Accent", App.applyLook);
+    const extras = group(p, "Window", null);
+    switchRow(ctx, extras, "Show window on launch", "Off starts Compy hidden; compy --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
+    switchRow(ctx, extras, "Trackpad gestures", "Swipe sideways with two fingers to switch tabs", &settings.current.trackpad_gestures, null);
+    numberRow(ctx, extras, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
+    switchRow(ctx, extras, "Unread badge", "The number of panes that need you, on the Dock or the desktop's launcher", &settings.current.unread_badge, null);
     const go = group(p, "Go to Anything", null);
     switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     const look = group(p, "Appearance", null);
@@ -517,6 +553,10 @@ fn rebuildThemes(ctx: *Ctx) void {
     if (stack.getChildByName("Themes")) |old| stack.remove(old);
     _ = stack.addNamed(themesPage(ctx), "Themes");
     stack.setVisibleChildName("Themes");
+}
+
+fn showPairing(_: *gtk.Button, ctx: *Ctx) callconv(.c) void {
+    if (ctx.app.current) |h| _ = App.perform(h, "client.pair_device", null, null);
 }
 
 fn themesPage(ctx: *Ctx) *gtk.Widget {

@@ -83,3 +83,13 @@ pub fn systemDark() bool {
     const text = send(?[*:0]const u8, value, "UTF8String", .{}) orelse return false;
     return std.mem.eql(u8, std.mem.span(text), "Dark");
 }
+
+/// The number on Compy's Dock icon, or none for zero.
+pub fn setBadge(n: u32) void {
+    const app = send(Id, objc_getClass("NSApplication"), "sharedApplication", .{});
+    const tile = send(Id, app, "dockTile", .{});
+    var buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrintSentinel(&buf, "{d}", .{n}, 0) catch return;
+    const label: Id = if (n == 0) null else send(Id, objc_getClass("NSString"), "stringWithUTF8String:", .{@as([*:0]const u8, text.ptr)});
+    send(void, tile, "setBadgeLabel:", .{label});
+}

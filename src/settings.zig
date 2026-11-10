@@ -41,6 +41,15 @@ pub const Settings = struct {
     sidebar_width: f64 = 250,
     /// After a prefix such as ctrl+a, list the keys that can follow.
     key_hints: bool = true,
+    /// Whether the welcome pages have been seen.
+    welcomed: bool = false,
+    /// Show the window at launch; off starts hidden until `compy --toggle`.
+    show_on_launch: bool = true,
+    /// Two-finger swipes sideways switch tabs.
+    trackpad_gestures: bool = true,
+    sidebar_text_scale: f64 = 1,
+    /// A count of panes that need you, on the Dock or the desktop's launcher.
+    unread_badge: bool = true,
     /// Pointing at a pane gives it the keyboard.
     focus_follows_mouse: bool = false,
     /// How much panes without the keyboard fade, 0 to 0.6.
@@ -211,6 +220,11 @@ pub fn load() void {
     s.blur = boolean(kf, "blur", true);
     s.sidebar_width = number(kf, "sidebar-width", 250, 180, 480);
     s.key_hints = boolean(kf, "key-hints", true);
+    s.welcomed = boolean(kf, "welcomed", false);
+    s.show_on_launch = boolean(kf, "show-on-launch", true);
+    s.trackpad_gestures = boolean(kf, "trackpad-gestures", true);
+    s.sidebar_text_scale = number(kf, "sidebar-text-scale", 1, 0.8, 1.4);
+    s.unread_badge = boolean(kf, "unread-badge", true);
     s.theme_follow_system = boolean(kf, "theme-follow-system", false);
     s.focus_follows_mouse = boolean(kf, "focus-follows-mouse", false);
     s.fade_inactive = number(kf, "fade-inactive", 0, 0, 0.6);
@@ -369,7 +383,9 @@ pub fn save() void {
         .{ "sound", s.sound },                 .{ "terminal-notifications", s.terminal_notifications },
         .{ "improve-contrast", s.improve_contrast }, .{ "visual-bell", s.visual_bell },
         .{ "paste-warning", s.paste_warning }, .{ "copy-on-select", s.copy_on_select },
-        .{ "key-hints", s.key_hints },         .{ "theme-follow-system", s.theme_follow_system },         .{ "focus-follows-mouse", s.focus_follows_mouse },
+        .{ "key-hints", s.key_hints },         .{ "welcomed", s.welcomed },
+        .{ "show-on-launch", s.show_on_launch }, .{ "trackpad-gestures", s.trackpad_gestures },
+        .{ "unread-badge", s.unread_badge },         .{ "theme-follow-system", s.theme_follow_system },         .{ "focus-follows-mouse", s.focus_follows_mouse },
         .{ "fade-inactive-window", s.fade_inactive_window }, .{ "highlight-border", s.highlight_border },
         .{ "highlight-animate", s.highlight_animate }, .{ "autobalance", s.autobalance },
         .{ "match-program-bg", s.match_program_bg }, .{ "rounded-selection", s.rounded_selection },
@@ -388,6 +404,7 @@ pub fn save() void {
     kf.setBoolean("compy", "blur", @intFromBool(s.blur));
     kf.setDouble("compy", "sidebar-width", s.sidebar_width);
     kf.setDouble("compy", "fade-inactive", s.fade_inactive);
+    kf.setDouble("compy", "sidebar-text-scale", s.sidebar_text_scale);
     kf.setDouble("compy", "highlight-opacity", s.highlight_opacity);
     kf.setDouble("compy", "highlight-color", @floatFromInt(s.highlight_color));
     kf.setDouble("compy", "cursor-blink-ms", s.cursor_blink_ms);
