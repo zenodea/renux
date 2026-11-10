@@ -1083,7 +1083,8 @@ pub const Server = struct {
         c.fire("block.event", .{ .session_id = session_id, .block_id = block_id, .event = .{ .type = "focus", .payload = .{ .action = if (focused) "in" else "out" } } });
     }
 
-    pub fn sendWheel(s: *Server, session_id: []const u8, block_id: []const u8, lines: f64, col: u16, row: u16) void {
+    /// `mods` is the held modifiers as Rex writes them, such as "shift+ctrl", or "".
+    pub fn sendWheel(s: *Server, session_id: []const u8, block_id: []const u8, lines: f64, col: u16, row: u16, mods: []const u8) void {
         const c = s.control orelse return;
         c.fire("block.event", .{ .session_id = session_id, .block_id = block_id, .event = .{ .type = "wheel", .payload = .{
             .delta_mode = "line",
@@ -1092,11 +1093,11 @@ pub const Server = struct {
             .x = col,
             .y = row,
             .pixel = null,
-            .mods = "",
+            .mods = mods,
         } } });
     }
 
-    pub fn sendMouse(s: *Server, session_id: []const u8, block_id: []const u8, action: []const u8, button: []const u8, col: u16, row: u16) void {
+    pub fn sendMouse(s: *Server, session_id: []const u8, block_id: []const u8, action: []const u8, button: []const u8, col: u16, row: u16, mods: []const u8) void {
         const c = s.control orelse return;
         c.fire("block.event", .{ .session_id = session_id, .block_id = block_id, .event = .{ .type = "mouse", .payload = .{
             .action = action,
@@ -1105,7 +1106,7 @@ pub const Server = struct {
             .x = col,
             .y = row,
             .pixel = null,
-            .mods = "",
+            .mods = mods,
         } } });
     }
 

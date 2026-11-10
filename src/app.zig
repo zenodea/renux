@@ -208,7 +208,6 @@ pub const App = struct {
     auto_picked: bool = false,
     theme_css: ?*gtk.CssProvider = null,
     look_css: ?*gtk.CssProvider = null,
-    blink_timer: c_uint = 0,
     last_dark: bool = true,
     badge_count: u32 = 0,
     /// The shown window's tiled pane count, to balance splits when it changes.
@@ -422,7 +421,6 @@ pub const App = struct {
         _ = glib.timeoutAddSeconds(3, &appearanceTick, a);
         @import("workspace.zig").show_headers = settings.current.show_headers;
         a.markHeaders();
-        a.blink_timer = glib.timeoutAdd(@intFromFloat(settings.current.cursor_blink_ms), &blinkTick, a);
         installShotHook(a);
 
         // $COMPY_SERVER, for testing, names hosts to use without saving them, separated by commas.
@@ -2589,7 +2587,13 @@ pub const App = struct {
 
     /// Applies the terminal font from the settings to every pane.
     pub fn fontChanged(a: *App) void {
-        termview.font = termview.Font.init(gpa.dupeSentinel(u8, settings.current.font, 0) catch return);
+        const name = gpa.dupeSentinel(u8, settings.current.font, 0) catch return;
+        defer gpa.free(name);
+        // The new font is in place before the old one is freed, and every pane then drops what
+        // it drew with the old one.
+        var old = termview.font;
+        termview.font = termview.Font.init(name);
+        if (old) |*f| f.deinit();
         for (a.hosts.items) |h| h.workspace.fontChanged();
     }
 
@@ -2703,8 +2707,8 @@ pub const App = struct {
     pub fn terminalChanged(a: *App) void {
         termview.pad_x = settings.current.pad_x;
         termview.pad_y = settings.current.pad_y;
-        if (a.blink_timer != 0) _ = glib.Source.remove(a.blink_timer);
-        a.blink_timer = glib.timeoutAdd(@intFromFloat(settings.current.cursor_blink_ms), &blinkTick, a);
+        // The cursor's blink starts over at the new interval the next time it's drawn.
+        termview.blinkReset();
         for (a.hosts.items) |h| {
             var it = h.server.streams.valueIterator();
             while (it.next()) |st| st.*.hostColorsChanged();
@@ -2775,14 +2779,6 @@ fn useAppIcon() void {
         defer gpa.free(png);
         @import("macos.zig").setDockIcon(png);
     }
-}
-
-/// Blinks the cursor of the pane with the keyboard, when the setting and the program allow it.
-fn blinkTick(data: ?*anyopaque) callconv(.c) c_int {
-    const a: *App = @ptrCast(@alignCast(data.?));
-    termview.blink_on = !termview.blink_on;
-    if (a.workspace) |ws| if (ws.focusedView()) |tv| if (tv.widget().hasFocus() != 0) tv.widget().queueDraw();
-    return 1;
 }
 
 var mode_app: ?*App = null;

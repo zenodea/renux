@@ -14,13 +14,16 @@ const pangocairo = @import("pangocairo");
 const gsk = @import("gsk");
 const graphene = @import("graphene");
 const keys = @import("keys.zig");
-const term = @import("term.zig");
-const term_mod = term;
+// Not `term`: inside TermView that name is the method that finds the pane's terminal.
+const term_mod = @import("term.zig");
 const Server = @import("server.zig").Server;
+const Binding = @import("server.zig").Binding;
 const Stream = @import("stream.zig").Stream;
 const boxdraw = @import("boxdraw.zig");
 const links = @import("links.zig");
 const programs = @import("programs.zig");
+const settings = @import("settings.zig");
+const fonts = @import("fonts.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -36,11 +39,12 @@ pub const Font = struct {
     bold: *pango.FontDescription,
     italic: *pango.FontDescription,
     bold_italic: *pango.FontDescription,
+    /// What the font is (family, size, style), for telling drawings made with another font apart.
+    id: u64,
 
     pub fn init(name: [:0]const u8) Font {
         const desc = pango.FontDescription.fromString(name.ptr);
         // Nerd Font icons fall back to the symbols that come with Compy, unless the font has them.
-        const fonts = @import("fonts.zig");
         if (fonts.registered) if (desc.getFamily()) |fam| {
             const family = std.mem.span(fam);
             if (std.mem.indexOf(u8, family, "Nerd") == null) {
@@ -66,11 +70,20 @@ pub const Font = struct {
         italic.setStyle(.italic);
         const bold_italic = bold.copy().?;
         bold_italic.setStyle(.italic);
-        return .{ .regular = regular, .bold = bold, .italic = italic, .bold_italic = bold_italic };
+        return .{ .regular = regular, .bold = bold, .italic = italic, .bold_italic = bold_italic, .id = regular.hash() };
     }
 
-    fn pick(f: Font, flags: term.Flags) *pango.FontDescription {
-        if (@import("settings.zig").current.bold_italic == .plain) return f.regular;
+    /// Frees the four descriptions. Layouts copy what they're given, so nothing else holds them.
+    pub fn deinit(f: *Font) void {
+        f.regular.free();
+        f.bold.free();
+        f.italic.free();
+        f.bold_italic.free();
+        f.* = undefined;
+    }
+
+    fn pick(f: Font, flags: term_mod.Flags) *pango.FontDescription {
+        if (settings.current.bold_italic == .plain) return f.regular;
         if (flags.bold and flags.italic) return f.bold_italic;
         if (flags.bold) return f.bold;
         if (flags.italic) return f.italic;
@@ -109,7 +122,7 @@ const Canvas = extern struct {
     }
 
     fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
-        if (self.view) |v| v.snapshotTerm(sn);
+        if (self.view) |v| snapshotTermImpl(v, sn);
     }
 
     fn sizeAllocate(self: *Self, width: c_int, height: c_int, _: c_int) callconv(.c) void {
@@ -159,16 +172,10 @@ pub var on_chord_changed: ?*const fn (pending: []const u8) void = null;
 pub const Hint = struct { key: []const u8, action: []const u8, args: ?[]const u8, more: bool };
 
 /// The keys that can follow the sequence typed so far, from the config's bindings, each once.
-pub fn nextKeys(binds: []const @import("server.zig").Binding, out: *std.ArrayList(Hint)) void {
+pub fn nextKeys(binds: []const Binding, out: *std.ArrayList(Hint)) void {
     if (chord_len == 0) return;
     for (binds) |*b| {
-        if (b.keys.len <= chord_len) continue;
-        var same = true;
-        for (0..chord_len) |i| if (!keys.sameKey(b.keys[i], chord_keys[i][0..chord_lens[i]])) {
-            same = false;
-            break;
-        };
-        if (!same) continue;
+        if (!continuesChord(b)) continue;
         const key = b.keys[chord_len];
         const more = b.keys.len > chord_len + 1;
         const dup = for (out.items) |*h| {
@@ -179,6 +186,13 @@ pub fn nextKeys(binds: []const @import("server.zig").Binding, out: *std.ArrayLis
         } else false;
         if (!dup) out.append(gpa, .{ .key = key, .action = b.action, .args = b.args, .more = more }) catch return;
     }
+}
+
+/// Whether a binding starts with the keys typed so far and has at least one more.
+fn continuesChord(b: *const Binding) bool {
+    if (b.keys.len <= chord_len) return false;
+    for (0..chord_len) |i| if (!keys.sameKey(b.keys[i], chord_keys[i][0..chord_lens[i]])) return false;
+    return true;
 }
 
 fn chordChanged() void {
@@ -203,12 +217,47 @@ pub fn keyMode() []const u8 {
 /// Each pane's zoom, by block, so a pane keeps it when shown again.
 var zooms: std.StringHashMapUnmanaged(f64) = .empty;
 /// Whether a blinking cursor is in its visible half.
-pub var blink_on = true;
+var blink_on = true;
+/// The cursor blinks on a timer that only runs while a pane is drawing a blinking cursor: with
+/// blinking off, no pane focused or the window hidden, nothing wakes the app up.
+var blink_timer: c_uint = 0;
+/// The pane whose cursor blinks, and whether it drew that cursor since the last tick.
+var blink_view: ?*TermView = null;
+var blink_drawn = false;
+
+/// Called by the pane drawing a blinking cursor, which keeps the timer going.
+fn blinkWanted(v: *TermView) void {
+    blink_view = v;
+    blink_drawn = true;
+    if (blink_timer == 0) blink_timer = glib.timeoutAdd(@intFromFloat(std.math.clamp(settings.current.cursor_blink_ms, 50, 10_000)), &blinkTick, null);
+}
+
+fn blinkTick(_: ?*anyopaque) callconv(.c) c_int {
+    // Nobody drew a blinking cursor since the last tick: stop until one is drawn again.
+    if (!blink_drawn or blink_view == null) {
+        blink_timer = 0;
+        blink_on = true;
+        return 0;
+    }
+    blink_drawn = false;
+    blink_on = !blink_on;
+    blink_view.?.widget().queueDraw();
+    return 1;
+}
+
+/// Starts the blink over, such as when its interval changes. The next cursor drawn restarts it.
+pub fn blinkReset() void {
+    if (blink_timer != 0) _ = glib.Source.remove(blink_timer);
+    blink_timer = 0;
+    blink_on = true;
+}
 
 pub const TermView = struct {
     canvas: *Canvas,
     /// Row drawings by position in the view; the last slot is the partly shown row above it.
     rows_cache: std.ArrayList(RowCache) = .empty,
+    /// The drawings of the frame before, which a row that only moved takes its drawing from.
+    rows_prev: std.ArrayList(RowCache) = .empty,
     layout: ?*pango.Layout = null,
     /// The letter spacing the layout was given, in pixels.
     spacing: f64 = 0,
@@ -245,7 +294,10 @@ pub const TermView = struct {
     last_frame_us: i64 = 0,
     last_total: u64 = 0,
     draw_frac: f64 = 0,
-    listening: bool = false,
+    /// Where the pointer is over the pane, so the wheel scrolls what's under it.
+    pointer: [2]f64 = .{ 0, 0 },
+    /// Text an input method is still composing, shown at the cursor until it's committed.
+    preedit: ?[:0]u8 = null,
     /// This pane's text size relative to the setting, and its font at that size.
     zoom: f64 = 1,
     own_font: ?Font = null,
@@ -303,8 +355,16 @@ pub const TermView = struct {
         v.im = gtk.IMMulticontext.new();
         v.im.as(gtk.IMContext).setClientWidget(w);
         _ = gtk.IMContext.signals.commit.connect(v.im.as(gtk.IMContext), *TermView, &onCommit, v, .{});
+        // What's being composed (pinyin before a character is picked, a dead key's accent) is
+        // drawn at the cursor, or the person would type blind until it commits.
+        _ = gtk.IMContext.signals.preedit_changed.connect(v.im.as(gtk.IMContext), *TermView, &onPreedit, v, .{});
+        _ = gtk.IMContext.signals.preedit_end.connect(v.im.as(gtk.IMContext), *TermView, &onPreedit, v, .{});
         key.setImContext(v.im.as(gtk.IMContext));
         w.addController(key.as(gtk.EventController));
+
+        const motion = gtk.EventControllerMotion.new();
+        _ = gtk.EventControllerMotion.signals.motion.connect(motion, *TermView, &onMotion, v, .{});
+        w.addController(motion.as(gtk.EventController));
 
         const scroll = gtk.EventControllerScroll.new(.{ .vertical = true, .kinetic = true });
         _ = gtk.EventControllerScroll.signals.scroll.connect(scroll, *TermView, &onScroll, v, .{});
@@ -335,10 +395,7 @@ pub const TermView = struct {
 
         if (zooms.get(block_id)) |z| v.setZoom(z);
         v.measure();
-        if (server.terminal(session_id, block_id)) |st| {
-            st.addListener(.{ .ctx = v, .changed = changed });
-            v.listening = true;
-        }
+        if (server.terminal(session_id, block_id)) |st| st.addListener(.{ .ctx = v, .changed = changed });
         return v;
     }
 
@@ -426,10 +483,14 @@ pub const TermView = struct {
             scroll_ticking -= 1;
         }
         v.canvas.view = null;
+        if (blink_view == v) blink_view = null;
+        if (v.own_font) |*f| f.deinit();
+        if (v.preedit) |p| gpa.free(p);
         v.dropRows();
         for (v.textures.items) |e| e.texture.as(gobject.Object).unref();
         v.textures.deinit(gpa);
         v.rows_cache.deinit(gpa);
+        v.rows_prev.deinit(gpa);
         if (v.layout) |l| l.as(gobject.Object).unref();
         if (v.stream()) |st| st.removeListener(v);
         gpa.free(v.session_id);
@@ -447,7 +508,7 @@ pub const TermView = struct {
         var w: c_int = 0;
         var h: c_int = 0;
         layout.getSize(&w, &h);
-        const prefs = &@import("settings.zig").current;
+        const prefs = &settings.current;
         const natural_h = @ceil(@as(f64, @floatFromInt(h)) / pango.SCALE);
         v.cell_w = @max(1, @as(f64, @floatFromInt(w)) / pango.SCALE / 40.0 + prefs.letter_spacing);
         v.cell_h = @max(1, @round(natural_h * prefs.line_height));
@@ -463,6 +524,7 @@ pub const TermView = struct {
 
     fn setZoom(v: *TermView, z: f64) void {
         v.zoom = std.math.clamp(z, 0.4, 4);
+        if (v.own_font) |*old| old.deinit();
         v.own_font = if (@abs(v.zoom - 1) < 0.01) null else if (font) |f| f.scaled(v.zoom) else null;
     }
 
@@ -479,6 +541,8 @@ pub const TermView = struct {
 
     pub fn fontChanged(v: *TermView) void {
         if (v.own_font != null) v.setZoom(v.zoom);
+        // Rows were drawn with the old font, which may be freed by now.
+        v.dropRows();
         v.measure();
         v.want_cols = 0;
         v.want_rows = 0;
@@ -490,8 +554,13 @@ pub const TermView = struct {
     // Size.
 
     fn resized(v: *TermView, width: c_int, height: c_int) void {
-        const cols: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(width)) - 2 * pad_x) / v.cell_w)));
-        const rows: u16 = @intFromFloat(@max(1, @floor((@as(f64, @floatFromInt(height)) - 2 * pad_y) / v.cell_h)));
+        const fit_cols = @floor((@as(f64, @floatFromInt(width)) - 2 * pad_x) / v.cell_w);
+        const fit_rows = @floor((@as(f64, @floatFromInt(height)) - 2 * pad_y) / v.cell_h);
+        // A pane with no room yet, or squeezed to nothing on its way to the tray, isn't a size
+        // to tell the program about: it would reflow its screen to one cell.
+        if (!(fit_cols >= 2 and fit_rows >= 1)) return;
+        const cols: u16 = @intFromFloat(@min(fit_cols, 65535));
+        const rows: u16 = @intFromFloat(@min(fit_rows, 65535));
         if (cols == v.want_cols and rows == v.want_rows) return;
         v.want_cols = cols;
         v.want_rows = rows;
@@ -526,14 +595,29 @@ pub const TermView = struct {
 
     // Input.
 
-    fn onKey(_: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: gdk.ModifierType, v: *TermView) callconv(.c) c_int {
+    fn onKey(_: *gtk.EventControllerKey, keyval: c_uint, keycode: c_uint, state: gdk.ModifierType, v: *TermView) callconv(.c) c_int {
         const bits: u32 = @bitCast(state);
-        return v.handleKey(keyval, keys.modsFromGdk(bits));
+        const mods = keys.modsFromGdk(bits);
+        return v.handleKey(v.latinKey(keyval, keycode, mods), mods);
     }
 
-    /// A key press, from the keyboard or the development script.
-    /// Development: draws this pane offscreen at twice its size, as on a Retina screen, and
-    /// reports the average time per frame.
+    /// On a layout without Latin letters, Ctrl+C arrives as Ctrl+с, which no program or binding
+    /// knows. Such combinations take the symbol the same key has in the first Latin layout.
+    fn latinKey(v: *TermView, keyval: c_uint, keycode: c_uint, mods: u4) c_uint {
+        if (!keys.needsLatin(keyval, gdk.keyvalToUnicode(keyval), mods)) return keyval;
+        var map: [*]gdk.KeymapKey = undefined;
+        var vals: [*]c_uint = undefined;
+        var n: c_int = 0;
+        if (v.widget().getDisplay().mapKeycode(keycode, &map, &vals, &n) == 0) return keyval;
+        defer glib.free(@ptrCast(map));
+        defer glib.free(@ptrCast(vals));
+        var levels: [32]keys.Level = undefined;
+        const count = @min(@as(usize, @intCast(@max(0, n))), levels.len);
+        for (0..count) |i| levels[i] = .{ .group = map[i].f_group, .level = map[i].f_level, .keyval = vals[i] };
+        return keys.latinKeyval(levels[0..count], mods & keys.shift != 0) orelse keyval;
+    }
+
+    /// Development: draws this pane offscreen and reports the average time per frame.
     pub fn bench(v: *TermView) void {
         const w = v.widget().getWidth();
         const h = v.widget().getHeight();
@@ -541,29 +625,29 @@ pub const TermView = struct {
         const first = glib.getMonotonicTime();
         {
             const sn = gtk.Snapshot.new();
-            v.snapshotTerm(sn);
+            snapshotTermImpl(v, sn);
             if (sn.freeToNode()) |n| n.unref();
         }
         const cold = glib.getMonotonicTime() - first;
         const started = glib.getMonotonicTime();
         for (0..50) |_| {
             const sn = gtk.Snapshot.new();
-            v.snapshotTerm(sn);
+            snapshotTermImpl(v, sn);
             if (sn.freeToNode()) |n| n.unref();
         }
         std.log.info("bench: {d}x{d} pane, {d} us for a new screen, {d} us per unchanged frame", .{ w, h, cold, @divTrunc(glib.getMonotonicTime() - started, 50) });
-    }
-
-    fn snapshotTerm(v: *TermView, sn: *gtk.Snapshot) void {
-        snapshotTermImpl(v, sn);
     }
 
     /// Forgets every row's drawing, such as when the font changes.
     pub fn dropRows(v: *TermView) void {
         for (v.rows_cache.items) |e| if (e.node) |n| n.unref();
         v.rows_cache.clearRetainingCapacity();
+        for (v.rows_prev.items) |e| if (e.node) |n| n.unref();
+        v.rows_prev.clearRetainingCapacity();
     }
 
+    /// Start-up: lets terminals decode the PNGs programs send as images, and turns on the timing
+    /// log when COMPY_PERF is set.
     pub fn enablePerfLog() void {
         if (!png_decoder_set) {
             png_decoder_set = true;
@@ -572,8 +656,10 @@ pub const TermView = struct {
         perf_log = std.c.getenv("COMPY_PERF") != null;
     }
 
-    pub fn handleKey(v: *TermView, keyval: c_uint, mods: u4) c_int {
-        if (keys.isModifier(keyval)) return 0;
+    /// A key press, from the keyboard or the development script.
+    pub fn handleKey(v: *TermView, keyval_in: c_uint, mods: u4) c_int {
+        if (keys.isModifier(keyval_in)) return 0;
+        const keyval = keys.uncapsed(keyval_in, mods);
         if (perf_log) {
             key_at = glib.getMonotonicTime();
             echo_at = 0;
@@ -649,16 +735,10 @@ pub const TermView = struct {
             chordChanged();
             return true;
         }
-        var exact: ?*const @import("server.zig").Binding = null;
+        var exact: ?*const Binding = null;
         var longer = false;
         for (binds) |*b| {
-            if (b.keys.len < chord_len + 1) continue;
-            var same = true;
-            for (0..chord_len) |i| if (!keys.sameKey(b.keys[i], chord_keys[i][0..chord_lens[i]])) {
-                same = false;
-                break;
-            };
-            if (!same or !keys.sameKey(b.keys[chord_len], name)) continue;
+            if (!continuesChord(b) or !keys.sameKey(b.keys[chord_len], name)) continue;
             if (b.keys.len == chord_len + 1) exact = b else longer = true;
         }
         if (exact) |b| {
@@ -683,14 +763,19 @@ pub const TermView = struct {
         return false;
     }
 
-    fn runBinding(v: *TermView, b: *const @import("server.zig").Binding) void {
+    fn runBinding(v: *TermView, b: *const Binding) void {
         if (std.mem.eql(u8, b.action, "client.key.forward")) return;
-        // Lua functions and block actions run on the server; pane and client actions are this
-        // app's, as are the session ones Rex leaves to each app.
-        const local = !b.lua and (std.mem.startsWith(u8, b.action, "pane.") or std.mem.startsWith(u8, b.action, "client.") or std.mem.startsWith(u8, b.action, "session."));
-        if (local) {
-            if (!v.server.performLocal(v.session_id, b.action, b.args)) v.server.notifyMessage("Compy can't do that action yet");
-        } else v.server.runAction(v.session_id, v.block_id, b.action, b.args);
+        v.runAction(b.action, b.args, b.lua);
+    }
+
+    /// Runs what a key is bound to. Lua functions and block actions run on the server; pane and
+    /// client actions are this app's, as are the session ones Rex leaves to each app.
+    fn runAction(v: *TermView, action: []const u8, args: ?[]const u8, lua: bool) void {
+        const local = !lua and for ([_][]const u8{ "pane.", "client.", "session." }) |prefix| {
+            if (std.mem.startsWith(u8, action, prefix)) break true;
+        } else false;
+        if (!local) return v.server.runAction(v.session_id, v.block_id, action, args);
+        if (!v.server.performLocal(v.session_id, action, args)) v.server.notifyMessage("Compy can't do that action yet");
     }
 
     fn modeKey(v: *TermView, keyval: c_uint, mods: u4) void {
@@ -699,11 +784,7 @@ pub const TermView = struct {
         for (v.server.mode_bindings) |b| {
             if (!std.mem.eql(u8, b.mode, keyMode()) or !std.mem.eql(u8, b.keys, name)) continue;
             if (std.mem.eql(u8, b.action, "client.mode.exit")) return setKeyMode("");
-            // Pane and client actions belong to this app; the rest run on the server.
-            if (std.mem.startsWith(u8, b.action, "pane.") or std.mem.startsWith(u8, b.action, "client.")) {
-                if (!v.server.performLocal(v.session_id, b.action, b.args)) v.server.notifyMessage("Compy can't do that action yet");
-            } else v.server.runAction(v.session_id, v.block_id, b.action, b.args);
-            return;
+            return v.runAction(b.action, b.args, false);
         }
         // Escape always leaves a mode, even one without a binding for it.
         if (keyval == 0xff1b) setKeyMode("");
@@ -743,14 +824,37 @@ pub const TermView = struct {
         t.scrollPrompt(delta);
         _ = t.render(true);
         // Match the smooth-scroll position to where the jump landed.
-        v.scroll_px = @as(f64, @floatFromInt(t.frame.scroll_total -| t.frame.scroll_len -| t.frame.scroll_offset)) * v.cell_h;
+        v.scroll_px = @as(f64, @floatFromInt(t.frame.rowsUp())) * v.cell_h;
         v.scroll_target = v.scroll_px;
         v.widget().queueDraw();
+    }
+
+    /// Moves the terminal's viewport to where the smooth scroll is, and says how many whole rows
+    /// up into history that is.
+    fn syncScroll(v: *TermView, t: *term_mod.Term) f64 {
+        const rows_up = @floor(v.scroll_px / v.cell_h);
+        const current_up: f64 = @floatFromInt(t.frame.rowsUp());
+        if (current_up != rows_up) {
+            t.scroll(@intFromFloat(current_up - rows_up));
+            _ = t.render(true);
+        }
+        return rows_up;
     }
 
     /// For the development script: text as if the input method committed it.
     pub fn commitText(v: *TermView, text: [:0]const u8) void {
         onCommit(v.im.as(gtk.IMContext), text.ptr, v);
+    }
+
+    /// The input method's unfinished text changed, or composing ended.
+    fn onPreedit(im: *gtk.IMContext, v: *TermView) callconv(.c) void {
+        var str: [*:0]u8 = undefined;
+        im.getPreeditString(&str, null, null);
+        defer glib.free(str);
+        const text = std.mem.span(str);
+        if (v.preedit) |old| gpa.free(old);
+        v.preedit = if (text.len == 0) null else gpa.dupeSentinel(u8, text, 0) catch null;
+        v.widget().queueDraw();
     }
 
     /// Text from the input method: plain typing, a composed é, or a word from an input method.
@@ -800,7 +904,7 @@ pub const TermView = struct {
 
     /// Lights the pane up briefly, for the bell.
     pub fn flash(v: *TermView) void {
-        if (!@import("settings.zig").current.visual_bell) return;
+        if (!settings.current.visual_bell) return;
         v.flash_until = glib.getMonotonicTime() + 180_000;
         v.widget().queueDraw();
         if (v.flash_timer != 0) _ = glib.Source.remove(v.flash_timer);
@@ -815,14 +919,19 @@ pub const TermView = struct {
     }
 
     pub fn pasteClipboard(v: *TermView) void {
-        const clipboard = v.widget().getClipboard();
+        v.pasteFrom(v.widget().getClipboard());
+    }
+
+    /// Pastes a clipboard's text into this pane, once the text arrives.
+    fn pasteFrom(v: *TermView, clipboard: *gdk.Clipboard) void {
         // The view could be gone when the text arrives, so carry the ids instead.
         const ids = gpa.create(PasteTarget) catch return;
-        ids.* = .{
-            .server = v.server,
-            .session_id = gpa.dupe(u8, v.session_id) catch return,
-            .block_id = gpa.dupe(u8, v.block_id) catch return,
+        const session_id = gpa.dupe(u8, v.session_id) catch return gpa.destroy(ids);
+        const block_id = gpa.dupe(u8, v.block_id) catch {
+            gpa.free(session_id);
+            return gpa.destroy(ids);
         };
+        ids.* = .{ .server = v.server, .session_id = session_id, .block_id = block_id };
         clipboard.readTextAsync(null, &pasted, ids);
     }
 
@@ -835,7 +944,7 @@ pub const TermView = struct {
         const win = @as(*gtk.Application, @ptrCast(app)).getActiveWindow() orelse return;
         var buf: [96]u8 = undefined;
         const heading = std.fmt.bufPrintSentinel(&buf, "Paste {d} lines?", .{lines}, 0) catch return;
-        const dialog = @import("adw").AlertDialog.new(heading.ptr, "This program doesn't know it's a paste, so each line may run as a command.");
+        const dialog = adw.AlertDialog.new(heading.ptr, "This program doesn't know it's a paste, so each line may run as a command.");
         dialog.addResponse("cancel", "Cancel");
         dialog.addResponse("paste", "Paste");
         dialog.setResponseAppearance("paste", .destructive);
@@ -847,11 +956,11 @@ pub const TermView = struct {
             .block_id = gpa.dupe(u8, block_id) catch return,
             .text = gpa.dupe(u8, text) catch return,
         };
-        _ = @import("adw").AlertDialog.signals.response.connect(dialog, *PendingPaste, &pasteAnswered, pending, .{});
-        dialog.as(@import("adw").Dialog).present(win.as(gtk.Widget));
+        _ = adw.AlertDialog.signals.response.connect(dialog, *PendingPaste, &pasteAnswered, pending, .{});
+        dialog.as(adw.Dialog).present(win.as(gtk.Widget));
     }
 
-    fn pasteAnswered(_: *@import("adw").AlertDialog, response: [*:0]const u8, p: *PendingPaste) callconv(.c) void {
+    fn pasteAnswered(_: *adw.AlertDialog, response: [*:0]const u8, p: *PendingPaste) callconv(.c) void {
         if (std.mem.eql(u8, std.mem.span(response), "paste")) p.server.paste(p.session_id, p.block_id, p.text);
         gpa.free(p.session_id);
         gpa.free(p.block_id);
@@ -873,7 +982,7 @@ pub const TermView = struct {
         // Without bracketed paste, each pasted line runs as typed, so several lines ask first.
         const lines = std.mem.count(u8, std.mem.trimEnd(u8, body, "\n"), "\n") + 1;
         const bracketed = if (t.server.streams.get(t.block_id)) |st| if (st.term) |tm| tm.frame.bracketed_paste else false else false;
-        if (lines > 1 and !bracketed and @import("settings.zig").current.paste_warning) return confirmPaste(t.server, t.session_id, t.block_id, body, lines);
+        if (lines > 1 and !bracketed and settings.current.paste_warning) return confirmPaste(t.server, t.session_id, t.block_id, body, lines);
         t.server.paste(t.session_id, t.block_id, body);
     }
 
@@ -882,17 +991,20 @@ pub const TermView = struct {
         const t = st.term orelse return 0;
         // Ctrl and the wheel size the text.
         const bits: u32 = @bitCast(ctl.as(gtk.EventController).getCurrentEventState());
-        if (keys.modsFromGdk(bits) & keys.ctrl != 0) {
+        const mods = keys.modsFromGdk(bits);
+        if (mods & keys.ctrl != 0) {
             if (dy != 0) v.zoomBy(if (dy < 0) 1 else -1);
             return 1;
         }
-        // Programs that take the mouse, or use the whole screen, scroll themselves.
+        // Programs that take the mouse, or use the whole screen, scroll themselves: by lines,
+        // at the cell under the pointer. A touchpad reports pixels, which become lines here.
         if (t.frame.mouse or t.frame.alt_screen) {
-            v.scroll_rest += dy;
+            v.scroll_rest += if (ctl.getUnit() == .surface) dy / v.cell_h else dy;
             const lines = @trunc(v.scroll_rest);
             if (lines == 0) return 1;
             v.scroll_rest -= lines;
-            v.server.sendWheel(v.session_id, v.block_id, lines, 0, 0);
+            const cell = v.cellAt(v.pointer[0], v.pointer[1]);
+            v.server.sendWheel(v.session_id, v.block_id, lines, @min(cell[0], t.frame.cols -| 1), @min(cell[1], t.frame.rows -| 1), keys.modsString(mods));
             return 1;
         }
         v.scroll_velocity = 0;
@@ -908,6 +1020,10 @@ pub const TermView = struct {
         v.startScrollTick();
         v.widget().queueDraw();
         return 1;
+    }
+
+    fn onMotion(_: *gtk.EventControllerMotion, x: f64, y: f64, v: *TermView) callconv(.c) void {
+        v.pointer = .{ x, y };
     }
 
     /// A touchpad flick carries on, slowing down.
@@ -926,6 +1042,9 @@ pub const TermView = struct {
     fn clampScroll(v: *TermView) void {
         const max = v.maxScroll();
         v.scroll_target = std.math.clamp(v.scroll_target, 0, max);
+        // A flick that reaches either end has nowhere left to go; carrying its speed on would
+        // only keep the pane redrawing.
+        if (v.scroll_px <= 0 or v.scroll_px >= max) v.scroll_velocity = 0;
         v.scroll_px = std.math.clamp(v.scroll_px, 0, max);
     }
 
@@ -1024,7 +1143,7 @@ pub const TermView = struct {
         if (v.programHasMouse(mods)) {
             v.held_button = buttonName(gesture);
             v.last_motion = cell;
-            v.server.sendMouse(v.session_id, v.block_id, "press", v.held_button, cell[0], cell[1]);
+            v.server.sendMouse(v.session_id, v.block_id, "press", v.held_button, cell[0], cell[1], keys.modsString(mods));
             return;
         }
         if (button == 2) return v.pastePrimary();
@@ -1054,7 +1173,7 @@ pub const TermView = struct {
         const mods = modsNow(gesture);
         const cell = v.cellAt(x, y);
         if (v.programHasMouse(mods)) {
-            v.server.sendMouse(v.session_id, v.block_id, "release", buttonName(gesture), cell[0], cell[1]);
+            v.server.sendMouse(v.session_id, v.block_id, "release", buttonName(gesture), cell[0], cell[1], keys.modsString(mods));
             return;
         }
         if (gesture.as(gtk.GestureSingle).getCurrentButton() != 1 or n_press != 1 or v.selecting) return;
@@ -1086,10 +1205,13 @@ pub const TermView = struct {
                 const cp = f.cell(x, y).cp;
                 r[x] = if (cp == 0 or cp > 0x10ffff) ' ' else @intCast(cp);
             }
-            rows.append(gpa, r) catch return null;
+            rows.append(gpa, r) catch {
+                gpa.free(r);
+                return null;
+            };
         }
         const casted: []const []const u21 = @ptrCast(rows.items);
-        var link = (links.at(gpa, casted, col, row) catch return null) orelse return null;
+        var link = (links.at(gpa, casted, f.wraps.items, col, row) catch return null) orelse return null;
         defer link.deinit(gpa);
         return gpa.dupeSentinel(u8, link.url, 0) catch null;
     }
@@ -1118,7 +1240,7 @@ pub const TermView = struct {
             const cell = v.cellAt(x, y);
             if (cell[0] == v.last_motion[0] and cell[1] == v.last_motion[1]) return;
             v.last_motion = cell;
-            v.server.sendMouse(v.session_id, v.block_id, "motion", v.held_button, cell[0], cell[1]);
+            v.server.sendMouse(v.session_id, v.block_id, "motion", v.held_button, cell[0], cell[1], keys.modsString(modsNow(gesture)));
             return;
         }
         if (gesture.as(gtk.GestureSingle).getCurrentButton() != 1) return;
@@ -1169,12 +1291,7 @@ pub const TermView = struct {
         v.scroll_px = std.math.clamp(v.scroll_px - v.edge_scroll * v.cell_h, 0, v.maxScroll());
         v.scroll_target = v.scroll_px;
         _ = t.render(true);
-        const rows_up = @floor(v.scroll_px / v.cell_h);
-        const current_up: f64 = @floatFromInt(t.frame.scroll_total -| t.frame.scroll_len -| t.frame.scroll_offset);
-        if (current_up != rows_up) {
-            t.scroll(@intFromFloat(current_up - rows_up));
-            _ = t.render(true);
-        }
+        _ = v.syncScroll(t);
         const h: f64 = @floatFromInt(v.widget().getHeight());
         v.extendTo(t, v.edge_point[0], std.math.clamp(v.edge_point[1], 0, h - 1), false);
         return 1;
@@ -1204,10 +1321,16 @@ pub const TermView = struct {
         v.menu_link = v.linkAt(t, cell[0], cell[1]);
         const sel = t.selectionText();
         defer if (sel) |s_| gpa.free(s_);
+        const target = gpa.dupeSentinel(u8, v.block_id, 0) catch return;
+        defer gpa.free(target);
+        // Each object below is handed to an owner (the widget, the menu, the popover), which
+        // keeps its own reference; ours is dropped so a right-click leaves nothing behind.
         if (v.menu == null) {
             const group = gio.SimpleActionGroup.new();
+            defer group.unref();
             inline for (.{ .{ "copy", menuCopy }, .{ "paste", menuPaste }, .{ "open-link", menuOpenLink }, .{ "copy-link", menuCopyLink }, .{ "copy-output", menuCopyOutput } }) |e| {
                 const action = gio.SimpleAction.new(e[0], null);
+                defer action.unref();
                 const Thunk = struct {
                     fn run(_: *gio.SimpleAction, _: ?*glib.Variant, tv: *TermView) callconv(.c) void {
                         e[1](tv);
@@ -1219,7 +1342,9 @@ pub const TermView = struct {
             v.widget().insertActionGroup("pane", group.as(gio.ActionGroup));
         }
         const menu = gio.Menu.new();
+        defer menu.unref();
         const edit = gio.Menu.new();
+        defer edit.unref();
         if (sel != null) edit.append("Copy", "pane.copy");
         edit.append("Paste", "pane.paste");
         v.menu_cell = cell;
@@ -1227,15 +1352,16 @@ pub const TermView = struct {
         menu.appendSection(null, edit.as(gio.MenuModel));
         if (v.menu_link != null) {
             const link = gio.Menu.new();
+            defer link.unref();
             link.append("Open Link", "pane.open-link");
             link.append("Copy Link", "pane.copy-link");
             menu.appendSection(null, link.as(gio.MenuModel));
         }
         const layout = gio.Menu.new();
-        const target = gpa.dupeSentinel(u8, v.block_id, 0) catch return;
-        defer gpa.free(target);
+        defer layout.unref();
         inline for (.{ .{ "Split Right", "app.pane-split-right" }, .{ "Split Down", "app.pane-split-down" }, .{ "Float or Dock", "app.pane-float" }, .{ "Zoom", "app.pane-zoom" }, .{ "Close Pane", "app.pane-close" } }) |e| {
             const item = gio.MenuItem.new(e[0], null);
+            defer item.unref();
             item.setActionAndTargetValue(e[1], glib.Variant.newString(target.ptr));
             layout.appendItem(item);
         }
@@ -1286,14 +1412,11 @@ pub const TermView = struct {
         const plain = for ([_][]const u8{ "http", "https", "mailto", "file" }) |w| {
             if (std.ascii.eqlIgnoreCase(scheme, w)) break true;
         } else false;
-        const trusted = for (@import("settings.zig").current.trusted_schemes.items) |t| {
+        const trusted = for (settings.current.trusted_schemes.items) |t| {
             if (std.ascii.eqlIgnoreCase(t, scheme)) break true;
         } else false;
         const root: ?*gtk.Window = @ptrCast(@alignCast(v.widget().getRoot()));
-        if (plain or trusted) {
-            gtk.UriLauncher.new(url.ptr).launch(root, null, null, null);
-            return;
-        }
+        if (plain or trusted) return launchUri(url.ptr, root);
         const body = std.fmt.allocPrintSentinel(gpa, "{s}", .{url}, 0) catch return;
         defer gpa.free(body);
         const heading = std.fmt.allocPrintSentinel(gpa, "Open a {s} link?", .{scheme}, 0) catch return;
@@ -1312,17 +1435,24 @@ pub const TermView = struct {
                 if (std.mem.eql(u8, r, "cancel")) return;
                 const l = std.mem.span(link);
                 if (std.mem.eql(u8, r, "always")) {
-                    const st = @import("settings.zig");
+                    const st = settings;
                     const sch = l[0 .. std.mem.indexOfScalar(u8, l, ':') orelse return];
                     st.current.trusted_schemes.append(gpa, gpa.dupe(u8, sch) catch return) catch return;
                     st.save();
                 }
                 const w: ?*gtk.Window = @ptrCast(@alignCast(d.as(gtk.Widget).getRoot()));
-                gtk.UriLauncher.new(link).launch(w, null, null, null);
+                launchUri(link, w);
             }
         };
         _ = adw.AlertDialog.signals.response.connect(dialog, [*:0]u8, &Done.run, keep.ptr, .{});
         dialog.as(adw.Dialog).present(v.widget());
+    }
+
+    /// Hands a link to the desktop. The launch holds the launcher until it's done.
+    fn launchUri(uri: [*:0]const u8, parent: ?*gtk.Window) void {
+        const launcher = gtk.UriLauncher.new(uri);
+        defer launcher.unref();
+        launcher.launch(parent, null, null, null);
     }
 
     fn menuCopyLink(v: *TermView) void {
@@ -1334,7 +1464,7 @@ pub const TermView = struct {
     /// the clipboard.
     fn selectionMade(v: *TermView) void {
         v.copySelection(true);
-        if (@import("settings.zig").current.copy_on_select) v.copySelection(false);
+        if (settings.current.copy_on_select) v.copySelection(false);
     }
 
     /// Copies the selection to the clipboard, or to the primary selection that middle-click pastes.
@@ -1348,14 +1478,7 @@ pub const TermView = struct {
     }
 
     fn pastePrimary(v: *TermView) void {
-        const clipboard = v.widget().getPrimaryClipboard();
-        const ids = gpa.create(PasteTarget) catch return;
-        ids.* = .{
-            .server = v.server,
-            .session_id = gpa.dupe(u8, v.session_id) catch return,
-            .block_id = gpa.dupe(u8, v.block_id) catch return,
-        };
-        clipboard.readTextAsync(null, &pasted, ids);
+        v.pasteFrom(v.widget().getPrimaryClipboard());
     }
 
     fn onFocusIn(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
@@ -1365,7 +1488,11 @@ pub const TermView = struct {
     }
 
     fn onFocusOut(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
+        // Composing doesn't carry over to another pane: what was unfinished is dropped.
+        v.im.as(gtk.IMContext).reset();
         v.im.as(gtk.IMContext).focusOut();
+        if (v.preedit) |p| gpa.free(p);
+        v.preedit = null;
         v.server.sendFocus(v.session_id, v.block_id, false);
         v.widget().queueDraw();
     }
@@ -1394,7 +1521,7 @@ fn rgba(color: u32, alpha: f64) gdk.RGBA {
 
 /// Draws the images on one side of the text: under it, or over it. Each image's texture is
 /// made once per image and generation, which changes when a program sends new pixels.
-fn drawImages(v: *TermView, sn: *gtk.Snapshot, t: *term.Term, above: bool, frac: f64) void {
+fn drawImages(v: *TermView, sn: *gtk.Snapshot, t: *term_mod.Term, above: bool, frac: f64) void {
     for (t.images.items) |im| {
         if (im.above_text != above or im.sw == 0 or im.sh == 0 or im.width == 0 or im.height == 0) continue;
         const tex = v.textureFor(t, im) orelse continue;
@@ -1418,12 +1545,12 @@ fn drawImages(v: *TermView, sn: *gtk.Snapshot, t: *term.Term, above: bool, frac:
 
 const TextureEntry = struct { key: u64, texture: *gdk.Texture };
 
-fn imageKey(im: term.Image) u64 {
+fn imageKey(im: term_mod.Image) u64 {
     return (@as(u64, im.id) << 32) ^ im.generation;
 }
 
 /// Turns an image's pixels into a texture: RGBA as it is, the other formats into RGBA first.
-fn makeTexture(px: term.Term.Pixels) ?*gdk.Texture {
+fn makeTexture(px: term_mod.Term.Pixels) ?*gdk.Texture {
     const n: usize = @as(usize, px.width) * px.height;
     const pixels = gpa.alloc(u8, n * 4) catch return null;
     defer gpa.free(pixels);
@@ -1460,14 +1587,14 @@ fn makeTexture(px: term.Term.Pixels) ?*gdk.Texture {
 }
 
 /// A PNG that a program sends, decoded with GDK into the RGBA the terminal stores.
-fn decodePng(_: ?*anyopaque, allocator: [*c]const term.Term.Allocator, data: [*c]const u8, len: usize, out: [*c]term.Term.SysImage) callconv(.c) bool {
+fn decodePng(_: ?*anyopaque, allocator: [*c]const term_mod.Term.Allocator, data: [*c]const u8, len: usize, out: [*c]term_mod.Term.SysImage) callconv(.c) bool {
     const bytes = glib.Bytes.new(data, len);
     defer bytes.unref();
     const tex = gdk.Texture.newFromBytes(bytes, null) orelse return false;
     defer tex.as(gobject.Object).unref();
     const w: usize = @intCast(tex.getWidth());
     const h: usize = @intCast(tex.getHeight());
-    const buf = term.Term.ghosttyAlloc(allocator, w * h * 4);
+    const buf = term_mod.Term.ghosttyAlloc(allocator, w * h * 4);
     if (buf == null) return false;
     const dl = gdk.TextureDownloader.new(tex);
     defer dl.free();
@@ -1487,12 +1614,10 @@ fn fillRect(sn: *gtk.Snapshot, color: u32, alpha: f64, x: f64, y: f64, w: f64, h
     sn.appendColor(&c, &.{ .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
 }
 
-/// Places a layout with its baseline at `baseline`. Fallback fonts have other ascents, so
-/// placing by the top would put their glyphs at the wrong height.
 /// Spreads characters apart by `px` (or closer, when negative), so runs of text stay on a grid
 /// of the wider cells: Pango leaves the space off a run's first and last character.
 fn setSpacing(layout: *pango.Layout, px: f64) void {
-    const prefs = &@import("settings.zig").current;
+    const prefs = &settings.current;
     // Font smoothing off draws glyphs without antialiasing, for crisp pixel fonts.
     {
         const ctx = layout.getContext();
@@ -1510,6 +1635,8 @@ fn setSpacing(layout: *pango.Layout, px: f64) void {
     layout.setAttributes(list);
 }
 
+/// Places a layout with its baseline at `baseline`. Fallback fonts have other ascents, so
+/// placing by the top would put their glyphs at the wrong height.
 fn layoutOnBaseline(sn: *gtk.Snapshot, layout: *pango.Layout, color: gdk.RGBA, x: f64, baseline: f64) void {
     const own = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
     sn.save();
@@ -1525,22 +1652,24 @@ var perf_log = false;
 var key_at: i64 = 0;
 var echo_at: i64 = 0;
 
-const TermDraw = struct {
-    /// The view's own layout, made from the widget's Pango context, the one the cell size was
-    /// measured with, so runs of text advance exactly one cell per character.
-    fn layoutOf(v: *TermView) *pango.Layout {
-        if (v.layout) |l| return l;
-        const l = v.widget().createPangoLayout(null);
-        setSpacing(l, v.spacing);
-        v.layout = l;
-        return l;
-    }
-};
+/// The view's own layout, made from the widget's Pango context, the one the cell size was
+/// measured with, so runs of text advance exactly one cell per character.
+fn layoutOf(v: *TermView) *pango.Layout {
+    if (v.layout) |l| return l;
+    const l = v.widget().createPangoLayout(null);
+    setSpacing(l, v.spacing);
+    v.layout = l;
+    return l;
+}
 
+/// A pane with no terminal to show yet, or any more: the theme's background, so a pane that
+/// is still connecting doesn't flash dark in a light theme, and a line saying which it is.
 fn snapshotEmpty(v: *TermView, sn: *gtk.Snapshot, w: f64, h: f64, message: [:0]const u8) void {
-    fillRect(sn, 0x1a1a1f, 1, 0, 0, w, h);
+    const bg: u32 = if (theme_bg != 0) theme_bg else 0x1a1a1f;
+    fillRect(sn, bg, if (v.floating) 1 else term_opacity, 0, 0, w, h);
+    const ink: u32 = if (luminance(bg) > 0.4) 0x000000 else 0xffffff;
     const f = font orelse return;
-    const layout = TermDraw.layoutOf(v);
+    const layout = layoutOf(v);
     layout.setFontDescription(f.regular);
     layout.setText(message.ptr, @intCast(message.len));
     var lw: c_int = 0;
@@ -1548,15 +1677,16 @@ fn snapshotEmpty(v: *TermView, sn: *gtk.Snapshot, w: f64, h: f64, message: [:0]c
     layout.getPixelSize(&lw, &lh);
     sn.save();
     sn.translate(&.{ .f_x = @floatCast((w - @as(f64, @floatFromInt(lw))) / 2), .f_y = @floatCast((h - @as(f64, @floatFromInt(lh))) / 2) });
-    sn.appendLayout(layout, &rgba(0xffffff, 0.45));
+    sn.appendLayout(layout, &rgba(ink, 0.5));
     sn.restore();
 }
 
 /// A fingerprint of everything that decides how a row looks.
-fn rowHash(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) u64 {
+fn rowHash(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) u64 {
     var hasher = std.hash.Wyhash.init(0);
-    const prefs = &@import("settings.zig").current;
-    hasher.update(std.mem.asBytes(&[_]u64{ @intFromPtr(f_font.regular), @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection), @bitCast(pad_x), @intFromBool(prefs.ligatures), @intFromEnum(prefs.bold_italic), prefs.selection_bg, prefs.selection_fg, @intFromBool(prefs.font_smoothing) }));
+    const prefs = &settings.current;
+    // The font by what it is, not where it lives: a freed font's address can be given out again.
+    hasher.update(std.mem.asBytes(&[_]u64{ f_font.id, @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection), @bitCast(pad_x), @intFromBool(prefs.ligatures), @intFromEnum(prefs.bold_italic), prefs.selection_bg, prefs.selection_fg, @intFromBool(prefs.font_smoothing) }));
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
@@ -1567,21 +1697,27 @@ fn rowHash(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) u64 {
 }
 
 /// The drawing of one row, from the cache when the row hasn't changed.
-fn rowNode(v: *TermView, slot: usize, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
+fn rowNode(v: *TermView, slot: usize, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
     while (v.rows_cache.items.len <= slot) v.rows_cache.append(gpa, .{}) catch return null;
     const entry = &v.rows_cache.items[slot];
     const hash = rowHash(v, f, y, f_font);
     if (entry.hash == hash and entry.hash != 0) return entry.node;
     if (entry.node) |n| n.unref();
-    entry.* = .{ .hash = hash, .node = buildRow(v, f, y, f_font) };
+    // A row's drawing starts at its own top, so it serves wherever the same row is shown: look
+    // where it was last frame first, then at every other line.
+    const prev = v.rows_prev.items;
+    const found: ?*const RowCache = if (hash == 0) null else if (slot < prev.len and prev[slot].hash == hash) &prev[slot] else for (prev) |*p| {
+        if (p.hash == hash) break p;
+    } else null;
+    entry.* = .{ .hash = hash, .node = if (found) |p| (if (p.node) |n| n.ref() else null) else buildRow(v, f, y, f_font) };
     return entry.node;
 }
 
-fn buildRow(v: *TermView, f: *const term.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
+fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
     const sn = gtk.Snapshot.new();
-    const layout = TermDraw.layoutOf(v);
+    const layout = layoutOf(v);
     // Backgrounds first, so wide glyphs can overhang into the next cell.
-    const rounded = @import("settings.zig").current.rounded_selection;
+    const rounded = settings.current.rounded_selection;
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
@@ -1696,7 +1832,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const f_font = v.fontOf() orelse return;
 
     const bg_alpha: f64 = if (v.floating) 1 else term_opacity;
-    if (@import("settings.zig").current.padding_color == .theme and theme_bg != 0) {
+    if (settings.current.padding_color == .theme and theme_bg != 0) {
         fillRect(sn, theme_bg, bg_alpha, 0, 0, w, h);
         fillRect(sn, f.bg, bg_alpha, pad_x, pad_y, @max(0, @as(f64, @floatFromInt(f.cols)) * v.cell_w), @max(0, @as(f64, @floatFromInt(f.rows)) * v.cell_h));
     } else fillRect(sn, f.bg, bg_alpha, 0, 0, w, h);
@@ -1708,13 +1844,15 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const max_up: f64 = @floatFromInt(f.scroll_total -| f.scroll_len);
     v.followOutput(f.scroll_total);
     v.scroll_px = std.math.clamp(v.scroll_px, 0, max_up * v.cell_h);
-    const rows_up = @floor(v.scroll_px / v.cell_h);
+    const rows_up = v.syncScroll(t);
     const frac = v.scroll_px - rows_up * v.cell_h;
     v.draw_frac = frac;
-    const current_up: f64 = @floatFromInt(f.scroll_total -| f.scroll_len -| f.scroll_offset);
-    if (current_up != rows_up) {
-        t.scroll(@intFromFloat(current_up - rows_up));
-        _ = t.render(true);
+    // Last frame's drawings stay at hand for this one: a row that scrolled to another line, or
+    // the row that just left the top, is drawn from them instead of being laid out again.
+    std.mem.swap(std.ArrayList(RowCache), &v.rows_cache, &v.rows_prev);
+    defer {
+        for (v.rows_prev.items) |e| if (e.node) |n| n.unref();
+        v.rows_prev.clearRetainingCapacity();
     }
     if (frac > 0.01 and rows_up < max_up) {
         t.scroll(-1);
@@ -1734,7 +1872,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
 
     // Search matches, over the text.
     if (t.finding()) {
-        var found: [128]term.Match = undefined;
+        var found: [128]term_mod.Match = undefined;
         const n = t.matches(&found);
         for (found[0..n]) |m| {
             var row = m.y0;
@@ -1742,7 +1880,9 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
                 const from: usize = if (m.y0 == row) m.x0 else 0;
                 const to: usize = if (m.y1 == row) m.x1 else f.cols -| 1;
                 const top = pad_y + frac + @as(f64, @floatFromInt(row)) * v.cell_h;
-                fillRect(sn, if (m.selected) 0xffb020 else 0xd8b040, if (m.selected) 0.45 else 0.25, pad_x + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt(to - from + 1)) * v.cell_w, v.cell_h);
+                // In the theme's accent, the match the search is on stronger than the rest.
+                const tint = if (cursor_accent != 0) cursor_accent else f.fg;
+                fillRect(sn, tint, if (m.selected) 0.5 else 0.22, pad_x + @as(f64, @floatFromInt(from)) * v.cell_w, top, @as(f64, @floatFromInt((to -| from) + 1)) * v.cell_w, v.cell_h);
             }
         }
     }
@@ -1765,7 +1905,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         // A program's own cursor color wins; otherwise the theme's accent, like Rex.
         const color = if (f.cursor_color != 0 and f.cursor_color != f.fg) f.cursor_color else if (cursor_accent != 0) cursor_accent else f.fg;
         const focused = v.widget().hasFocus() != 0;
-        const prefs = &@import("settings.zig").current;
+        const prefs = &settings.current;
         const style: c_int = switch (prefs.cursor_style) {
             .program => f.cursor_style,
             .bar => 0,
@@ -1773,6 +1913,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
             .underline => 2,
         };
         const blinks = prefs.cursor_blink and focused;
+        if (blinks) blinkWanted(v);
         const under = f.cell(f.cursor_x, f.cursor_y);
         const cw = v.cell_w * @as(f64, if (under.flags.wide) 2 else 1);
         if (blinks and !blink_on) {
@@ -1793,7 +1934,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
                     defer text.deinit(gpa);
                     appendCell(&text, f, under);
                     text.append(gpa, 0) catch return;
-                    const layout = TermDraw.layoutOf(v);
+                    const layout = layoutOf(v);
                     layout.setFontDescription(f_font.pick(under.flags));
                     layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
                     const under_color = if (prefs.cursor_text_color != 0) prefs.cursor_text_color else f.bg;
@@ -1803,9 +1944,26 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         }
     }
 
+    // What an input method is still composing: at the cursor, underlined, until it's committed.
+    if (v.preedit) |pre| if (f.cursor_y < f.rows and f.cursor_x < f.cols) {
+        const layout = layoutOf(v);
+        layout.setFontDescription(f_font.regular);
+        layout.setText(pre.ptr, @intCast(pre.len));
+        var pw: c_int = 0;
+        var ph: c_int = 0;
+        layout.getPixelSize(&pw, &ph);
+        const width: f64 = @floatFromInt(pw);
+        // Near the right edge it moves left to stay inside the pane.
+        const px = @max(pad_x, @min(pad_x + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w, w - pad_x - width));
+        const py = pad_y + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
+        fillRect(sn, f.bg, 1, px, py, width, v.cell_h);
+        layoutOnBaseline(sn, layout, rgba(f.fg, 1), px, py + v.baseline);
+        fillRect(sn, f.fg, 1, px, py + v.cell_h - 1, width, 1);
+    };
+
     // Panes without the keyboard, or every pane while the window isn't active, fade back.
     {
-        const prefs = &@import("settings.zig").current;
+        const prefs = &settings.current;
         const window_active = if (v.widget().getRoot()) |r| gtk.Window.isActive(@ptrCast(@alignCast(r))) != 0 else true;
         var fade: f64 = 0;
         if (!v.active_pane) fade = prefs.fade_inactive;
@@ -1830,39 +1988,14 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     }
 }
 
-/// Draws a layout with its baseline at `baseline`. Fallback fonts have other ascents, so
-/// placing by the top would put their glyphs at the wrong height.
-fn showOnBaseline(cr: *cairo.Context, layout: *pango.Layout, x: f64, baseline: f64) void {
-    const own = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE;
-    cr.moveTo(x, baseline - own);
-    pangocairo.showLayout(cr, layout);
-}
-
-fn drawEmpty(cr: *cairo.Context, w: f64, h: f64, message: [:0]const u8) void {
-    cr.setSourceRgb(0.1, 0.1, 0.12);
-    cr.rectangle(0, 0, w, h);
-    cr.fill();
-    const f = font orelse return;
-    const layout = pangocairo.createLayout(cr);
-    defer layout.as(gobject.Object).unref();
-    layout.setFontDescription(f.regular);
-    layout.setText(message.ptr, @intCast(message.len));
-    var lw: c_int = 0;
-    var lh: c_int = 0;
-    layout.getPixelSize(&lw, &lh);
-    cr.setSourceRgba(1, 1, 1, 0.45);
-    cr.moveTo((w - @as(f64, @floatFromInt(lw))) / 2, (h - @as(f64, @floatFromInt(lh))) / 2);
-    pangocairo.showLayout(cr, layout);
-}
-
 const Colors = struct { fg: u32, bg: u32 };
 
-fn cellColors(f: *const term.Frame, cl: term.Cell) Colors {
+fn cellColors(f: *const term_mod.Frame, cl: term_mod.Cell) Colors {
     var fg = if (cl.fg != 0) cl.fg else f.fg;
     var bg = if (cl.bg != 0) cl.bg else f.bg;
     if (cl.flags.inverse) std.mem.swap(u32, &fg, &bg);
     if (cl.flags.selected) {
-        const prefs = &@import("settings.zig").current;
+        const prefs = &settings.current;
         if (prefs.selection_bg != 0) {
             bg = prefs.selection_bg;
             if (prefs.selection_fg != 0) fg = prefs.selection_fg;
@@ -1871,7 +2004,7 @@ fn cellColors(f: *const term.Frame, cl: term.Cell) Colors {
             if (prefs.selection_fg != 0) fg = prefs.selection_fg;
         }
     }
-    if (@import("settings.zig").current.improve_contrast) fg = readable(fg, bg);
+    if (settings.current.improve_contrast) fg = readable(fg, bg);
     return .{ .fg = fg, .bg = bg };
 }
 
@@ -1913,12 +2046,12 @@ fn mix(a: u32, b: u32, t: f64) u32 {
     return out;
 }
 
-fn sameStyle(a: term.Cell, b: term.Cell) bool {
+fn sameStyle(a: term_mod.Cell, b: term_mod.Cell) bool {
     return a.flags.bold == b.flags.bold and a.flags.italic == b.flags.italic and a.flags.faint == b.flags.faint and
         a.flags.underline == b.flags.underline and a.flags.strike == b.flags.strike and a.flags.link == b.flags.link;
 }
 
-fn appendCell(text: *std.ArrayList(u8), f: *const term.Frame, cl: term.Cell) void {
+fn appendCell(text: *std.ArrayList(u8), f: *const term_mod.Frame, cl: term_mod.Cell) void {
     var buf: [4]u8 = undefined;
     if (cl.extra_len > 1) {
         for (f.grapheme(cl)) |cp| {

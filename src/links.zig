@@ -33,8 +33,10 @@ fn trailing(c: u21) bool {
     };
 }
 
-/// The link under (col, row), if any. `rows` holds one codepoint per column for each row.
-pub fn at(gpa: std.mem.Allocator, rows: []const []const u21, col: usize, row: usize) !?Link {
+/// The link under (col, row), if any. `rows` holds one codepoint per column for each row, and
+/// `wraps` says for each row whether its line carries on into the next: a link only continues
+/// across rows the terminal wrapped, not into whatever the next line happens to start with.
+pub fn at(gpa: std.mem.Allocator, rows: []const []const u21, wraps: []const bool, col: usize, row: usize) !?Link {
     var y: usize = 0;
     while (y < rows.len) {
         var next_row = y + 1;
@@ -51,10 +53,10 @@ pub fn at(gpa: std.mem.Allocator, rows: []const []const u21, col: usize, row: us
             var end = x;
             while (end < r.len and !notUrl(r[end])) : (end += 1) try appendCp(gpa, &text, r[end]);
             try link.segments.append(gpa, .{ .row = y, .start = x, .end = end - 1 });
-            // A link touching the right edge may carry on at the start of the next row.
+            // A link touching the right edge of a wrapped row carries on at the start of the next.
             var line = y;
             var reached = end == r.len;
-            while (reached and line + 1 < rows.len) {
+            while (reached and line + 1 < rows.len and line < wraps.len and wraps[line]) {
                 const nr = rows[line + 1];
                 var run: usize = 0;
                 while (run < nr.len and !notUrl(nr[run])) : (run += 1) try appendCp(gpa, &text, nr[run]);
@@ -109,14 +111,36 @@ fn toRow(comptime s: []const u8) [s.len]u21 {
 test "finds a link under the pointer, trims punctuation, and follows wraps" {
     const gpa = std.testing.allocator;
     const a = toRow("see https://example.com/x.");
-    var l = (try at(gpa, &.{&a}, 8, 0)).?;
+    var l = (try at(gpa, &.{&a}, &.{false}, 8, 0)).?;
     defer l.deinit(gpa);
     try std.testing.expectEqualStrings("https://example.com/x", l.url);
-    try std.testing.expect((try at(gpa, &.{&a}, 1, 0)) == null);
+    try std.testing.expect((try at(gpa, &.{&a}, &.{false}, 1, 0)) == null);
 
     const r1 = toRow("go https://exa");
     const r2 = toRow("mple.org/p ok  ");
-    var w = (try at(gpa, &.{ &r1, &r2 }, 3, 1)).?;
+    var w = (try at(gpa, &.{ &r1, &r2 }, &.{ true, false }, 3, 1)).?;
     defer w.deinit(gpa);
     try std.testing.expectEqualStrings("https://example.org/p", w.url);
+}
+
+test "a link ending at the right edge doesn't swallow the next line" {
+    const gpa = std.testing.allocator;
+    const r1 = toRow("go https://exa");
+    const r2 = toRow("mple.org/p ok  ");
+    // The same two rows, but the first ended with a new line rather than wrapping.
+    var l = (try at(gpa, &.{ &r1, &r2 }, &.{ false, false }, 5, 0)).?;
+    defer l.deinit(gpa);
+    try std.testing.expectEqualStrings("https://exa", l.url);
+    try std.testing.expect((try at(gpa, &.{ &r1, &r2 }, &.{ false, false }, 3, 1)) == null);
+
+    // Three wrapped rows join; the wrap flags may be shorter than the rows without harm.
+    const a = toRow("https://a.");
+    const b = toRow("example/lo");
+    const c = toRow("ng/path   ");
+    var long = (try at(gpa, &.{ &a, &b, &c }, &.{ true, true, false }, 2, 2)).?;
+    defer long.deinit(gpa);
+    try std.testing.expectEqualStrings("https://a.example/long/path", long.url);
+    var cut = (try at(gpa, &.{ &a, &b, &c }, &.{true}, 2, 1)).?;
+    defer cut.deinit(gpa);
+    try std.testing.expectEqualStrings("https://a.example/lo", cut.url);
 }

@@ -68,6 +68,13 @@ pub const Frame = struct {
     bracketed_paste: bool = false,
     cells: std.ArrayList(Cell) = .empty,
     extras: std.ArrayList(u32) = .empty,
+    /// For each row, whether its line carries on into the next row (it was too long to fit).
+    wraps: std.ArrayList(bool) = .empty,
+
+    /// How many rows above the live screen the view is scrolled.
+    pub fn rowsUp(f: *const Frame) u64 {
+        return f.scroll_total -| f.scroll_len -| f.scroll_offset;
+    }
 
     pub fn cell(f: *const Frame, x: usize, y: usize) Cell {
         return f.cells.items[y * f.cols + x];
@@ -199,6 +206,7 @@ pub const Term = struct {
         c.ghostty_terminal_free(self.term);
         self.frame.cells.deinit(gpa);
         self.frame.extras.deinit(gpa);
+        self.frame.wraps.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -459,6 +467,8 @@ pub const Term = struct {
         f.cells.resize(gpa, count) catch return false;
         @memset(f.cells.items, .{});
         f.extras.clearRetainingCapacity();
+        f.wraps.resize(gpa, rows) catch return false;
+        @memset(f.wraps.items, false);
 
         _ = c.ghostty_render_state_get(self.rs, c.GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, @ptrCast(&self.rows));
         var y: usize = 0;
@@ -466,6 +476,12 @@ pub const Term = struct {
             var sel: c.GhosttyRenderStateRowSelection = std.mem.zeroes(c.GhosttyRenderStateRowSelection);
             sel.size = @sizeOf(c.GhosttyRenderStateRowSelection);
             const has_sel = c.ghostty_render_state_row_get(self.rows, c.GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
+            var raw_row: c.GhosttyRow = 0;
+            if (c.ghostty_render_state_row_get(self.rows, c.GHOSTTY_RENDER_STATE_ROW_DATA_RAW, &raw_row) == c.GHOSTTY_SUCCESS) {
+                var wrapped = false;
+                _ = c.ghostty_row_get(raw_row, c.GHOSTTY_ROW_DATA_WRAP, &wrapped);
+                f.wraps.items[y] = wrapped;
+            }
             _ = c.ghostty_render_state_row_get(self.rows, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.cells));
             var x: usize = 0;
             while (x < cols and c.ghostty_render_state_row_cells_next(self.cells)) : (x += 1) {
@@ -534,6 +550,20 @@ test "a terminal takes output and renders it" {
     try std.testing.expectEqual(@as(u16, 20), t.frame.cols);
     try std.testing.expectEqual(@as(u32, 'h'), t.frame.cell(0, 0).cp);
     try std.testing.expect(t.frame.cell(3, 0).flags.bold);
+}
+
+test "a frame says which rows wrapped onto the next" {
+    const t = Term.create(10, 5) orelse return error.NoTerminal;
+    defer t.destroy();
+    t.write("0123456789abc\r\nshort\r\n0123456789\r\nnext");
+    try std.testing.expect(t.render(true));
+    try std.testing.expectEqual(@as(usize, 5), t.frame.wraps.items.len);
+    try std.testing.expect(t.frame.wraps.items[0]);
+    try std.testing.expect(!t.frame.wraps.items[1]);
+    try std.testing.expect(!t.frame.wraps.items[2]);
+    // A line that exactly fills the row and is followed by a new line hasn't wrapped.
+    try std.testing.expect(!t.frame.wraps.items[3]);
+    try std.testing.expect(!t.frame.wraps.items[4]);
 }
 
 test "select a word, copy it, and find text" {
