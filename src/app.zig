@@ -148,6 +148,50 @@ const css =
 
 const Row = struct { host: *Host, session_id: []u8, window_id: []u8, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
 
+/// One row the sidebar should have, worked out from the servers before any widget is touched.
+const RowPlan = struct {
+    kind: enum { host, session, window },
+    /// Everything about the row that is built into its widgets. Rows whose keys match what is
+    /// on screen are updated where they are, so menus stay open and hover and scroll are kept.
+    key: u64,
+    host: *Host,
+    session: ?*const server_mod.Session = null,
+    view: ?*const view.SessionView = null,
+    window: ?*const view.Window = null,
+    collapsed: bool = false,
+};
+
+/// What a sidebar row or a tab shows now, to update it in place.
+const RowMark = struct {
+    key: u64,
+    label: ?*gtk.Label = null,
+    line: ?*gtk.Box = null,
+    tile: ?*gtk.Widget = null,
+    /// The panes the tile was made for; another set needs another tile.
+    tile_for: u64 = 0,
+    button: ?*gtk.Widget = null,
+};
+
+fn hashParts(parts: []const []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(parts.len);
+    for (parts) |part| {
+        hasher.update(std.mem.asBytes(&part.len));
+        hasher.update(part);
+    }
+    return hasher.final();
+}
+
+/// The panes a window's tile draws: the focused one first, then all of them, as `rowTile` reads.
+fn tileFor(w: *const view.Window) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(w.focused_block_id orelse "");
+    for (w.layers) |l| for (l.blocks) |b| {
+        hasher.update(std.mem.asBytes(&b.id.len));
+        hasher.update(b.id);
+    };
+    return hasher.final();
+}
+
 /// One Rex server Compy is connected to, with its own workspace page.
 pub const Host = struct {
     app: *App,
@@ -203,6 +247,17 @@ pub const App = struct {
     /// A pane being floated so it can be minimized.
     minimize_next: ?[]u8 = null,
     rows: std.ArrayList(?Row) = .empty,
+    /// One for each sidebar row, in the same order as `rows`, and one for each tab.
+    row_marks: std.ArrayList(RowMark) = .empty,
+    tab_marks: std.ArrayList(RowMark) = .empty,
+    /// What the tab strip was last built for, besides its tabs.
+    tabs_key: u64 = 0,
+    /// The sidebar or the tabs wait to be brought up to date, once, before the next frame.
+    sidebar_stale: bool = false,
+    tabs_stale: bool = false,
+    refresh_idle: c_uint = 0,
+    /// What the corner's room was last measured for: the shown tab and its top-left pane.
+    corner_for: u64 = 0,
     /// Sessions whose windows are folded away in the sidebar.
     collapsed: std.StringHashMapUnmanaged(void) = .empty,
     /// The window the person is looking at, which may differ from the session's active one.
@@ -693,7 +748,7 @@ pub const App = struct {
         setSlot(&a.window_id, null);
         a.applyTheme();
         a.showState();
-        a.ensureSelection();
+        _ = a.ensureSelection();
     }
 
     /// Whether a pane's folder differs from the one last seen for it, which is then remembered.
@@ -740,15 +795,16 @@ pub const App = struct {
                 a.rebuildSidebar();
             },
             .sessions => {
-                if (here) a.ensureSelection();
+                if (here) _ = a.ensureSelection();
                 a.rebuildSidebar();
             },
             .view => {
-                if (here) a.ensureSelection();
+                // Picking a session shows it, so it isn't shown a second time below.
+                const shown = if (here) a.ensureSelection() else false;
                 a.rebuildSidebar();
                 a.activity.changed();
                 if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
-                    a.showSelected();
+                    if (!shown) a.showSelected();
                     a.finishMinimize();
                     a.autobalance();
                 };
@@ -854,8 +910,9 @@ pub const App = struct {
     }
 
     /// Picks a session and window to show when none is picked or the picked one went away.
-    fn ensureSelection(a: *App) void {
-        const s = a.server orelse return;
+    /// Returns whether it showed one.
+    fn ensureSelection(a: *App) bool {
+        const s = a.server orelse return false;
         // A window opened for one tab shows it as soon as its session is known.
         if (std.c.getenv("COMPY_OPEN")) |env| if (!open_done) {
             var parts = std.mem.splitScalar(u8, std.mem.span(env), '\t');
@@ -868,7 +925,7 @@ pub const App = struct {
                 setSlot(&a.session_id, sid);
                 setSlot(&a.window_id, wid);
                 a.showSelected();
-                return;
+                return true;
             };
         };
         if (a.session_id) |sel| {
@@ -882,15 +939,16 @@ pub const App = struct {
                 if (s.sessionView(sel)) |v| {
                     if (a.window_id) |wid| if (v.window(wid) == null) setSlot(&a.window_id, null);
                 }
-                return;
+                return false;
             }
             setSlot(&a.session_id, null);
             setSlot(&a.window_id, null);
         }
-        if (s.sessions.items.len == 0) return;
+        if (s.sessions.items.len == 0) return false;
         setSlot(&a.session_id, a.firstWithWindows(s) orelse s.sessions.items[0].id);
         a.auto_picked = true;
         a.showSelected();
+        return true;
     }
 
     fn firstWithWindows(_: *App, s: *Server) ?[]const u8 {
@@ -914,38 +972,128 @@ pub const App = struct {
         ws.show(sid, w);
         a.selectSidebarRow();
         a.rebuildTabs();
-        // Panes have no place until they're laid out, so the corner's room is measured again.
-        a.cornerChanged();
+        // Panes have no place until they're laid out, so the corner's room is measured again,
+        // and followed for a moment while they settle. Only another tab or another top-left pane
+        // needs that; the many updates that change neither just check the room once.
+        var top_left: []const u8 = "";
+        for (ws.panes.items) |pane| if (!pane.floating and pane.rect.x < 0.001 and pane.rect.y < 0.001) {
+            top_left = pane.block_id;
+        };
+        const corner_for = hashParts(&.{ sid, if (w) |win| win.id else "", top_left });
+        if (corner_for != a.corner_for) {
+            a.corner_for = corner_for;
+            a.cornerChanged();
+        } else {
+            a.tabsRoom();
+            ws.cornerChanged();
+        }
+    }
+
+    /// Brings the tabs above the panes up to date before the next frame, however often it's asked.
+    fn rebuildTabs(a: *App) void {
+        a.tabs_stale = true;
+        a.queueRefresh();
+    }
+
+    /// Brings the sidebar, and with it the tabs, up to date before the next frame, however often
+    /// it's asked: one change on a server asks several times over.
+    fn rebuildSidebar(a: *App) void {
+        a.sidebar_stale = true;
+        // Rows of a host that was just removed can't wait: they point at it.
+        for (a.rows.items) |r| if (r) |row| {
+            if (std.mem.indexOfScalar(*Host, a.hosts.items, row.host) == null) return a.refreshNow();
+        };
+        a.queueRefresh();
+    }
+
+    fn queueRefresh(a: *App) void {
+        // Ahead of GTK's layout and drawing, so the frame that shows a change shows all of it.
+        if (a.refresh_idle == 0) a.refresh_idle = glib.idleAddFull(glib.PRIORITY_HIGH_IDLE, &refreshIdle, a, null);
+    }
+
+    fn refreshIdle(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.refresh_idle = 0;
+        a.refreshNow();
+        return 0;
+    }
+
+    fn refreshNow(a: *App) void {
+        if (a.refresh_idle != 0) {
+            _ = glib.Source.remove(a.refresh_idle);
+            a.refresh_idle = 0;
+        }
+        const sidebar = a.sidebar_stale;
+        const tabs = a.tabs_stale or sidebar;
+        a.sidebar_stale = false;
+        a.tabs_stale = false;
+        if (sidebar) a.syncSidebar();
+        if (tabs) a.syncTabs();
+    }
+
+    /// A tab's name: every program in its window, or its focused pane's, as the setting says.
+    fn tabTitle(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
+        return if (settings.current.tab_processes) processList(h, buf, w) else rowTitle(h, buf, w, v);
     }
 
     /// The tabs above the panes: one per window of the shown session, then a new-tab button.
-    fn rebuildTabs(a: *App) void {
+    /// Tabs that are already there keep their buttons and only show what changed.
+    fn syncTabs(a: *App) void {
         const strip = a.tab_strip.as(gtk.Widget);
-        while (strip.getFirstChild()) |c| a.tab_strip.remove(c);
         const above = settings.current.tab_position == .above;
-        strip.setVisible(@intFromBool(above));
-        if (!above) return;
-        const h = a.current orelse return;
-        const s = h.server;
-        const sid = a.session_id orelse return;
-        const v = s.sessionView(sid) orelse return;
-        const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow();
-        for (v.windows) |*w| {
+        const h = a.current;
+        const sid = a.session_id;
+        const v = if (h) |host| if (sid) |id| host.server.sessionView(id) else null else null;
+        if (!above or v == null) {
+            while (strip.getFirstChild()) |c| a.tab_strip.remove(c);
+            a.tab_marks.clearRetainingCapacity();
+            a.tabs_key = 0;
+            strip.setVisible(@intFromBool(above));
+            return;
+        }
+        strip.setVisible(1);
+        const host = h.?;
+        const session_view = v.?;
+        const shown = (if (a.window_id) |wid| session_view.window(wid) else null) orelse session_view.activeWindow();
+        // The strip as a whole: the host and session its buttons name, and how wide tabs are.
+        const tabs_key = hashParts(&.{ host.page, sid.?, if (settings.current.tab_fill) "fill" else "fixed" });
+        var same = tabs_key == a.tabs_key and a.tab_marks.items.len == session_view.windows.len;
+        if (same) for (session_view.windows, a.tab_marks.items) |*w, mark| {
+            if (mark.key != hashParts(&.{w.id})) same = false;
+        };
+        if (same) {
+            for (session_view.windows, a.tab_marks.items) |*w, *mark| {
+                const button = mark.button orelse continue;
+                if (shown == w) button.addCssClass("active") else button.removeCssClass("active");
+                var tbuf: [256]u8 = undefined;
+                const title = tabTitle(host, &tbuf, w, session_view);
+                if (mark.label) |l| if (!std.mem.eql(u8, std.mem.span(l.getText()), title)) l.setText(title.ptr);
+                a.updateTile(mark, host.server, w);
+            }
+            return;
+        }
+        while (strip.getFirstChild()) |c| a.tab_strip.remove(c);
+        a.tab_marks.clearRetainingCapacity();
+        a.tabs_key = tabs_key;
+        for (session_view.windows) |*w| {
             const tab = gtk.Button.new();
             tab.as(gtk.Widget).addCssClass("tab");
             tab.as(gtk.Widget).addCssClass("flat");
             if (shown == w) tab.as(gtk.Widget).addCssClass("active");
             const line = gtk.Box.new(.horizontal, 7);
-            line.append(rowTile(s, w));
+            const tile = rowTile(host.server, w);
+            line.append(tile);
             var tbuf: [256]u8 = undefined;
-            const title = if (settings.current.tab_processes) processList(h, &tbuf, w) else rowTitle(h, &tbuf, w, v);
+            const title = tabTitle(host, &tbuf, w, session_view);
             const label = gtk.Label.new(title.ptr);
             label.setEllipsize(.end);
             label.setXalign(0);
             label.as(gtk.Widget).setHexpand(1);
             line.append(label.as(gtk.Widget));
             var abuf: [600]u8 = undefined;
-            const ids = std.fmt.bufPrintSentinel(&abuf, "{s} {s}", .{ sid, w.id }, 0) catch continue;
+            // A tab that can't be named is left out, and the marks then differ from the windows,
+            // so the next change builds the strip again.
+            const ids = std.fmt.bufPrintSentinel(&abuf, "{s} {s}", .{ sid.?, w.id }, 0) catch continue;
             const close = icons.button(.close, "Close tab", "app.close-window");
             close.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(ids.ptr));
             close.as(gtk.Widget).addCssClass("tab-close");
@@ -954,11 +1102,26 @@ pub const App = struct {
             tab.as(gtk.Actionable).setActionName("app.show-window");
             tab.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(ids.ptr));
             if (settings.current.tab_fill) tab.as(gtk.Widget).setHexpand(1) else tab.as(gtk.Widget).setSizeRequest(180, -1);
+            a.tab_marks.append(gpa, .{ .key = hashParts(&.{w.id}), .label = label, .line = line, .tile = tile, .tile_for = tileFor(w), .button = tab.as(gtk.Widget) }) catch continue;
             a.tab_strip.append(tab.as(gtk.Widget));
         }
         const add = icons.button(.plus, "New tab", "app.new-window");
         add.as(gtk.Widget).addCssClass("tab-new");
         a.tab_strip.append(add.as(gtk.Widget));
+    }
+
+    /// Gives a row or tab a new tile when its window's panes are no longer the ones it draws.
+    fn updateTile(_: *App, mark: *RowMark, s: *Server, w: *const view.Window) void {
+        const line = mark.line orelse return;
+        const now = tileFor(w);
+        if (mark.tile) |old| {
+            if (mark.tile_for == now) return old.queueDraw();
+            line.remove(old);
+        }
+        const tile = rowTile(s, w);
+        line.prepend(tile);
+        mark.tile = tile;
+        mark.tile_for = now;
     }
 
     /// Every program in a window, such as "zsh · nvim · claude", for tabs that show them all.
@@ -1002,24 +1165,188 @@ pub const App = struct {
         a.cornerChanged();
     }
 
-    fn rebuildSidebar(a: *App) void {
-        a.rebuilding = true;
-        defer a.rebuilding = false;
-        a.sidebar.removeAll();
-        for (a.rows.items) |r| if (r) |row| {
-            gpa.free(row.session_id);
-            gpa.free(row.window_id);
-        };
-        a.rows.clearRetainingCapacity();
-        a.rebuildFilterMenu();
+    /// The rows the sidebar should have now, in order: each host's name when several are shown,
+    /// then its sessions, each followed by its windows unless they are folded away or shown as
+    /// tabs above the panes.
+    fn planSidebar(a: *App, plan: *std.ArrayList(RowPlan)) void {
         const several = a.hosts.items.len > 1 and a.filter == null;
+        const above = settings.current.tab_position == .above;
         for (a.hosts.items) |h| {
             if (a.filter) |f| if (f != h) continue;
-            if (several) a.addHostHeading(h);
-            a.addSessions(h);
+            if (several) plan.append(gpa, .{ .kind = .host, .host = h, .key = hashParts(&.{ "host", h.page }) }) catch return;
+            const s = h.server;
+            for (s.sessions.items) |*session| {
+                const collapsed = a.collapsed.contains(session.id);
+                plan.append(gpa, .{
+                    .kind = .session,
+                    .host = h,
+                    .session = session,
+                    .collapsed = collapsed,
+                    .key = hashParts(&.{ "session", h.page, session.id, if (collapsed) "folded" else "open", if (above) "above" else "beside" }),
+                }) catch return;
+                if (above or collapsed) continue;
+                const v = s.sessionView(session.id) orelse continue;
+                for (v.windows) |*w| plan.append(gpa, .{
+                    .kind = .window,
+                    .host = h,
+                    .session = session,
+                    .view = v,
+                    .window = w,
+                    .key = hashParts(&.{ "window", h.page, session.id, w.id }),
+                }) catch return;
+            }
+        }
+    }
+
+    /// Makes the sidebar show what the servers have now. While the same rows are wanted in the
+    /// same order, which is nearly always, each is updated where it is; only when rows come, go
+    /// or move is the list built again.
+    fn syncSidebar(a: *App) void {
+        var plan: std.ArrayList(RowPlan) = .empty;
+        defer plan.deinit(gpa);
+        a.planSidebar(&plan);
+        a.rebuildFilterMenu();
+        var same = plan.items.len == a.row_marks.items.len and a.rows.items.len == a.row_marks.items.len;
+        if (same) for (plan.items, a.row_marks.items) |want, have| {
+            if (want.key != have.key) same = false;
+        };
+        if (same) {
+            for (plan.items, a.row_marks.items, a.rows.items) |want, *mark, *row| a.updateRow(want, mark, row);
+        } else {
+            a.rebuilding = true;
+            defer a.rebuilding = false;
+            a.sidebar.removeAll();
+            for (a.rows.items) |r| if (r) |row| {
+                gpa.free(row.session_id);
+                gpa.free(row.window_id);
+            };
+            a.rows.clearRetainingCapacity();
+            a.row_marks.clearRetainingCapacity();
+            for (plan.items) |want| a.buildRow(want);
         }
         a.selectSidebarRow();
-        a.rebuildTabs();
+    }
+
+    /// A host's name, with how its connection is doing when it isn't connected.
+    fn hostHeading(buf: []u8, h: *Host) [:0]const u8 {
+        return (switch (h.server.state) {
+            .online => std.fmt.bufPrintSentinel(buf, "{s}", .{h.label}, 0),
+            .connecting => std.fmt.bufPrintSentinel(buf, "{s} · connecting", .{h.label}, 0),
+            .offline => std.fmt.bufPrintSentinel(buf, "{s} · offline", .{h.label}, 0),
+        }) catch "";
+    }
+
+    fn sessionHeading(buf: []u8, session: *const server_mod.Session) [:0]const u8 {
+        return std.fmt.bufPrintSentinel(buf, "{s}", .{if (session.label.len > 0) session.label else "Session"}, 0) catch "Session";
+    }
+
+    fn setLabel(label: ?*gtk.Label, text: [:0]const u8) void {
+        const l = label orelse return;
+        if (!std.mem.eql(u8, std.mem.span(l.getText()), text)) l.setText(text.ptr);
+    }
+
+    /// Shows what changed in a row that stays: its name, and its tile when its panes changed.
+    fn updateRow(a: *App, want: RowPlan, mark: *RowMark, row: *?Row) void {
+        var buf: [256]u8 = undefined;
+        switch (want.kind) {
+            .host => setLabel(mark.label, hostHeading(&buf, want.host)),
+            .session => setLabel(mark.label, sessionHeading(&buf, want.session.?)),
+            .window => {
+                setLabel(mark.label, rowTitle(want.host, &buf, want.window.?, want.view.?));
+                a.updateTile(mark, want.host.server, want.window.?);
+                // `rows` holds the tile too, for `refreshRows`.
+                if (row.*) |*r| r.tile = mark.tile;
+            },
+        }
+    }
+
+    /// Adds one row to the end of the sidebar, with its entry in `rows` and `row_marks`.
+    fn buildRow(a: *App, want: RowPlan) void {
+        const h = want.host;
+        // Both lists get an entry for every row, so a row's index finds its entries.
+        a.rows.ensureUnusedCapacity(gpa, 1) catch return;
+        a.row_marks.ensureUnusedCapacity(gpa, 1) catch return;
+        var buf: [256]u8 = undefined;
+        switch (want.kind) {
+            .host => {
+                const label = gtk.Label.new(hostHeading(&buf, h).ptr);
+                label.setXalign(0);
+                label.setEllipsize(.end);
+                label.as(gtk.Widget).addCssClass("host-heading");
+                const row = gtk.ListBoxRow.new();
+                row.setChild(label.as(gtk.Widget));
+                row.setActivatable(0);
+                row.setSelectable(0);
+                row.as(gtk.Widget).addCssClass("host-row");
+                a.sidebar.append(row.as(gtk.Widget));
+                a.rows.appendAssumeCapacity(null);
+                a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = label });
+            },
+            .session => {
+                const session = want.session.?;
+                const above = settings.current.tab_position == .above;
+                const sid_z = gpa.dupeSentinel(u8, session.id, 0) catch return;
+                defer gpa.free(sid_z);
+                // Tabs above the panes hold the windows; the sidebar picks the session.
+                const picked: ?Row = if (above) pick: {
+                    const session_id = gpa.dupe(u8, session.id) catch return;
+                    break :pick .{ .host = h, .session_id = session_id, .window_id = &.{} };
+                } else null;
+                const label = gtk.Label.new(sessionHeading(&buf, session).ptr);
+                label.setXalign(0);
+                label.setEllipsize(.end);
+                label.as(gtk.Widget).setHexpand(1);
+                label.as(gtk.Widget).addCssClass("session-heading");
+                const head = gtk.Box.new(.horizontal, 0);
+                head.append(label.as(gtk.Widget));
+                // On hover, like Rex: a new window in this session, and folding its windows away.
+                const add = icons.button(.plus, "New window here", "app.new-window-in");
+                add.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
+                add.as(gtk.Widget).addCssClass("session-tool");
+                head.append(add.as(gtk.Widget));
+                const fold = icons.button(if (want.collapsed) .right else .down, if (want.collapsed) "Show windows" else "Hide windows", "app.toggle-session");
+                fold.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
+                fold.as(gtk.Widget).addCssClass("session-tool");
+                if (want.collapsed) fold.as(gtk.Widget).addCssClass("folded");
+                if (above) fold.as(gtk.Widget).setVisible(0);
+                head.append(fold.as(gtk.Widget));
+                const session_more = menuButton(sessionMenu(session.id), "Session");
+                session_more.as(gtk.Widget).addCssClass("session-tool");
+                head.append(session_more.as(gtk.Widget));
+                const head_row = gtk.ListBoxRow.new();
+                head_row.setChild(head.as(gtk.Widget));
+                head_row.setActivatable(@intFromBool(above));
+                head_row.setSelectable(@intFromBool(above));
+                head_row.as(gtk.Widget).addCssClass("session-row");
+                if (above) head_row.as(gtk.Widget).addCssClass("session-pick");
+                a.sidebar.append(head_row.as(gtk.Widget));
+                a.rows.appendAssumeCapacity(picked);
+                a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = label });
+            },
+            .window => {
+                const session = want.session.?;
+                const w = want.window.?;
+                const session_id = gpa.dupe(u8, session.id) catch return;
+                const window_id = gpa.dupe(u8, w.id) catch return gpa.free(session_id);
+                const item = gtk.Label.new(rowTitle(h, &buf, w, want.view.?).ptr);
+                item.setXalign(0);
+                item.setEllipsize(.end);
+                item.as(gtk.Widget).addCssClass("row-title");
+                item.as(gtk.Widget).setHexpand(1);
+                const line = gtk.Box.new(.horizontal, 8);
+                const tile = rowTile(h.server, w);
+                line.append(tile);
+                line.append(item.as(gtk.Widget));
+                const more = menuButton(windowMenu(session.id, w.id), "Window");
+                more.as(gtk.Widget).addCssClass("row-more");
+                line.append(more.as(gtk.Widget));
+                const row = gtk.ListBoxRow.new();
+                row.setChild(line.as(gtk.Widget));
+                a.sidebar.append(row.as(gtk.Widget));
+                a.rows.appendAssumeCapacity(.{ .host = h, .session_id = session_id, .window_id = window_id, .label = item, .line = line, .tile = tile });
+                a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = item, .line = line, .tile = tile, .tile_for = tileFor(w) });
+            },
+        }
     }
 
     fn rebuildFilterMenu(a: *App) void {
@@ -1206,103 +1533,6 @@ pub const App = struct {
         if (ctx.app.addHost(label, url)) |h| ctx.app.selectHost(h);
     }
 
-    /// A host's name, with how its connection is doing when it isn't connected.
-    fn addHostHeading(a: *App, h: *Host) void {
-        var buf: [160]u8 = undefined;
-        const text = switch (h.server.state) {
-            .online => std.fmt.bufPrintSentinel(&buf, "{s}", .{h.label}, 0),
-            .connecting => std.fmt.bufPrintSentinel(&buf, "{s} · connecting", .{h.label}, 0),
-            .offline => std.fmt.bufPrintSentinel(&buf, "{s} · offline", .{h.label}, 0),
-        } catch return;
-        const label = gtk.Label.new(text.ptr);
-        label.setXalign(0);
-        label.setEllipsize(.end);
-        label.as(gtk.Widget).addCssClass("host-heading");
-        const row = gtk.ListBoxRow.new();
-        row.setChild(label.as(gtk.Widget));
-        row.setActivatable(0);
-        row.setSelectable(0);
-        row.as(gtk.Widget).addCssClass("host-row");
-        a.sidebar.append(row.as(gtk.Widget));
-        a.rows.append(gpa, null) catch {};
-    }
-
-    fn addSessions(a: *App, h: *Host) void {
-        const s = h.server;
-        for (s.sessions.items) |session| {
-            var buf: [256]u8 = undefined;
-            const heading = std.fmt.bufPrintSentinel(&buf, "{s}", .{if (session.label.len > 0) session.label else "Session"}, 0) catch continue;
-            const label = gtk.Label.new(heading.ptr);
-            label.setXalign(0);
-            label.setEllipsize(.end);
-            label.as(gtk.Widget).setHexpand(1);
-            label.as(gtk.Widget).addCssClass("session-heading");
-            const head = gtk.Box.new(.horizontal, 0);
-            head.append(label.as(gtk.Widget));
-            const collapsed = a.collapsed.contains(session.id);
-            // On hover, like Rex: a new window in this session, and folding its windows away.
-            const sid_z = gpa.dupeSentinel(u8, session.id, 0) catch continue;
-            defer gpa.free(sid_z);
-            const add = icons.button(.plus, "New window here", "app.new-window-in");
-            add.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
-            add.as(gtk.Widget).addCssClass("session-tool");
-            head.append(add.as(gtk.Widget));
-            const fold = icons.button(if (collapsed) .right else .down, if (collapsed) "Show windows" else "Hide windows", "app.toggle-session");
-            fold.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(sid_z.ptr));
-            fold.as(gtk.Widget).addCssClass("session-tool");
-            if (collapsed) fold.as(gtk.Widget).addCssClass("folded");
-            if (settings.current.tab_position == .above) fold.as(gtk.Widget).setVisible(0);
-            head.append(fold.as(gtk.Widget));
-            const session_more = menuButton(sessionMenu(session.id), "Session");
-            session_more.as(gtk.Widget).addCssClass("session-tool");
-            head.append(session_more.as(gtk.Widget));
-            const head_row = gtk.ListBoxRow.new();
-            head_row.setChild(head.as(gtk.Widget));
-            head_row.setActivatable(0);
-            head_row.setSelectable(0);
-            head_row.as(gtk.Widget).addCssClass("session-row");
-            a.sidebar.append(head_row.as(gtk.Widget));
-            if (settings.current.tab_position == .above) {
-                // Tabs above the panes hold the windows; the sidebar picks the session.
-                head_row.setActivatable(1);
-                head_row.setSelectable(1);
-                head_row.as(gtk.Widget).addCssClass("session-pick");
-                a.rows.append(gpa, .{ .host = h, .session_id = gpa.dupe(u8, session.id) catch continue, .window_id = gpa.dupe(u8, "") catch continue }) catch {};
-                continue;
-            }
-            a.rows.append(gpa, null) catch {};
-            if (collapsed) continue;
-            const v = s.sessionView(session.id) orelse continue;
-            for (v.windows) |*w| {
-                var tbuf: [256]u8 = undefined;
-                const title = rowTitle(h, &tbuf, w, v);
-                const item = gtk.Label.new(title.ptr);
-                item.setXalign(0);
-                item.setEllipsize(.end);
-                item.as(gtk.Widget).addCssClass("row-title");
-                item.as(gtk.Widget).setHexpand(1);
-                const line = gtk.Box.new(.horizontal, 8);
-                const tile = rowTile(s, w);
-                line.append(tile);
-                line.append(item.as(gtk.Widget));
-                const more = menuButton(windowMenu(session.id, w.id), "Window");
-                more.as(gtk.Widget).addCssClass("row-more");
-                line.append(more.as(gtk.Widget));
-                const row = gtk.ListBoxRow.new();
-                row.setChild(line.as(gtk.Widget));
-                a.sidebar.append(row.as(gtk.Widget));
-                a.rows.append(gpa, .{
-                    .host = h,
-                    .session_id = gpa.dupe(u8, session.id) catch continue,
-                    .window_id = gpa.dupe(u8, w.id) catch continue,
-                    .label = item,
-                    .line = line,
-                    .tile = tile,
-                }) catch {};
-            }
-        }
-    }
-
     /// A window's row shows its focused pane: that pane's program and title, like Rex.
     pub fn rowTitle(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
         if (w.focused_block_id) |fb| for (h.workspace.panes.items) |p| if (std.mem.eql(u8, p.block_id, fb)) {
@@ -1379,23 +1609,28 @@ pub const App = struct {
     }
 
     fn selectSidebarRow(a: *App) void {
+        const want = a.shownRow();
+        // The highlight is only touched when it has to move, so it never blinks.
+        if (a.sidebar.getSelectedRow() == want) return;
+        const was = a.rebuilding;
+        a.rebuilding = true;
+        defer a.rebuilding = was;
         // Nothing stays highlighted when the shown window has no row, such as an empty session.
-        a.sidebar.unselectAll();
-        const s = a.server orelse return;
-        const here = a.current orelse return;
-        const sid = a.session_id orelse return;
-        const v = s.sessionView(sid) orelse return;
-        const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return;
+        if (want) |row| a.sidebar.selectRow(row) else a.sidebar.unselectAll();
+    }
+
+    /// The sidebar row of the shown window, or of its session when tabs hold the windows.
+    fn shownRow(a: *App) ?*gtk.ListBoxRow {
+        const s = a.server orelse return null;
+        const here = a.current orelse return null;
+        const sid = a.session_id orelse return null;
+        const v = s.sessionView(sid) orelse return null;
+        const shown = (if (a.window_id) |wid| v.window(wid) else null) orelse v.activeWindow() orelse return null;
         for (a.rows.items, 0..) |r, i| if (r) |row| {
             const matches = if (row.window_id.len == 0) true else std.mem.eql(u8, row.window_id, shown.id);
-            if (row.host == here and std.mem.eql(u8, row.session_id, sid) and matches) {
-                const was = a.rebuilding;
-                a.rebuilding = true;
-                a.sidebar.selectRow(a.sidebar.getRowAtIndex(@intCast(i)));
-                a.rebuilding = was;
-                return;
-            }
+            if (row.host == here and std.mem.eql(u8, row.session_id, sid) and matches) return a.sidebar.getRowAtIndex(@intCast(i));
         };
+        return null;
     }
 
     pub fn openSession(a: *App, h: *Host, session_id: []const u8) void {
