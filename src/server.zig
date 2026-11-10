@@ -66,6 +66,8 @@ pub const BlockInfo = struct {
     progress: ?i32 = null,
     /// Finished, failed, needs you, or rang the bell, and not looked at since.
     attention: bool = false,
+    /// Whether the details were read from the server; events keep them current after that.
+    details: enum { unread, reading, read } = .unread,
 
     fn deinit(b: *BlockInfo) void {
         inline for (.{ "status_app", "status_kind", "message", "program", "folder", "title" }) |f| {
@@ -105,11 +107,17 @@ pub const Server = struct {
     retries: u5 = 0,
     retry_timer: c_uint = 0,
     rex_version: ?[]u8 = null,
+    /// The API revision the server answered with, or 0 before the first welcome.
+    api_revision: i64 = 0,
+    warned_old: bool = false,
     sessions: std.ArrayList(Session) = .empty,
     views: std.StringHashMapUnmanaged(*view.SessionView) = .empty,
     /// Sessions whose view is being fetched, and whether to fetch once more afterwards.
     fetching: std.StringHashMapUnmanaged(bool) = .empty,
     attached: std.StringHashMapUnmanaged(void) = .empty,
+    /// Sessions being attached to, each with what waits for it, so a session is attached once
+    /// however many panes and actions ask at the same moment.
+    attaching: std.StringHashMapUnmanaged(std.ArrayList(Waiter)) = .empty,
     streams: std.StringHashMapUnmanaged(*Stream) = .empty,
     blocks: std.StringHashMapUnmanaged(BlockInfo) = .empty,
     /// The last alert, for the window to show as a notification.
@@ -176,6 +184,13 @@ pub const Server = struct {
         s.overrides_arena.deinit();
         freeKeys(&s.fetching);
         freeKeys(&s.attached);
+        // Closing the connection above failed every attach, which ran and freed its waiters.
+        var ait = s.attaching.iterator();
+        while (ait.next()) |e| {
+            e.value_ptr.deinit(gpa);
+            gpa.free(e.key_ptr.*);
+        }
+        s.attaching.deinit(gpa);
         s.clearSessions();
         s.sessions.deinit(gpa);
         s.reason.deinit(gpa);
@@ -270,10 +285,25 @@ pub const Server = struct {
         if (c != s.attempt) return;
         if (s.reconnect_token) |t| gpa.free(t);
         s.reconnect_token = if (w.reconnect_token) |t| gpa.dupe(u8, t) catch null else null;
+        s.api_revision = w.api_revision;
         if (w.api_revision != control.api_revision) {
-            log.warn("server uses API revision {d}; Compy was written for {d}", .{ w.api_revision, control.api_revision });
+            log.info("server uses API revision {d}; Compy was written for {d}", .{ w.api_revision, control.api_revision });
         }
-        if (!w.resumed) freeKeys(&s.attached);
+        // A newer server still speaks this revision. An older one lacks calls Compy makes, so say
+        // so once per server rather than let things fail one by one with no reason given.
+        if (w.api_revision > 0 and w.api_revision < control.api_revision and !s.warned_old) {
+            s.warned_old = true;
+            s.showMessage("This Rex server is older than Compy expects, so some things may not work. Update Rex on that computer.");
+        }
+        if (!w.resumed) {
+            freeKeys(&s.attached);
+            // Nothing known from before is certain now: the server may have restarted, with its
+            // revisions starting over, and programs may have finished while away.
+            var vit = s.views.valueIterator();
+            while (vit.next()) |v| v.*.revision = -1;
+            var bit = s.blocks.valueIterator();
+            while (bit.next()) |b| b.details = .unread;
+        }
 
         var ids: std.ArrayList([]const u8) = .empty;
         defer ids.deinit(gpa);
@@ -291,13 +321,7 @@ pub const Server = struct {
                 if (s.rex_version) |v| gpa.free(v);
                 s.rex_version = if (json.str(json.get(payload, "server_status"), "rex_version")) |v| gpa.dupe(u8, v) catch null else null;
                 s.clearSessions();
-                for (json.array(json.get(payload, "attach_all"), "sessions")) |item| {
-                    const id = json.str(item, "session_id") orelse continue;
-                    s.sessions.append(gpa, .{
-                        .id = gpa.dupe(u8, id) catch continue,
-                        .label = gpa.dupe(u8, json.str(item, "label") orelse "") catch continue,
-                    }) catch {};
-                }
+                for (json.array(json.get(payload, "attach_all"), "sessions")) |item| s.addSession(item);
                 s.dropViewsOfGoneSessions();
                 for (s.sessions.items) |session| s.refreshView(session.id, -1);
                 s.retries = 0;
@@ -344,10 +368,7 @@ pub const Server = struct {
             const session = json.get(payload, "session");
             const id = json.str(session, "session_id") orelse return;
             if (!s.hasSession(id)) {
-                s.sessions.append(gpa, .{
-                    .id = gpa.dupe(u8, id) catch return,
-                    .label = gpa.dupe(u8, json.str(session, "label") orelse "") catch return,
-                }) catch return;
+                s.addSession(session);
                 s.notify(.sessions, null);
             }
             s.refreshView(id, -1);
@@ -537,10 +558,12 @@ pub const Server = struct {
         }
     };
 
-    /// Reads what a block runs, where, and its status, once; events keep them current after.
+    /// Reads what a block runs, where, and its status, once per connection that could have
+    /// missed a change; events keep them current after. A read that never arrived is tried again.
     fn readDetails(s: *Server, session_id: []const u8, block_id: []const u8) void {
-        if (s.blocks.contains(block_id)) return;
-        _ = s.infoFor(block_id);
+        const info = s.infoFor(block_id) orelse return;
+        if (info.details != .unread) return;
+        info.details = .reading;
         inline for (.{
             .{ "com.superlogical.terminal.program_status", .status },
             .{ "com.superlogical.terminal.title", .title },
@@ -557,11 +580,17 @@ pub const Server = struct {
     }
 
     fn gotDetail(s: *Server, d: *DetailFor, r: Result) void {
+        const b = s.blocks.getPtr(d.block_id) orelse return;
         const payload = switch (r) {
             .ok => |p| p,
-            .err => return,
+            .err => |e| {
+                // Lost on the way rather than refused, so the next view of the block asks again.
+                if (eql(e.code, "disconnected") or eql(e.code, "timeout")) b.details = .unread;
+                return;
+            },
         };
-        const b = s.blocks.getPtr(d.block_id) orelse return;
+        // The four reads go out together and `pwd` is the last of them.
+        if (d.which == .pwd and b.details == .reading) b.details = .read;
         switch (d.which) {
             .status => {
                 // The most urgent record counts.
@@ -592,13 +621,7 @@ pub const Server = struct {
         const items = json.array(payload, "sessions");
         if (items.len == 0) return;
         s.clearSessions();
-        for (items) |item| {
-            const id = json.str(item, "session_id") orelse continue;
-            s.sessions.append(gpa, .{
-                .id = gpa.dupe(u8, id) catch continue,
-                .label = gpa.dupe(u8, json.str(item, "label") orelse "") catch continue,
-            }) catch {};
-        }
+        for (items) |item| s.addSession(item);
         s.notify(.sessions, null);
     }
 
@@ -636,6 +659,16 @@ pub const Server = struct {
 
     pub fn sessionView(s: *Server, id: []const u8) ?*view.SessionView {
         return s.views.get(id);
+    }
+
+    /// Adds a session as the server describes it: an object with `session_id` and `label`.
+    fn addSession(s: *Server, item: ?json.Value) void {
+        const id = gpa.dupe(u8, json.str(item, "session_id") orelse return) catch return;
+        const label = gpa.dupe(u8, json.str(item, "label") orelse "") catch return gpa.free(id);
+        s.sessions.append(gpa, .{ .id = id, .label = label }) catch {
+            gpa.free(id);
+            gpa.free(label);
+        };
     }
 
     fn clearSessions(s: *Server) void {
@@ -680,22 +713,41 @@ pub const Server = struct {
             again.* = true;
             return;
         }
-        const key = gpa.dupe(u8, session_id) catch return;
-        s.fetching.put(gpa, key, false) catch return;
-        s.call("session.view", .{ .session_id = session_id }, Owned, .{ .text = gpa.dupe(u8, session_id) catch return }, fetchedView);
+        s.fetchView(session_id, 0);
     }
 
-    fn fetchedView(s: *Server, id: *Owned, r: Result) void {
-        const session_id = id.text;
-        const again = if (s.fetching.fetchRemove(session_id)) |e| blk: {
+    const ViewFetch = struct {
+        session_id: []u8,
+        tries: u8,
+        fn deinit(f: *ViewFetch) void {
+            gpa.free(f.session_id);
+        }
+    };
+
+    fn fetchView(s: *Server, session_id: []const u8, tries: u8) void {
+        const key = gpa.dupe(u8, session_id) catch return;
+        s.fetching.put(gpa, key, false) catch return gpa.free(key);
+        const own = gpa.dupe(u8, session_id) catch {
+            if (s.fetching.fetchRemove(session_id)) |e| gpa.free(e.key);
+            return;
+        };
+        s.call("session.view", .{ .session_id = session_id }, ViewFetch, .{ .session_id = own, .tries = tries }, fetchedView);
+    }
+
+    fn fetchedView(s: *Server, f: *ViewFetch, r: Result) void {
+        const again = if (s.fetching.fetchRemove(f.session_id)) |e| blk: {
             gpa.free(e.key);
             break :blk e.value;
         } else false;
         switch (r) {
             .ok => |payload| s.applyView(payload),
-            .err => {},
+            .err => |e| if (eql(e.code, "timeout") and s.control != null and s.hasSession(f.session_id)) {
+                // The layout on screen is stale until this arrives, so ask again, then say so.
+                if (f.tries < 2) return s.fetchView(f.session_id, f.tries + 1);
+                s.showMessage("Couldn't read this session's layout from the server");
+            },
         }
-        if (again) s.refreshView(session_id, -1);
+        if (again) s.refreshView(f.session_id, -1);
     }
 
     fn applyView(s: *Server, payload: ?json.Value) void {
@@ -709,7 +761,9 @@ pub const Server = struct {
             v.destroy();
             return;
         }
-        if (s.views.get(v.session_id)) |old| if (old.revision > v.revision) {
+        // An older view lost a race with a newer one, and the same revision is the same view:
+        // several answers often carry it, and showing each again would rebuild the panes each time.
+        if (s.views.get(v.session_id)) |old| if (old.revision >= v.revision) {
             v.destroy();
             return;
         };
@@ -769,27 +823,86 @@ pub const Server = struct {
             copy.deinit();
             return;
         }
-        if (s.attached.contains(st.session_id)) {
-            s.call("data.connect", .{ .session_id = st.session_id, .block_id = st.block_id, .data_ref_id = "terminal", .subprotocol = stream_mod.protocol }, TicketFor, t, ticketIssued);
-        } else {
-            s.call("session.attach", .{ .session_id = st.session_id }, TicketFor, t, attachedForTicket);
+        s.whenAttached(st.session_id, TicketFor, t, connectData);
+    }
+
+    fn connectData(s: *Server, t: *TicketFor, failure: ?control.Failure) void {
+        if (failure != null) {
+            if (s.streams.get(t.block_id)) |st| st.ticketFailed(t.gen);
+            return;
+        }
+        const session_id = gpa.dupe(u8, t.session_id) catch return;
+        const copy: TicketFor = .{
+            .session_id = session_id,
+            .block_id = gpa.dupe(u8, t.block_id) catch return gpa.free(session_id),
+            .gen = t.gen,
+        };
+        s.call("data.connect", .{ .session_id = t.session_id, .block_id = t.block_id, .data_ref_id = "terminal", .subprotocol = stream_mod.protocol }, TicketFor, copy, ticketIssued);
+    }
+
+    /// Something waiting for a session to be attached.
+    const Waiter = struct {
+        ctx: *anyopaque,
+        run: *const fn (ctx: *anyopaque, s: *Server, failure: ?control.Failure) void,
+    };
+
+    /// Runs `then` once this client is attached to the session, attaching first if needed, or
+    /// with the failure if that can't be done. `then` is always called once; `extra` is freed after.
+    fn whenAttached(s: *Server, session_id: []const u8, comptime Extra: type, extra: Extra, comptime then: fn (*Server, *Extra, ?control.Failure) void) void {
+        const Box = struct {
+            extra: Extra,
+            fn run(ctx: *anyopaque, server: *Server, failure: ?control.Failure) void {
+                const box: *@This() = @ptrCast(@alignCast(ctx));
+                finish(server, &box.extra, failure);
+                gpa.destroy(box);
+            }
+            fn finish(server: *Server, e: *Extra, failure: ?control.Failure) void {
+                then(server, e, failure);
+                if (comptime hasDeinit(Extra)) e.deinit();
+            }
+        };
+        var mine = extra;
+        if (s.attached.contains(session_id)) return Box.finish(s, &mine, null);
+        const no_room: control.Failure = .{ .code = "internal", .message = "Out of memory" };
+        const box = gpa.create(Box) catch return Box.finish(s, &mine, no_room);
+        box.* = .{ .extra = extra };
+        const waiter: Waiter = .{ .ctx = box, .run = Box.run };
+        if (s.attaching.getPtr(session_id)) |waiters| {
+            waiters.append(gpa, waiter) catch Box.run(box, s, no_room);
+            return;
+        }
+        var waiters: std.ArrayList(Waiter) = .empty;
+        waiters.append(gpa, waiter) catch return Box.run(box, s, no_room);
+        const key = gpa.dupe(u8, session_id) catch {
+            waiters.deinit(gpa);
+            return Box.run(box, s, no_room);
+        };
+        s.attaching.put(gpa, key, waiters) catch {
+            gpa.free(key);
+            waiters.deinit(gpa);
+            return Box.run(box, s, no_room);
+        };
+        const own = gpa.dupe(u8, session_id) catch return s.attachDone(session_id, no_room);
+        s.call("session.attach", .{ .session_id = session_id }, Owned, .{ .text = own }, attachAnswered);
+    }
+
+    fn attachAnswered(s: *Server, id: *Owned, r: Result) void {
+        switch (r) {
+            .ok => |payload| {
+                s.markAttached(id.text);
+                if (json.get(payload, "view")) |v| s.applyView(v);
+                s.attachDone(id.text, null);
+            },
+            .err => |e| s.attachDone(id.text, e),
         }
     }
 
-    fn attachedForTicket(s: *Server, t: *TicketFor, r: Result) void {
-        switch (r) {
-            .ok => |payload| {
-                s.markAttached(t.session_id);
-                if (json.get(payload, "view")) |v| s.applyView(v);
-                const copy: TicketFor = .{
-                    .session_id = gpa.dupe(u8, t.session_id) catch return,
-                    .block_id = gpa.dupe(u8, t.block_id) catch return,
-                    .gen = t.gen,
-                };
-                s.call("data.connect", .{ .session_id = t.session_id, .block_id = t.block_id, .data_ref_id = "terminal", .subprotocol = stream_mod.protocol }, TicketFor, copy, ticketIssued);
-            },
-            .err => if (s.streams.get(t.block_id)) |st| st.ticketFailed(t.gen),
-        }
+    fn attachDone(s: *Server, session_id: []const u8, failure: ?control.Failure) void {
+        const entry = s.attaching.fetchRemove(session_id) orelse return;
+        gpa.free(entry.key);
+        var waiters = entry.value;
+        defer waiters.deinit(gpa);
+        for (waiters.items) |w| w.run(w.ctx, s, failure);
     }
 
     fn ticketIssued(s: *Server, t: *TicketFor, r: Result) void {
@@ -1157,8 +1270,6 @@ pub const Server = struct {
     }
 
     pub fn createSession(s: *Server, label: []const u8) void {
-        log.warn("creating a session", .{});
-        if (std.c.getenv("COMPY_DEBUG") != null) std.debug.dumpCurrentStackTrace(.{});
         if (s.control == null) return s.showMessage("Not connected to the server");
         s.call("session.create", .{
             .label = label,
@@ -1170,18 +1281,16 @@ pub const Server = struct {
         s.act(session_id, "session.destroy", .{ .session_id = session_id });
     }
 
+    /// A change waiting for its session to be attached.
     const Pending = struct {
-        session_id: []u8,
         method: []u8,
         payload: []u8,
         fn deinit(p: *Pending) void {
-            gpa.free(p.session_id);
             gpa.free(p.method);
             gpa.free(p.payload);
         }
     };
 
-    /// Runs a change in a session, attaching to it first if needed. Failures are shown.
     /// Reads the person's actions and bindings for the command palette.
     pub fn fetchKeymap(s: *Server) void {
         s.call("client.keymap", no_args, void, {}, gotKeymap);
@@ -1216,9 +1325,7 @@ pub const Server = struct {
                         else => {},
                     }
                 }
-                if (json.get(b, "args")) |v| if (v != .null) {
-                    args = std.json.Stringify.valueAlloc(a, v, .{}) catch null;
-                };
+                args = argsText(a, b);
             }
             list.append(a, .{
                 .name = a.dupe(u8, name) catch continue,
@@ -1241,10 +1348,7 @@ pub const Server = struct {
                 .string => |t| t,
                 else => continue,
             };
-            var args: ?[]const u8 = null;
-            if (json.get(b, "args")) |v| if (v != .null) {
-                args = std.json.Stringify.valueAlloc(a, v, .{}) catch null;
-            };
+            const args = argsText(a, b);
             modes.append(a, .{
                 .mode = a.dupe(u8, mode) catch continue,
                 .keys = a.dupe(u8, key) catch continue,
@@ -1267,10 +1371,7 @@ pub const Server = struct {
             for (json.array(payload, "actions")) |item| if (eql(json.str(item, "name") orelse "", action)) {
                 lua = eql(json.str(item, "kind") orelse "", "lua");
             };
-            var args: ?[]const u8 = null;
-            if (json.get(b, "args")) |v| if (v != .null) {
-                args = std.json.Stringify.valueAlloc(a, v, .{}) catch null;
-            };
+            const args = argsText(a, b);
             binds.append(a, .{ .keys = seq.items, .action = a.dupe(u8, action) catch continue, .args = args, .lua = lua }) catch {};
         }
         s.config_bindings = binds.items;
@@ -1348,20 +1449,12 @@ pub const Server = struct {
 
     /// Runs one of the person's Rex actions, as the palette does.
     pub fn runAction(s: *Server, session_id: []const u8, block_id: ?[]const u8, action: []const u8, args: ?[]const u8) void {
-        // Fields go out only when set, as the Android app sends them.
-        if (block_id) |b| {
-            if (args) |t| {
-                s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .block_id = b, .args = json.Raw{ .text = t }, .origin = "palette" });
-            } else {
-                s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .block_id = b, .origin = "palette" });
-            }
-        } else if (args) |t| {
-            s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .args = json.Raw{ .text = t }, .origin = "palette" });
-        } else {
-            s.act(session_id, "client.action", .{ .action = action, .session_id = session_id, .origin = "palette" });
-        }
+        const text = actionRequest(gpa, session_id, block_id, action, args) catch return;
+        defer gpa.free(text);
+        s.act(session_id, "client.action", json.Raw{ .text = text });
     }
 
+    /// Runs a change in a session, attaching to it first if needed. Failures are shown.
     fn act(s: *Server, session_id: []const u8, method: []const u8, payload: anytype) void {
         if (s.control == null) return s.showMessage("Not connected to the server");
         if (s.attached.contains(session_id)) {
@@ -1370,22 +1463,15 @@ pub const Server = struct {
         }
         const encoded = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch return;
         const p: Pending = .{
-            .session_id = gpa.dupe(u8, session_id) catch return gpa.free(encoded),
             .method = gpa.dupe(u8, method) catch return gpa.free(encoded),
             .payload = encoded,
         };
-        s.call("session.attach", .{ .session_id = session_id }, Pending, p, attachedForAct);
+        s.whenAttached(session_id, Pending, p, actNow);
     }
 
-    fn attachedForAct(s: *Server, p: *Pending, r: Result) void {
-        switch (r) {
-            .ok => |payload| {
-                s.markAttached(p.session_id);
-                if (json.get(payload, "view")) |v| s.applyView(v);
-                s.call(p.method, json.Raw{ .text = p.payload }, void, {}, acted);
-            },
-            .err => |e| s.showMessage(e.message),
-        }
+    fn actNow(s: *Server, p: *Pending, failure: ?control.Failure) void {
+        if (failure) |f| return s.showMessage(f.message);
+        s.call(p.method, json.Raw{ .text = p.payload }, void, {}, acted);
     }
 
     fn acted(s: *Server, _: *void, r: Result) void {
@@ -1416,6 +1502,25 @@ pub const Server = struct {
     }
 };
 
+/// A `client.action` request. Fields go out only when set, as the Android app sends them.
+fn actionRequest(a: std.mem.Allocator, session_id: []const u8, block_id: ?[]const u8, action: []const u8, args: ?[]const u8) ![]u8 {
+    const request: struct { action: []const u8, session_id: []const u8, block_id: ?[]const u8, args: ?json.Raw, origin: []const u8 } = .{
+        .action = action,
+        .session_id = session_id,
+        .block_id = block_id,
+        .args = if (args) |t| .{ .text = t } else null,
+        .origin = "palette",
+    };
+    return std.json.Stringify.valueAlloc(a, request, .{ .emit_null_optional_fields = false });
+}
+
+/// A binding's arguments as JSON text, or null when it has none.
+fn argsText(a: std.mem.Allocator, binding: json.Value) ?[]const u8 {
+    const v = json.get(binding, "args") orelse return null;
+    if (v == .null) return null;
+    return std.json.Stringify.valueAlloc(a, v, .{}) catch null;
+}
+
 /// A string a call owns until it finishes.
 const Owned = struct {
     text: []u8,
@@ -1439,4 +1544,25 @@ fn freeKeys(map: anytype) void {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+test "an action request leaves out what isn't set" {
+    const t = std.testing.allocator;
+    const bare = try actionRequest(t, "s1", null, "pane.zoom", null);
+    defer t.free(bare);
+    try std.testing.expectEqualStrings("{\"action\":\"pane.zoom\",\"session_id\":\"s1\",\"origin\":\"palette\"}", bare);
+    const full = try actionRequest(t, "s1", "b1", "pane.resize", "{\"by\":2}");
+    defer t.free(full);
+    try std.testing.expectEqualStrings("{\"action\":\"pane.resize\",\"session_id\":\"s1\",\"block_id\":\"b1\",\"args\":{\"by\":2},\"origin\":\"palette\"}", full);
+}
+
+test "a binding's arguments are read as JSON text" {
+    var parsed = try std.json.parseFromSlice(json.Value, std.testing.allocator, "[{\"args\":{\"n\":1}},{\"args\":null},{}]", .{});
+    defer parsed.deinit();
+    const items = parsed.value.array.items;
+    const text = argsText(std.testing.allocator, items[0]).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("{\"n\":1}", text);
+    try std.testing.expectEqual(@as(?[]const u8, null), argsText(std.testing.allocator, items[1]));
+    try std.testing.expectEqual(@as(?[]const u8, null), argsText(std.testing.allocator, items[2]));
 }
