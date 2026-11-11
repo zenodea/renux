@@ -112,4 +112,5 @@ test {
     _ = @import("settings/theme_editor.zig");
     _ = @import("rex/tailscale.zig");
     _ = @import("util/qr.zig");
+    _ = @import("terminal/shader.zig");
 }

@@ -1,9 +1,9 @@
 // CRT: a slight curve to the glass, faint scanlines and edges a little darker. Gentle on
 // purpose; raise the numbers below for more. Nothing moves, so it costs nothing between frames.
 
-const float CURVE = 0.10;      // how much the glass bulges
-const float SCANLINES = 0.06;  // how dark the scanlines get
-const float VIGNETTE = 0.18;   // how dark the edges get
+const float CURVE = 0.10;      // 0 to 0.4: how much the glass bulges
+const float SCANLINES = 0.06;  // 0 to 0.5: how dark the scanlines get
+const float VIGNETTE = 0.18;   // 0 to 0.25: how dark the edges get
 
 vec2 curve(vec2 uv) {
     uv = uv * 2.0 - 1.0;

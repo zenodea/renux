@@ -1,7 +1,7 @@
 // Vignette: the pane's edges fade a little darker, which draws the eye to the middle.
 
-const float STRENGTH = 0.35;   // how dark the corners get
-const float SOFTNESS = 0.55;   // how far in the fade starts
+const float STRENGTH = 0.35;   // 0 to 1: how dark the corners get
+const float SOFTNESS = 0.55;   // 0.2 to 1.2: how far in the fade starts
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;

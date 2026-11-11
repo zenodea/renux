@@ -1,8 +1,8 @@
 // Bloom: bright text gives off a soft glow, like a screen turned up a little too far.
 
-const float STRENGTH = 0.55;   // how bright the glow is
-const float RADIUS = 2.5;      // how far it spreads, in pixels per ring
-const float THRESHOLD = 0.45;  // how bright something must be to glow
+const float STRENGTH = 0.55;   // 0 to 2: how bright the glow is
+const float RADIUS = 2.5;      // 0.5 to 8: how far it spreads, in pixels per ring
+const float THRESHOLD = 0.45;  // 0 to 1: how bright something must be to glow
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;

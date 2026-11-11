@@ -1,10 +1,10 @@
 // Cursor ripple: when the cursor jumps, a ring in its color spreads out from where it landed
 // and fades. Moves of a single character, as when typing, make no ripple.
 
-const float DURATION = 0.4;    // seconds the ring lasts
-const float SIZE = 2.5;        // how wide it grows, in cursor heights
-const float OPACITY = 0.6;
-const float MIN_JUMP = 1.5;    // in cursor heights; shorter moves make no ripple
+const float DURATION = 0.4;    // 0.1 to 1.5: seconds the ring lasts
+const float SIZE = 2.5;        // 0.5 to 8: how wide it grows, in cursor heights
+const float OPACITY = 0.6;     // 0 to 1: how solid the ring is
+const float MIN_JUMP = 1.5;    // 0 to 5: in cursor heights; shorter moves make no ripple
 
 vec4 over(vec4 base, vec3 color, float amount) {
     return vec4(color * amount + base.rgb * (1.0 - amount), amount + base.a * (1.0 - amount));

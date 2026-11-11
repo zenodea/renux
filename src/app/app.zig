@@ -271,6 +271,8 @@ pub const App = struct {
     card: *gtk.Widget = undefined,
     /// The window's see-through background, under everything, with holes for the terminals.
     window_bg: *gtk.Widget = undefined,
+    /// The window's one cursor, as the cursor shader draws it, over every pane.
+    cursor_layer: *gtk.Widget = undefined,
     corner: *gtk.Widget = undefined,
     corner_tick: c_uint = 0,
     corner_until: i64 = 0,
@@ -578,6 +580,12 @@ pub const App = struct {
         a.toasts = adw.ToastOverlay.new();
         const layered = gtk.Overlay.new();
         layered.setChild(split.as(gtk.Widget));
+        // The cursor shader's layer lies over the panes, under the window's own buttons.
+        const cursor_layer = @import("../ui/cursor_layer.zig");
+        a.cursor_layer = cursor_layer.CursorLayer.new().as(gtk.Widget);
+        cursor_layer.current = &cursorPane;
+        termview.on_drawn = &paneDrawn;
+        layered.addOverlay(a.cursor_layer);
         layered.addOverlay(corner.as(gtk.Widget));
         // Which Rex key mode is on, such as resize, while one is.
         a.mode_chip = gtk.Label.new("");
@@ -3803,6 +3811,21 @@ fn windowHoles(background: *gtk.Widget, out: []@import("../ui/window_bg.zig").Ho
     if (a.board.shown()) return 0;
     const ws = a.workspace orelse return 0;
     return ws.cardBounds(background, out);
+}
+
+/// The pane that has the window's one cursor: the one with the keyboard, while panes show.
+fn cursorPane() ?*termview.TermView {
+    const a = mode_app orelse return null;
+    if (a.board.shown()) return null;
+    const ws = a.workspace orelse return null;
+    return ws.focusedView();
+}
+
+/// A pane drew: if it has the window's cursor, the cursor layer follows it.
+fn paneDrawn(v: *termview.TermView) void {
+    const a = mode_app orelse return;
+    if (cursorPane() != v) return;
+    a.cursor_layer.queueDraw();
 }
 
 /// A custom shader that can't be used says why, once, rather than the panes quietly not

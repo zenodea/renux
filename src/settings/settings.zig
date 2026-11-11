@@ -34,6 +34,11 @@ pub const Settings = struct {
     /// A Shadertoy-style GLSL file, as Ghostty's custom-shader, that panes are drawn through;
     /// empty for none.
     custom_shader: []u8,
+    /// The shader drawn once over the whole window at its one cursor, which moves from pane to
+    /// pane with the keyboard; empty for none.
+    cursor_shader: []u8,
+    /// The shaders' sliders: `shader|NAME|value` entries, split by `;`.
+    shader_params: []u8,
     /// Extra pixels between characters; negative brings them closer.
     letter_spacing: f64 = 0,
     /// How opaque the window behind the panes is, from 0.2 to 1.

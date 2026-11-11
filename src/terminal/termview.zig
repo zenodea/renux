@@ -97,6 +97,8 @@ pub var font: ?Font = null;
 pub var cursor_accent: u32 = 0;
 /// How opaque a terminal's own background is.
 pub var term_opacity: f64 = 1;
+/// Told each time a pane has drawn, so the window's cursor layer can follow its cursor.
+pub var on_drawn: ?*const fn (v: *TermView) void = null;
 /// Set while the sidebar's edge is being dragged: panes keep the size their programs have, so
 /// text isn't laid out again at every step of the drag, and take the new size once at the end.
 pub var hold_sizes: bool = false;
@@ -130,7 +132,9 @@ const Canvas = extern struct {
         const v = self.view orelse return;
         // The shader's view shows what this drew, so it draws again after this does.
         defer if (v.shader_view) |sv| sv.as(gtk.Widget).queueDraw();
-        if (!shader.active()) {
+        // The window's cursor layer follows the cursor this drew, if this pane has it.
+        defer if (on_drawn) |f| f(v);
+        if (!shader.pane.active()) {
             v.shader_drawn = false;
             return snapshotTermImpl(v, sn);
         }
@@ -189,18 +193,18 @@ const ShaderView = extern struct {
 
     fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
         const v = self.view orelse return;
-        if (!v.shader_drawn or !shader.active()) return;
+        if (!v.shader_drawn or !shader.pane.active()) return;
         const focused = v.widget().hasFocus() != 0;
         _ = shader.drawOutput(&v.shader_pane, &v.shader_look, focused, sn);
         // A shader that moves with time draws the pane with the keyboard again every frame, as
         // Ghostty does; the others keep their last frame until the pane changes.
-        if (focused and v.shader_tick == 0 and shader.wantsFrames(&v.shader_pane)) v.shader_tick = self.as(gtk.Widget).addTickCallback(&shaderTick, v, null);
+        if (focused and v.shader_tick == 0 and shader.pane.wantsFrames(&v.shader_pane)) v.shader_tick = self.as(gtk.Widget).addTickCallback(&shaderTick, v, null);
     }
 
     fn shaderTick(widget: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
         const v: *TermView = @ptrCast(@alignCast(data.?));
         widget.queueDraw();
-        if (v.widget().hasFocus() != 0 and shader.wantsFrames(&v.shader_pane)) return 1;
+        if (v.widget().hasFocus() != 0 and shader.pane.wantsFrames(&v.shader_pane)) return 1;
         // One more frame is drawn, so a fading effect doesn't stay half done.
         v.shader_tick = 0;
         return 0;
@@ -1979,6 +1983,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
     v.shader_look.bg = f.bg;
+    v.shader_look.bg_alpha = @floatCast(term_opacity);
     v.shader_look.fg = f.fg;
     v.shader_look.cursor_visible = f.cursor_visible;
 

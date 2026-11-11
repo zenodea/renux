@@ -1,8 +1,8 @@
 // Focus dim: panes without the keyboard fade a little and lose some color, so the one you're
 // typing in stands out.
 
-const float DIM = 0.25;        // how much darker the other panes get
-const float GREY = 0.5;        // how much of their color goes
+const float DIM = 0.25;        // 0 to 0.8: how much darker the other panes get
+const float GREY = 0.5;        // 0 to 1: how much of their color goes
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec4 c = texture(iChannel0, fragCoord / iResolution.xy);

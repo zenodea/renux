@@ -1,9 +1,9 @@
 // Cursor trail: when the cursor jumps, a smear in its color follows it from where it was and
 // fades. Moves of a single character, as when typing, leave no trail.
 
-const float DURATION = 0.22;   // seconds the trail takes to fade
-const float OPACITY = 0.6;
-const float MIN_JUMP = 1.5;    // in cursor heights; shorter moves leave no trail
+const float DURATION = 0.22;   // 0.05 to 1: seconds the trail takes to fade
+const float OPACITY = 0.6;     // 0 to 1: how solid the trail is
+const float MIN_JUMP = 1.5;    // 0 to 5: in cursor heights; shorter moves leave no trail
 
 float segment(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a;

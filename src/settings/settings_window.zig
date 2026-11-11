@@ -624,23 +624,47 @@ fn themeNames(ctx: *Ctx, list: *gtk.StringList) void {
     }
 }
 
-/// The shader the panes are drawn through: none, one that comes with Renux, or the person's
-/// own file, which settings.ini names as custom-shader.
+/// The shaders: one each pane is drawn through, and one drawn once over the window at its
+/// cursor. Each is none, one that comes with Renux, or the person's own file, which
+/// settings.ini names. Under each, a slider for every number its file marks as adjustable.
 fn shaderRow(ctx: *Ctx, p: *adw.PreferencesPage) void {
-    const shader = @import("../terminal/shader.zig");
-    const g = group(p, "Shader", "Drawn over each pane, as Ghostty's custom shaders are; those work here too. For your own, put its path in settings.ini as custom-shader.");
+    const g = group(p, "Shaders", "Drawn over the panes, as Ghostty's custom shaders are, and Ghostty's work here too. For your own, put its path in settings.ini as custom-shader or cursor-shader.");
+    inline for (.{ shader_mod.Kind.pane, shader_mod.Kind.cursor }) |kind| {
+        const params = group(p, "", null);
+        const ui = ctx.keep(ParamsUi{ .ctx = ctx, .kind = kind, .group = params }) orelse return;
+        shaderPicker(ctx, g, ui);
+        ui.rebuild();
+    }
+}
+
+const shader_mod = @import("../terminal/shader.zig");
+
+fn programOf(kind: shader_mod.Kind) *shader_mod.Program {
+    return switch (kind) {
+        .pane => &shader_mod.pane,
+        .cursor => &shader_mod.cursor,
+    };
+}
+
+fn shaderPicker(ctx: *Ctx, g: *adw.PreferencesGroup, ui: *ParamsUi) void {
+    const field = switch (ui.kind) {
+        .pane => &settings.current.custom_shader,
+        .cursor => &settings.current.cursor_shader,
+    };
     var values: std.ArrayList([]const u8) = .empty;
     const list = gtk.StringList.new(null);
     defer list.as(gobject.Object).unref();
     values.append(ctx.al(), "") catch return;
     list.append("None");
-    for (shader.bundledNames(ctx.al())) |name| {
+    // Cursor shaders come with names that say so.
+    for (shader_mod.bundledNames(ctx.al())) |name| {
+        if (std.mem.startsWith(u8, name, "cursor-") != (ui.kind == .cursor)) continue;
         values.append(ctx.al(), name) catch return;
         var buf: [64]u8 = undefined;
         list.append(shaderTitle(&buf, name).ptr);
     }
     // A file of the person's own is listed too, while it's the one set.
-    const current = settings.current.custom_shader;
+    const current = field.*;
     const known = for (values.items) |v| {
         if (std.mem.eql(u8, v, current)) break true;
     } else false;
@@ -652,21 +676,106 @@ fn shaderRow(ctx: *Ctx, p: *adw.PreferencesPage) void {
         list.append(title.ptr);
     }
     const row = adw.ComboRow.new();
-    row.as(adw.PreferencesRow).setTitle("Shader");
+    row.as(adw.PreferencesRow).setTitle(if (ui.kind == .pane) "Pane shader" else "Cursor shader");
+    row.as(adw.ActionRow).setSubtitle(if (ui.kind == .pane) "Each pane is drawn through it" else "Drawn at the window's one cursor, which moves with the keyboard from pane to pane");
     row.setModel(list.as(gio.ListModel));
     for (values.items, 0..) |v, i| if (std.mem.eql(u8, v, current)) row.setSelected(@intCast(i));
     g.add(row.as(gtk.Widget));
-    const Picked = struct { ctx: *Ctx, values: []const []const u8 };
-    const choice = ctx.keep(Picked{ .ctx = ctx, .values = values.items }) orelse return;
+    const Picked = struct { ui: *ParamsUi, field: *[]u8, values: []const []const u8 };
+    const choice = ctx.keep(Picked{ .ui = ui, .field = field, .values = values.items }) orelse return;
     const H = struct {
         fn changed(r: *adw.ComboRow, _: *gobject.ParamSpec, pk: *Picked) callconv(.c) void {
             const i = r.getSelected();
-            if (i >= pk.values.len or std.mem.eql(u8, pk.values[i], settings.current.custom_shader)) return;
-            settings.setString(&settings.current.custom_shader, pk.values[i]);
-            pk.ctx.app.redrawAll();
+            if (i >= pk.values.len or std.mem.eql(u8, pk.values[i], pk.field.*)) return;
+            settings.setString(pk.field, pk.values[i]);
+            programOf(pk.ui.kind).reload();
+            pk.ui.rebuild();
+            pk.ui.ctx.app.redrawAll();
         }
     };
     _ = gobject.Object.signals.notify.connect(row, *Picked, &H.changed, choice, .{ .detail = "selected" });
+}
+
+/// The sliders of one shader, made again when another shader is picked.
+const ParamsUi = struct {
+    ctx: *Ctx,
+    kind: shader_mod.Kind,
+    group: *adw.PreferencesGroup,
+    rows: std.ArrayList(*gtk.Widget) = .empty,
+    sliders: std.ArrayList(*Slider) = .empty,
+    reset: ?*gtk.Button = null,
+
+    fn setting(ui: *const ParamsUi) []const u8 {
+        return programOf(ui.kind).setting();
+    }
+
+    fn rebuild(ui: *ParamsUi) void {
+        for (ui.rows.items) |r| ui.group.remove(r);
+        ui.rows.clearRetainingCapacity();
+        ui.sliders.clearRetainingCapacity();
+        const s = ui.setting();
+        const params = if (s.len == 0) &[_]shader_mod.Param{} else shader_mod.paramsOf(ui.ctx.al(), s);
+        ui.group.as(gtk.Widget).setVisible(@intFromBool(params.len > 0));
+        if (params.len == 0) return;
+        var tb: [96]u8 = undefined;
+        var nb: [64]u8 = undefined;
+        const title = std.fmt.bufPrintSentinel(&tb, "{s} Settings", .{if (shader_mod.isBundledName(s)) shaderTitle(&nb, s) else "Shader"}, 0) catch "Shader Settings";
+        ui.group.setTitle(title.ptr);
+        if (ui.reset == null) {
+            const b = rowButton("Reset");
+            _ = gtk.Button.signals.clicked.connect(b, *ParamsUi, &resetClicked, ui, .{});
+            ui.group.setHeaderSuffix(b.as(gtk.Widget));
+            ui.reset = b;
+        }
+        for (params) |param| {
+            const row = adw.ActionRow.new();
+            var hb: [64]u8 = undefined;
+            row.as(adw.PreferencesRow).setTitle(humanName(&hb, param.name).ptr);
+            if (param.about.len > 0) if (ui.ctx.al().dupeSentinel(u8, param.about, 0)) |about| row.setSubtitle(about.ptr) else |_| {};
+            const step: f64 = (param.max - param.min) / 100;
+            const scale = gtk.Scale.newWithRange(.horizontal, param.min, param.max, step);
+            scale.setDrawValue(1);
+            scale.setDigits(if (param.max - param.min >= 10) 1 else 2);
+            scale.setValuePos(.left);
+            scale.as(gtk.Widget).setSizeRequest(220, -1);
+            scale.as(gtk.Widget).setValign(.center);
+            scale.as(gtk.Range).setValue(param.value);
+            row.addSuffix(scale.as(gtk.Widget));
+            ui.group.add(row.as(gtk.Widget));
+            ui.rows.append(ui.ctx.al(), row.as(gtk.Widget)) catch return;
+            const slider = ui.ctx.keep(Slider{ .ui = ui, .name = param.name, .default = param.default, .scale = scale }) orelse return;
+            ui.sliders.append(ui.ctx.al(), slider) catch return;
+            _ = gtk.Range.signals.value_changed.connect(scale.as(gtk.Range), *Slider, &Slider.changed, slider, .{});
+        }
+    }
+
+    fn resetClicked(_: *gtk.Button, ui: *ParamsUi) callconv(.c) void {
+        for (ui.sliders.items) |sl| sl.scale.as(gtk.Range).setValue(sl.default);
+    }
+};
+
+const Slider = struct {
+    ui: *ParamsUi,
+    name: []const u8,
+    default: f32,
+    scale: *gtk.Scale,
+
+    fn changed(r: *gtk.Range, sl: *Slider) callconv(.c) void {
+        const v: f32 = @floatCast(r.getValue());
+        // Back at the shader's own value, the slider keeps nothing of its own.
+        const own = @abs(v - sl.default) < 0.00005;
+        shader_mod.setOverride(sl.ui.setting(), sl.name, if (own) null else v);
+        programOf(sl.ui.kind).reload();
+        sl.ui.ctx.app.redrawAll();
+    }
+};
+
+/// A shader's constant as a title: MIN_JUMP is Min jump.
+fn humanName(buf: []u8, name: []const u8) [:0]const u8 {
+    const n = @min(name.len, buf.len - 1);
+    for (name[0..n], 0..) |ch, i| buf[i] = if (ch == '_') ' ' else if (i == 0) std.ascii.toUpper(ch) else std.ascii.toLower(ch);
+    buf[n] = 0;
+    return buf[0..n :0];
 }
 
 /// A bundled shader's name as a title: crt is CRT, cursor-trail is Cursor trail.

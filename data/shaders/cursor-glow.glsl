@@ -1,8 +1,8 @@
 // Cursor glow: a soft halo in the cursor's own color, and nothing else changes. It doesn't
 // move, so it costs nothing between frames.
 
-const float STRENGTH = 0.35;   // how bright the halo is
-const float SIZE = 1.0;        // how far it reaches, in cursor heights
+const float STRENGTH = 0.35;   // 0 to 1: how bright the halo is
+const float SIZE = 1.0;        // 0.2 to 3: how far it reaches, in cursor heights
 
 vec4 addLight(vec4 base, vec3 color, float amount) {
     float alpha = base.a + amount * (1.0 - base.a);

@@ -24,23 +24,169 @@ const log = std.log.scoped(.shader);
 /// Told when the shader file can't be used, with why, so the person hears of it.
 pub var on_error: ?*const fn (message: []const u8) void = null;
 
-// The one OpenGL context all panes draw their shaders in, and the program built from the file.
+// The one OpenGL context all shaders draw in.
 var context: ?*gdk.GLContext = null;
 var context_failed = false;
-var program: c_uint = 0;
 var vao: c_uint = 0;
-var loc: Locations = .{};
-/// Which file the program came from and a hash of what it said, to build it again on a change.
-var source_path: ?[:0]u8 = null;
-var source_hash: u64 = 0;
-var checked_at: i64 = 0;
-/// The source uses the time, so the panes draw every frame.
-var uses_time = false;
-/// Its time is measured from the cursor's last move or from focus coming, so it settles.
-var follows_changes = false;
+/// A see-through pixel, the cursor layer's iChannel0: it has no picture of its own.
+var blank: c_uint = 0;
+/// Time 0 for every shader, so a shader built again keeps the same clock.
 var started_at: i64 = 0;
 
 const recheck_us = 500 * std.time.us_per_ms;
+
+/// How long after the cursor moves or focus comes a shader that only moves then, such as a
+/// cursor trail, is given frames.
+const settle_s = 1.5;
+
+/// Which of the two shaders: the one each pane is drawn through, or the one drawn once over
+/// the whole window at its one cursor, so a trail can run from one pane to the next.
+pub const Kind = enum { pane, cursor };
+
+/// A shader built from the file Settings names, built again when the file or its sliders change.
+pub const Program = struct {
+    kind: Kind,
+    id: c_uint = 0,
+    loc: Locations = .{},
+    /// The setting it was built for and a hash of what it compiled, to see a change.
+    seen: ?[:0]u8 = null,
+    hash: u64 = 0,
+    checked_at: i64 = 0,
+    /// The source uses the time, so its surfaces draw every frame.
+    uses_time: bool = false,
+    /// Its time is only measured from the cursor's last move or from focus coming, so it settles.
+    follows_changes: bool = false,
+
+    pub fn setting(prog: *const Program) []const u8 {
+        return switch (prog.kind) {
+            .pane => settings.current.custom_shader,
+            .cursor => settings.current.cursor_shader,
+        };
+    }
+
+    /// Whether the shader is set and ready. Reads the file again now and then, and builds the
+    /// program again when what it says, or a slider, has changed, so it can be edited live.
+    pub fn active(prog: *Program) bool {
+        const s = prog.setting();
+        // Cursor shaders were once set as the panes' shader; they belong to the cursor now.
+        if (prog.kind == .pane and isBundledName(s) and std.mem.startsWith(u8, s, "cursor-")) {
+            settings.setString(&settings.current.cursor_shader, s);
+            settings.setString(&settings.current.custom_shader, "");
+            return false;
+        }
+        if (s.len == 0) {
+            prog.unload();
+            return false;
+        }
+        const now = glib.getMonotonicTime();
+        const same = if (prog.seen) |x| std.mem.eql(u8, x, s) else false;
+        if (same and now - prog.checked_at < recheck_us) return prog.id != 0;
+        prog.checked_at = now;
+        if (!same) {
+            if (prog.seen) |x| gpa.free(x);
+            prog.seen = gpa.dupeSentinel(u8, s, 0) catch null;
+            prog.hash = 0;
+        }
+        const raw = readSource(s) orelse {
+            if (prog.hash != 1) report("Couldn't read the shader file", s);
+            prog.hash = 1;
+            prog.unloadProgram();
+            return false;
+        };
+        defer gpa.free(raw);
+        const source = withOverrides(s, raw) orelse return prog.id != 0;
+        defer gpa.free(source);
+        const hash = std.hash.Wyhash.hash(0, source);
+        if (hash == prog.hash) return prog.id != 0;
+        prog.hash = hash;
+        prog.unloadProgram();
+        prog.build(source);
+        return prog.id != 0;
+    }
+
+    /// Reads the file and its sliders again at the next drawing, rather than within half a second.
+    pub fn reload(prog: *Program) void {
+        prog.checked_at = 0;
+    }
+
+    /// Whether the shader draws differently as time passes.
+    pub fn animated(prog: *const Program) bool {
+        return prog.id != 0 and prog.uses_time;
+    }
+
+    /// Whether `p` should draw another frame now. A shader whose time is only measured from the
+    /// cursor's last move or from focus coming only moves for a moment after one, so it stops
+    /// asking for frames once that has passed rather than drawing the same picture again.
+    pub fn wantsFrames(prog: *const Program, p: *const Pane) bool {
+        if (!prog.animated()) return false;
+        if (!prog.follows_changes) return true;
+        return clock() - @max(p.cursor_changed_at, p.focused_at) < settle_s;
+    }
+
+    fn unload(prog: *Program) void {
+        prog.unloadProgram();
+        if (prog.seen) |x| gpa.free(x);
+        prog.seen = null;
+        prog.hash = 0;
+    }
+
+    fn unloadProgram(prog: *Program) void {
+        if (prog.id == 0) return;
+        const ctx = context orelse return;
+        ctx.makeCurrent();
+        gl.epoxy_glDeleteProgram.?(prog.id);
+        prog.id = 0;
+        gdk.GLContext.clearCurrent();
+    }
+
+    fn build(prog: *Program, source: []const u8) void {
+        const ctx = ensureContext() orelse return;
+        ctx.makeCurrent();
+        defer gdk.GLContext.clearCurrent();
+        var hb: [160]u8 = undefined;
+        const head = header(&hb, ctx);
+        const vs_text = std.mem.concat(gpa, u8, &.{ head, vertex_body }) catch return;
+        defer gpa.free(vs_text);
+        const fs_text = std.mem.concat(gpa, u8, &.{ head, prefix, source }) catch return;
+        defer gpa.free(fs_text);
+        const vs = compile(gl.GL_VERTEX_SHADER, vs_text) orelse return;
+        defer gl.epoxy_glDeleteShader.?(vs);
+        const fs = compile(gl.GL_FRAGMENT_SHADER, fs_text) orelse return;
+        defer gl.epoxy_glDeleteShader.?(fs);
+        const id = gl.epoxy_glCreateProgram.?();
+        gl.epoxy_glAttachShader.?(id, vs);
+        gl.epoxy_glAttachShader.?(id, fs);
+        gl.epoxy_glLinkProgram.?(id);
+        var ok: c_int = 0;
+        gl.epoxy_glGetProgramiv.?(id, gl.GL_LINK_STATUS, &ok);
+        if (ok == 0) {
+            var info: [1024]u8 = undefined;
+            var len: c_int = 0;
+            gl.epoxy_glGetProgramInfoLog.?(id, info.len, &len, &info);
+            report("The shader didn't link", firstLine(info[0..@intCast(@max(0, len))]));
+            gl.epoxy_glDeleteProgram.?(id);
+            return;
+        }
+        prog.id = id;
+        if (vao == 0) gl.epoxy_glGenVertexArrays.?(1, &vao);
+        inline for (comptime std.meta.fieldNames(Locations)) |field| {
+            const name = comptime uniformName(field);
+            @field(prog.loc, field) = gl.epoxy_glGetUniformLocation.?(id, name.ptr);
+        }
+        prog.uses_time = std.mem.indexOf(u8, source, "iTime") != null or std.mem.indexOf(u8, source, "iFrame") != null or std.mem.indexOf(u8, source, "iDate") != null;
+        prog.follows_changes = std.mem.indexOf(u8, source, "iTimeCursorChange") != null or std.mem.indexOf(u8, source, "iTimeFocus") != null;
+        log.info("{s} shader ready: {s}", .{ @tagName(prog.kind), prog.seen orelse "" });
+    }
+};
+
+pub var pane: Program = .{ .kind = .pane };
+pub var cursor: Program = .{ .kind = .cursor };
+
+/// Seconds since the shaders' time 0.
+fn clock() f32 {
+    if (started_at == 0) started_at = glib.getMonotonicTime();
+    return @floatCast(@as(f64, @floatFromInt(glib.getMonotonicTime() - started_at)) / std.time.us_per_s);
+}
 
 /// What a pane's drawing knows that a shader may use: where its cursor is, in the pane's own
 /// points from its top left, and the colors.
@@ -53,10 +199,13 @@ pub const Look = struct {
     /// Whether the program shows its cursor at all; a blink doesn't count.
     cursor_visible: bool = false,
     bg: u32 = 0,
+    /// How opaque the pane's background is drawn, as the Terminals setting has it.
+    bg_alpha: f32 = 1,
     fg: u32 = 0,
 };
 
-/// Each pane's own textures, kept between frames, and what its shader was last told.
+/// Each pane's own textures, kept between frames, and what its shader was last told. The
+/// window's cursor layer keeps one of these too.
 pub const Pane = struct {
     input: c_uint = 0,
     input_w: c_int = 0,
@@ -115,59 +264,11 @@ const Locations = struct {
     background_color: c_int = -1,
     foreground_color: c_int = -1,
     cursor_color: c_int = -1,
+    /// Renux's own: the background that fills what a shader leaves see-through, and where the
+    /// drawn region starts in the whole picture.
+    renux_background: c_int = -1,
+    renux_origin: c_int = -1,
 };
-
-/// Whether a shader is set and ready. Reads the file again now and then, and builds the
-/// program again when what it says has changed, so a shader can be edited while it runs.
-pub fn active() bool {
-    const setting = settings.current.custom_shader;
-    if (setting.len == 0) {
-        unload();
-        return false;
-    }
-    const now = glib.getMonotonicTime();
-    const same_path = if (source_path) |p| std.mem.eql(u8, p, setting) else false;
-    if (same_path and now - checked_at < recheck_us) return program != 0;
-    checked_at = now;
-    if (!same_path) {
-        if (source_path) |p| gpa.free(p);
-        source_path = gpa.dupeSentinel(u8, setting, 0) catch null;
-        source_hash = 0;
-    }
-    const source = readSource(setting) orelse {
-        if (source_hash != 1) report("Couldn't read the shader file", setting);
-        source_hash = 1;
-        unloadProgram();
-        return false;
-    };
-    defer gpa.free(source);
-    const hash = std.hash.Wyhash.hash(0, source);
-    if (hash == source_hash) return program != 0;
-    source_hash = hash;
-    unloadProgram();
-    build(source);
-    return program != 0;
-}
-
-/// Whether the shader draws differently as time passes, so its panes draw every frame.
-pub fn animated() bool {
-    return program != 0 and uses_time;
-}
-
-/// How long after the cursor moves or focus comes a shader that only moves then, such as a
-/// cursor trail, is given frames.
-const settle_s = 1.5;
-
-/// Whether the pane should draw another frame now. A shader whose time is only ever measured
-/// from the cursor's last move or from focus coming only moves for a moment after one, so it
-/// stops asking for frames once that moment has passed, rather than drawing an unchanged
-/// picture sixty times a second.
-pub fn wantsFrames(p: *const Pane) bool {
-    if (!animated()) return false;
-    if (!follows_changes) return true;
-    const now: f32 = @floatCast(@as(f64, @floatFromInt(glib.getMonotonicTime() - started_at)) / std.time.us_per_s);
-    return now - @max(p.cursor_changed_at, p.focused_at) < settle_s;
-}
 
 /// Where the shaders that come with Renux are: PREFIX/share/renux/shaders, beside the program.
 pub fn bundledDir(buf: []u8) ?[:0]const u8 {
@@ -226,22 +327,6 @@ fn report(comptime what: []const u8, detail: []const u8) void {
     const text = std.fmt.bufPrint(&buf, what ++ ": {s}", .{detail}) catch what;
     log.warn("{s}", .{text});
     if (on_error) |f| f(text);
-}
-
-fn unload() void {
-    unloadProgram();
-    if (source_path) |p| gpa.free(p);
-    source_path = null;
-    source_hash = 0;
-}
-
-fn unloadProgram() void {
-    if (program == 0) return;
-    const ctx = context orelse return;
-    ctx.makeCurrent();
-    gl.epoxy_glDeleteProgram.?(program);
-    program = 0;
-    gdk.GLContext.clearCurrent();
 }
 
 /// The OpenGL context, made the first time it's needed.
@@ -303,8 +388,15 @@ const prefix =
     \\uniform sampler2D iChannel0;
     \\out vec4 _fragColor;
     \\#define texture2D texture
+    \\uniform vec4 _renuxBackground;
+    \\uniform vec2 _renuxOrigin;
     \\void mainImage(out vec4 fragColor, in vec2 fragCoord);
-    \\void main() { mainImage(_fragColor, gl_FragCoord.xy); }
+    \\void main() {
+    \\    vec4 c = vec4(0.0);
+    \\    mainImage(c, gl_FragCoord.xy + _renuxOrigin);
+    \\    if (c.a < _renuxBackground.a) c += _renuxBackground * ((_renuxBackground.a - c.a) / _renuxBackground.a);
+    \\    _fragColor = c;
+    \\}
     \\#line 1
     \\
 ;
@@ -328,48 +420,10 @@ fn header(buf: []u8, ctx: *gdk.GLContext) []const u8 {
     return std.fmt.bufPrint(buf, "#version {d} es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n", .{v}) catch "#version 300 es\nprecision highp float;\n";
 }
 
-fn build(source: []const u8) void {
-    const ctx = ensureContext() orelse return;
-    ctx.makeCurrent();
-    defer gdk.GLContext.clearCurrent();
-    var hb: [160]u8 = undefined;
-    const head = header(&hb, ctx);
-    const vs_text = std.mem.concat(gpa, u8, &.{ head, vertex_body }) catch return;
-    defer gpa.free(vs_text);
-    const fs_text = std.mem.concat(gpa, u8, &.{ head, prefix, source }) catch return;
-    defer gpa.free(fs_text);
-    const vs = compile(gl.GL_VERTEX_SHADER, vs_text) orelse return;
-    defer gl.epoxy_glDeleteShader.?(vs);
-    const fs = compile(gl.GL_FRAGMENT_SHADER, fs_text) orelse return;
-    defer gl.epoxy_glDeleteShader.?(fs);
-    const p = gl.epoxy_glCreateProgram.?();
-    gl.epoxy_glAttachShader.?(p, vs);
-    gl.epoxy_glAttachShader.?(p, fs);
-    gl.epoxy_glLinkProgram.?(p);
-    var ok: c_int = 0;
-    gl.epoxy_glGetProgramiv.?(p, gl.GL_LINK_STATUS, &ok);
-    if (ok == 0) {
-        var info: [1024]u8 = undefined;
-        var len: c_int = 0;
-        gl.epoxy_glGetProgramInfoLog.?(p, info.len, &len, &info);
-        report("The shader didn't link", firstLine(info[0..@intCast(@max(0, len))]));
-        gl.epoxy_glDeleteProgram.?(p);
-        return;
-    }
-    program = p;
-    if (vao == 0) gl.epoxy_glGenVertexArrays.?(1, &vao);
-    inline for (comptime std.meta.fieldNames(Locations)) |field| {
-        const name = comptime uniformName(field);
-        @field(loc, field) = gl.epoxy_glGetUniformLocation.?(p, name.ptr);
-    }
-    uses_time = std.mem.indexOf(u8, source, "iTime") != null or std.mem.indexOf(u8, source, "iFrame") != null or std.mem.indexOf(u8, source, "iDate") != null;
-    follows_changes = std.mem.indexOf(u8, source, "iTimeCursorChange") != null or std.mem.indexOf(u8, source, "iTimeFocus") != null;
-    started_at = glib.getMonotonicTime();
-    log.info("shader ready: {s}", .{source_path orelse ""});
-}
-
 fn uniformName(comptime field: []const u8) [:0]const u8 {
     return comptime blk: {
+        if (std.mem.eql(u8, field, "renux_background")) break :blk "_renuxBackground";
+        if (std.mem.eql(u8, field, "renux_origin")) break :blk "_renuxOrigin";
         // resolution -> iResolution, time_delta -> iTimeDelta, channel0 -> iChannel0.
         var out: []const u8 = "i";
         var upper = true;
@@ -452,7 +506,7 @@ fn pictureRenderer() ?*gsk.Renderer {
 /// pane shows has changed: frames that only move the shader along keep the last picture.
 /// False if it couldn't, and the pane draws itself as usual.
 pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
-    if (program == 0) return false;
+    if (pane.id == 0) return false;
     const ctx = context orelse return false;
     const renderer = pictureRenderer() orelse return false;
     const w: f32 = @floatFromInt(widget.getWidth());
@@ -514,7 +568,7 @@ pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
 /// Runs the shader over the pane's last picture and draws what it makes into `sn`. Cheap: no
 /// picture is drawn or read back, so a shader that moves with time costs little per frame.
 pub fn drawOutput(p: *Pane, look: *const Look, focused: bool, sn: *gtk.Snapshot) bool {
-    if (program == 0 or p.input == 0) return false;
+    if (pane.id == 0 or p.input == 0) return false;
     const ctx = context orelse return false;
     const pw = p.input_w;
     const ph = p.input_h;
@@ -533,8 +587,14 @@ pub fn drawOutput(p: *Pane, look: *const Look, focused: bool, sn: *gtk.Snapshot)
     gl.epoxy_glFramebufferTexture2D.?(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, out, 0);
     gl.epoxy_glViewport.?(0, 0, pw, ph);
     gl.epoxy_glDisable.?(gl.GL_BLEND);
-    gl.epoxy_glUseProgram.?(program);
-    setUniforms(p, pw, ph, p.scale, look, focused);
+    gl.epoxy_glUseProgram.?(pane.id);
+    setUniforms(&pane, p, pw, ph, p.scale, look, focused);
+    // What the shader leaves see-through gets the pane's own background, as the pane would
+    // have had: a CRT's curve doesn't open a hole to the desktop.
+    const bg = rgba(look.bg, 1);
+    const a = look.bg_alpha;
+    gl.epoxy_glUniform4f.?(pane.loc.renux_background, bg[0] * a, bg[1] * a, bg[2] * a, a);
+    gl.epoxy_glUniform2f.?(pane.loc.renux_origin, 0, 0);
     gl.epoxy_glActiveTexture.?(gl.GL_TEXTURE0);
     gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, p.input);
     gl.epoxy_glBindVertexArray.?(vao);
@@ -583,11 +643,205 @@ const Held = struct {
     }
 };
 
-fn setUniforms(p: *Pane, pw: c_int, ph: c_int, scale: f32, look: *const Look, focused: bool) void {
+/// The window's one cursor, drawn by the cursor shader over everything. `look.cursor` is in
+/// the layer's own points; `width` and `height` are the layer's size. Only the region around the
+/// cursor, where it is and where it was, is drawn, so this costs little, and nothing at all once
+/// a shader that follows the cursor's moves has settled.
+pub fn drawCursor(s: *Pane, width: f32, height: f32, scale: f32, look: *const Look, sn: *gtk.Snapshot) void {
+    if (cursor.id == 0) return;
+    const ctx = context orelse return;
+    const pw: c_int = @intFromFloat(@round(width * scale));
+    const ph: c_int = @intFromFloat(@round(height * scale));
+    if (pw < 1 or ph < 1) return;
+    ctx.makeCurrent();
+    defer gdk.GLContext.clearCurrent();
+    if (s.fbo == 0) gl.epoxy_glGenFramebuffers.?(1, &s.fbo);
+    if (blank == 0) {
+        const clear = [4]u8{ 0, 0, 0, 0 };
+        gl.epoxy_glGenTextures.?(1, &blank);
+        gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, blank);
+        gl.epoxy_glTexParameteri.?(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST);
+        gl.epoxy_glTexParameteri.?(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
+        gl.epoxy_glTexImage2D.?(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, 1, 1, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, &clear);
+    }
+    gl.epoxy_glUseProgram.?(cursor.id);
+    setUniforms(&cursor, s, pw, ph, scale, look, true);
+    if (cursor.follows_changes and !cursor.wantsFrames(s)) return;
+
+    // Where it is and where it was, with room around for what's drawn beside it.
+    const cur = s.current_cursor;
+    const prev = if (s.previous_cursor[3] > 0) s.previous_cursor else cur;
+    const margin = 4 * @max(cur[3], prev[3]);
+    const fw: f32 = @floatFromInt(pw);
+    const fh: f32 = @floatFromInt(ph);
+    const x0 = @floor(std.math.clamp(@min(cur[0], prev[0]) - margin, 0, fw));
+    const x1 = @ceil(std.math.clamp(@max(cur[0] + cur[2], prev[0] + prev[2]) + margin, 0, fw));
+    const y0 = @floor(std.math.clamp(@min(cur[1] - cur[3], prev[1] - prev[3]) - margin, 0, fh));
+    const y1 = @ceil(std.math.clamp(@max(cur[1], prev[1]) + margin, 0, fh));
+    const rw: c_int = @intFromFloat(x1 - x0);
+    const rh: c_int = @intFromFloat(y1 - y0);
+    if (rw < 1 or rh < 1) return;
+
+    var out: c_uint = 0;
+    gl.epoxy_glGenTextures.?(1, &out);
+    gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, out);
+    gl.epoxy_glTexParameteri.?(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR);
+    gl.epoxy_glTexParameteri.?(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR);
+    gl.epoxy_glTexImage2D.?(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, rw, rh, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, null);
+    gl.epoxy_glBindFramebuffer.?(gl.GL_FRAMEBUFFER, s.fbo);
+    gl.epoxy_glFramebufferTexture2D.?(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, out, 0);
+    gl.epoxy_glViewport.?(0, 0, rw, rh);
+    gl.epoxy_glDisable.?(gl.GL_BLEND);
+    // Nothing of its own under it: the window shows through all but the effect.
+    gl.epoxy_glUniform4f.?(cursor.loc.renux_background, 0, 0, 0, 0);
+    gl.epoxy_glUniform2f.?(cursor.loc.renux_origin, x0, y0);
+    gl.epoxy_glActiveTexture.?(gl.GL_TEXTURE0);
+    gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, blank);
+    gl.epoxy_glBindVertexArray.?(vao);
+    gl.epoxy_glDrawArrays.?(gl.GL_TRIANGLES, 0, 3);
+    gl.epoxy_glBindVertexArray.?(0);
+    gl.epoxy_glBindFramebuffer.?(gl.GL_FRAMEBUFFER, 0);
+    const sync = gl.epoxy_glFenceSync.?(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.epoxy_glFlush.?();
+
+    const held = gpa.create(Held) catch return;
+    held.* = .{ .texture = out, .sync = sync };
+    const builder = gdk.GLTextureBuilder.new();
+    defer builder.unref();
+    builder.setContext(ctx);
+    builder.setId(out);
+    builder.setWidth(rw);
+    builder.setHeight(rh);
+    builder.setFormat(.r8g8b8a8_premultiplied);
+    builder.setSync(sync);
+    const result = builder.build(&Held.release, held);
+    defer result.unref();
+    // The region in the layer's points, top down, and turned the right way up.
+    const x = x0 / scale;
+    const top = (fh - y1) / scale;
+    const w = (x1 - x0) / scale;
+    const h = (y1 - y0) / scale;
+    sn.save();
+    sn.translate(&.{ .f_x = x, .f_y = top + h });
+    sn.scale(1, -1);
+    sn.appendTexture(result, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = w, .f_height = h } });
+    sn.restore();
+    s.frame +%= 1;
+}
+
+// The numbers a shader marks as adjustable, which Settings shows as sliders. A shader marks one
+// with its range and what it does, after a constant, so the file still works as it is in
+// Ghostty: `const float CURVE = 0.10; // 0 to 0.4: how much the glass bulges`.
+
+pub const Param = struct {
+    name: []const u8,
+    value: f32,
+    default: f32,
+    min: f32,
+    max: f32,
+    about: []const u8,
+};
+
+fn parseParam(line: []const u8) ?Param {
+    const t = std.mem.trim(u8, line, " \t\r");
+    const lead = "const float ";
+    if (!std.mem.startsWith(u8, t, lead)) return null;
+    var rest = t[lead.len..];
+    const eq = std.mem.indexOfScalar(u8, rest, '=') orelse return null;
+    const name = std.mem.trim(u8, rest[0..eq], " \t");
+    rest = rest[eq + 1 ..];
+    const semi = std.mem.indexOfScalar(u8, rest, ';') orelse return null;
+    const value = std.fmt.parseFloat(f32, std.mem.trim(u8, rest[0..semi], " \t")) catch return null;
+    const slash = std.mem.indexOf(u8, rest[semi..], "//") orelse return null;
+    var c = std.mem.trim(u8, rest[semi + slash + 2 ..], " \t");
+    const to = std.mem.indexOf(u8, c, " to ") orelse return null;
+    const min = std.fmt.parseFloat(f32, std.mem.trim(u8, c[0..to], " ")) catch return null;
+    c = c[to + 4 ..];
+    const colon = std.mem.indexOfScalar(u8, c, ':');
+    const max = std.fmt.parseFloat(f32, std.mem.trim(u8, if (colon) |i| c[0..i] else c, " ")) catch return null;
+    if (!(max > min)) return null;
+    return .{ .name = name, .value = value, .default = value, .min = min, .max = max, .about = if (colon) |i| std.mem.trim(u8, c[i + 1 ..], " ") else "" };
+}
+
+/// The sliders' values are kept in settings.ini as `shader|NAME|value` entries, split by `;`.
+fn overrideOf(setting: []const u8, name: []const u8) ?f32 {
+    var it = std.mem.splitScalar(u8, settings.current.shader_params, ';');
+    while (it.next()) |entry| {
+        var parts = std.mem.splitScalar(u8, entry, '|');
+        const s = parts.next() orelse continue;
+        const n = parts.next() orelse continue;
+        const v = parts.next() orelse continue;
+        if (std.mem.eql(u8, s, setting) and std.mem.eql(u8, n, name)) return std.fmt.parseFloat(f32, v) catch null;
+    }
+    return null;
+}
+
+/// Sets a slider's value for a shader, or with null puts it back to the shader's own.
+pub fn setOverride(setting: []const u8, name: []const u8, value: ?f32) void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var it = std.mem.splitScalar(u8, settings.current.shader_params, ';');
+    while (it.next()) |entry| {
+        if (entry.len == 0) continue;
+        var parts = std.mem.splitScalar(u8, entry, '|');
+        const s = parts.next() orelse continue;
+        const n = parts.next() orelse continue;
+        if (std.mem.eql(u8, s, setting) and std.mem.eql(u8, n, name)) continue;
+        if (out.items.len > 0) out.append(gpa, ';') catch return;
+        out.appendSlice(gpa, entry) catch return;
+    }
+    if (value) |v| {
+        if (out.items.len > 0) out.append(gpa, ';') catch return;
+        out.print(gpa, "{s}|{s}|{d:.4}", .{ setting, name, v }) catch return;
+    }
+    settings.setString(&settings.current.shader_params, out.items);
+}
+
+/// The adjustable numbers of the shader a setting names, with any slider values in place.
+pub fn paramsOf(al: std.mem.Allocator, setting: []const u8) []Param {
+    const source = readSource(setting) orelse return &.{};
+    defer gpa.free(source);
+    var list: std.ArrayList(Param) = .empty;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        var param = parseParam(line) orelse continue;
+        param.name = al.dupe(u8, param.name) catch continue;
+        param.about = al.dupe(u8, param.about) catch continue;
+        if (overrideOf(setting, param.name)) |v| param.value = std.math.clamp(v, param.min, param.max);
+        list.append(al, param) catch {};
+    }
+    return list.items;
+}
+
+/// The source with the sliders' values written into its constants.
+fn withOverrides(setting: []const u8, source: []const u8) ?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) out.append(gpa, '\n') catch return null;
+        first = false;
+        const param = parseParam(line) orelse {
+            out.appendSlice(gpa, line) catch return null;
+            continue;
+        };
+        const v = overrideOf(setting, param.name) orelse {
+            out.appendSlice(gpa, line) catch return null;
+            continue;
+        };
+        // The constant's own line, its value replaced; GLSL wants a float written with a point.
+        const semi = std.mem.indexOfScalar(u8, line, ';').?;
+        out.print(gpa, "const float {s} = {d:.4}{s}", .{ param.name, std.math.clamp(v, param.min, param.max), line[semi..] }) catch return null;
+    }
+    return out.toOwnedSlice(gpa) catch null;
+}
+
+fn setUniforms(prog: *const Program, p: *Pane, pw: c_int, ph: c_int, scale: f32, look: *const Look, focused: bool) void {
+    const loc = &prog.loc;
     const now = glib.getMonotonicTime();
     const fw: f32 = @floatFromInt(pw);
     const fh: f32 = @floatFromInt(ph);
-    const time: f32 = @floatCast(@as(f64, @floatFromInt(now - started_at)) / std.time.us_per_s);
+    const time = clock();
     const delta: f32 = if (p.last_us == 0) 0 else @floatCast(@as(f64, @floatFromInt(now - p.last_us)) / std.time.us_per_s);
     p.last_us = now;
     gl.epoxy_glUniform3f.?(loc.resolution, fw, fh, 1);
@@ -609,13 +863,13 @@ fn setUniforms(p: *Pane, pw: c_int, ph: c_int, scale: f32, look: *const Look, fo
     // bottom, then its size, in the picture's pixels. A move or a new color keeps the last
     // place as the previous one and notes the time, which is what trails are drawn from.
     const c = look.cursor;
-    const cursor: [4]f32 = .{ c[0] * scale, fh - c[1] * scale, c[2] * scale, c[3] * scale };
+    const box: [4]f32 = .{ c[0] * scale, fh - c[1] * scale, c[2] * scale, c[3] * scale };
     const color = rgba(look.cursor_color, 1);
-    if (!std.meta.eql(cursor, p.current_cursor) or !std.meta.eql(color, p.current_color)) {
+    if (!std.meta.eql(box, p.current_cursor) or !std.meta.eql(color, p.current_color)) {
         p.previous_cursor = p.current_cursor;
         p.previous_color = p.current_color;
         p.previous_style = p.current_style;
-        p.current_cursor = cursor;
+        p.current_cursor = box;
         p.current_color = color;
         p.cursor_changed_at = time;
     }
@@ -680,4 +934,19 @@ fn count(comptime kind: enum { input, output }, a: i64, b: i64, c: i64, px: u64)
     }.of;
     std.debug.print("shader, last 2 s: {d} pictures taken in (render {d:.2} ms, download {d:.2} ms, upload {d:.2} ms each), {d} shader frames ({d:.2} ms each), largest pane {d} px\n", .{ stats.inputs, ms(stats.render, stats.inputs), ms(stats.download, stats.inputs), ms(stats.upload, stats.inputs), stats.outputs, ms(stats.shade, stats.outputs), stats.px });
     stats = .{};
+}
+
+test "a shader's adjustable numbers are read from its marked constants" {
+    const p = parseParam("const float CURVE = 0.10;      // 0 to 0.4: how much the glass bulges").?;
+    try std.testing.expectEqualStrings("CURVE", p.name);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), p.value, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), p.min, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), p.max, 0.0001);
+    try std.testing.expectEqualStrings("how much the glass bulges", p.about);
+    const q = parseParam("  const float SPACING = 3.0; // 2 to 8").?;
+    try std.testing.expectEqualStrings("", q.about);
+    // Without a range there's no slider: a constant may be meant to stay as it is.
+    try std.testing.expect(parseParam("const float X = 1.0; // just a note") == null);
+    try std.testing.expect(parseParam("const vec3 PHOSPHOR = vec3(1.0); // 0 to 1: a color") == null);
+    try std.testing.expect(parseParam("float y = 2.0;") == null);
 }
