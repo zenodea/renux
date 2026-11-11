@@ -186,8 +186,8 @@ pub const Term = struct {
                 c.GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
             };
             var values = [_]?*anyopaque{
-                &protocol, &im.id,     &im.generation, &layer, &im.z, &im.col, &im.row, &im.off_x,
-                &im.off_y, &im.width, &im.height,     &im.sx,  &im.sy, &im.sw,  &im.sh,
+                &protocol, &im.id,    &im.generation, &layer, &im.z,  &im.col, &im.row, &im.off_x,
+                &im.off_y, &im.width, &im.height,     &im.sx, &im.sy, &im.sw,  &im.sh,
             };
             _ = c.ghostty_render_state_image_get_multi(self.image_iter, keys.len, &keys, @ptrCast(&values), null);
             if (protocol != c.GHOSTTY_IMAGE_PROTOCOL_KITTY) continue;

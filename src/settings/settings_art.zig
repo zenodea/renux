@@ -65,12 +65,12 @@ pub fn card(kind: Art, w: c_int, h: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();
     area.setContentWidth(w);
     area.setContentHeight(h);
-    area.setDrawFunc(&drawCard, @ptrFromInt(@intFromEnum(kind) + 1), null);
+    area.setDrawFunc(&drawCard, @ptrFromInt(@backingInt(kind) + 1), null);
     return area.as(gtk.Widget);
 }
 
 fn drawCard(area: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, data: ?*anyopaque) callconv(.c) void {
-    const kind: Art = @enumFromInt(@intFromPtr(data) - 1);
+    const kind: Art = @fromBackingInt(@intCast(@intFromPtr(data) - 1));
     const w: f64 = @floatFromInt(wi);
     const h: f64 = @floatFromInt(hi);
     const l = look(area.as(gtk.Widget));
@@ -184,7 +184,7 @@ pub fn sample(kind: Sample) *gtk.Widget {
     area.setContentHeight(48);
     area.as(gtk.Widget).setHexpand(1);
     area.as(gtk.Widget).addCssClass("settings-sample");
-    area.setDrawFunc(&drawSample, @ptrFromInt(@intFromEnum(kind) + 1), null);
+    area.setDrawFunc(&drawSample, @ptrFromInt(@backingInt(kind) + 1), null);
     // The cursor's sample blinks as the terminal's does.
     if (kind == .cursor) _ = area.as(gtk.Widget).addTickCallback(&blinkTick, null, null);
     return area.as(gtk.Widget);
@@ -205,7 +205,7 @@ fn blinkTick(widget: *gtk.Widget, _: *gdk.FrameClock, _: ?*anyopaque) callconv(.
 const Run = struct { text: [:0]const u8, color: u32, face: enum { regular, bold, italic } = .regular, alpha: f64 = 1 };
 
 fn drawSample(area: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, data: ?*anyopaque) callconv(.c) void {
-    const kind: Sample = @enumFromInt(@intFromPtr(data) - 1);
+    const kind: Sample = @fromBackingInt(@intCast(@intFromPtr(data) - 1));
     const w: f64 = @floatFromInt(wi);
     const h: f64 = @floatFromInt(hi);
     const l = look(area.as(gtk.Widget));
@@ -321,12 +321,12 @@ pub fn status(kind: Status) *gtk.Widget {
     area.setContentWidth(30);
     area.setContentHeight(30);
     area.as(gtk.Widget).setValign(.center);
-    area.setDrawFunc(&drawStatus, @ptrFromInt(@intFromEnum(kind) + 1), null);
+    area.setDrawFunc(&drawStatus, @ptrFromInt(@backingInt(kind) + 1), null);
     return area.as(gtk.Widget);
 }
 
 fn drawStatus(_: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, data: ?*anyopaque) callconv(.c) void {
-    const kind: Status = @enumFromInt(@intFromPtr(data) - 1);
+    const kind: Status = @fromBackingInt(@intCast(@intFromPtr(data) - 1));
     const cx = @as(f64, @floatFromInt(wi)) / 2;
     const cy = @as(f64, @floatFromInt(hi)) / 2;
     const r = @min(cx, cy) - 1;

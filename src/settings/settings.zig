@@ -391,7 +391,7 @@ fn readFile(kf: *glib.KeyFile) Read {
     if (kf.loadFromFile(f.ptr, .{ .keep_comments = true, .keep_translations = true }, &err) != 0) return .ok;
     const e = err orelse return .broken;
     defer e.free();
-    if (e.matches(glib.fileErrorQuark(), @intFromEnum(glib.FileError.noent)) != 0) return .missing;
+    if (e.matches(glib.fileErrorQuark(), @backingInt(glib.FileError.noent)) != 0) return .missing;
     log.warn("settings.ini can't be read, so it is left as it is: {s}", .{if (e.f_message) |m| std.mem.span(m) else "unknown error"});
     return .broken;
 }

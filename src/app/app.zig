@@ -666,7 +666,7 @@ pub const App = struct {
         // `renux --toggle` finds this process by its ID and signals it.
         if (!dev_shot) {
             @import("../main.zig").claimToggle();
-            _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &toggleSignal, a);
+            _ = @import("glibunix").signalAdd(@backingInt(std.posix.SIG.USR1), &toggleSignal, a);
         }
         if (build_options.dev and std.c.getenv("RENUX_PERF") != null) if (win.as(gtk.Widget).getFrameClock()) |clock| {
             FrameLog.watch(clock);
@@ -1008,7 +1008,7 @@ pub const App = struct {
 
     fn connectPage(a: *App) *gtk.Widget {
         const page = adw.StatusPage.new();
-        
+
         page.setTitle("Connect to Rex");
         page.setDescription("Enter the address your Rex server listens on, such as http://my-mac:8765.");
         const box = gtk.Box.new(.vertical, 12);
@@ -3956,19 +3956,19 @@ pub fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8,
     };
     var name_buf: [64]u8 = undefined;
     const known = [_][2][]const u8{
-        .{ "pane.split", "Split" },                   .{ "pane.focus", "Focus" },
-        .{ "pane.resize", "Resize" },                 .{ "pane.focus_next", "Next pane" },
-        .{ "pane.focus_previous", "Previous pane" },  .{ "pane.close", "Close pane" },
-        .{ "pane.zoom", "Zoom pane" },                .{ "pane.balance", "Balance panes" },
-        .{ "pane.float", "Float or dock" },           .{ "pane.send_key", "Send" },
-        .{ "client.tab.new", "New tab" },             .{ "client.tab.next", "Next tab" },
-        .{ "client.tab.previous", "Previous tab" },   .{ "client.tab.rename", "Rename tab" },
-        .{ "client.tab.close", "Close tab" },         .{ "client.tab.goto", "Tab" },
-        .{ "client.find.open", "Find" },              .{ "client.mode.enter", "Mode" },
-        .{ "client.config.reload", "Reload config" }, .{ "client.sidebar.toggle", "Sidebar" },
+        .{ "pane.split", "Split" },                        .{ "pane.focus", "Focus" },
+        .{ "pane.resize", "Resize" },                      .{ "pane.focus_next", "Next pane" },
+        .{ "pane.focus_previous", "Previous pane" },       .{ "pane.close", "Close pane" },
+        .{ "pane.zoom", "Zoom pane" },                     .{ "pane.balance", "Balance panes" },
+        .{ "pane.float", "Float or dock" },                .{ "pane.send_key", "Send" },
+        .{ "client.tab.new", "New tab" },                  .{ "client.tab.next", "Next tab" },
+        .{ "client.tab.previous", "Previous tab" },        .{ "client.tab.rename", "Rename tab" },
+        .{ "client.tab.close", "Close tab" },              .{ "client.tab.goto", "Tab" },
+        .{ "client.find.open", "Find" },                   .{ "client.mode.enter", "Mode" },
+        .{ "client.config.reload", "Reload config" },      .{ "client.sidebar.toggle", "Sidebar" },
         .{ "client.sidebar.activity.toggle", "Activity" }, .{ "client.palette.toggle", "Commands" },
-        .{ "session.new", "New session" },            .{ "session.switch", "Switch session" },
-        .{ "session.rename", "Rename session" },      .{ "session.next", "Next session" },
+        .{ "session.new", "New session" },                 .{ "session.switch", "Switch session" },
+        .{ "session.rename", "Rename session" },           .{ "session.next", "Next session" },
         .{ "session.previous", "Previous session" },
     };
     if (title.len == 0) for (known) |k| if (std.mem.eql(u8, k[0], action)) {
@@ -4252,8 +4252,8 @@ fn updateKnown() void {
 
 fn installShotHook(a: *App) void {
     shot_app = a;
-    if (std.c.getenv("RENUX_SHOT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR1), &takeShot, null);
-    if (std.c.getenv("RENUX_SCRIPT") != null) _ = @import("glibunix").signalAdd(@intFromEnum(std.posix.SIG.USR2), &runScript, null);
+    if (std.c.getenv("RENUX_SHOT") != null) _ = @import("glibunix").signalAdd(@backingInt(std.posix.SIG.USR1), &takeShot, null);
+    if (std.c.getenv("RENUX_SCRIPT") != null) _ = @import("glibunix").signalAdd(@backingInt(std.posix.SIG.USR2), &runScript, null);
 }
 
 /// Development: SIGUSR2 runs the commands in $RENUX_SCRIPT against the focused pane, so
@@ -4304,7 +4304,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             continue;
         };
         std.log.info("script: {s}", .{cmd});
-        if (false) {        } else if (std.mem.eql(u8, cmd, "carry")) {
+        if (std.mem.eql(u8, cmd, "carry")) {
             const x = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             const y = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateCarry(tv.block_id, x, y);

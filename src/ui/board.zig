@@ -254,7 +254,7 @@ pub const Board = struct {
         b.layout();
         var totals = [_]usize{ 0, 0, 0, 0 };
         for (b.cards.items) |c| if (c.column) |col| {
-            totals[@intFromEnum(col)] += 1;
+            totals[@backingInt(col)] += 1;
         };
         for (totals, 0..) |n, k| {
             var buf: [16]u8 = undefined;
@@ -416,7 +416,7 @@ pub const Board = struct {
             c.column = col;
             const w = c.button.as(gtk.Widget);
             inline for (.{ "idle", "running", "attention", "done" }, 0..) |name, k| {
-                if (k == @intFromEnum(col)) w.addCssClass(name) else w.removeCssClass(name);
+                if (k == @backingInt(col)) w.addCssClass(name) else w.removeCssClass(name);
             }
         }
     }
@@ -438,7 +438,7 @@ pub const Board = struct {
         for (0..4) |k| {
             sorted.clearRetainingCapacity();
             for (b.cards.items) |c| if (c.column) |col| {
-                if (@intFromEnum(col) == k) sorted.append(gpa, c) catch {};
+                if (@backingInt(col) == k) sorted.append(gpa, c) catch {};
             };
             std.mem.sort(*Card, sorted.items, grouped, Order.before);
             var hasher = std.hash.Wyhash.init(@intFromBool(grouped));

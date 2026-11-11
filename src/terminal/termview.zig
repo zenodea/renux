@@ -819,7 +819,7 @@ pub const TermView = struct {
         if (v.server.control == null) return;
         v.sent_cols = v.want_cols;
         v.sent_rows = v.want_rows;
-        if (perf_log) std.log.info("size: {s} is {d}x{d}", .{ v.block_id[v.block_id.len -| 6 ..], v.want_cols, v.want_rows });
+        if (perf_log) std.log.info("size: {s} is {d}x{d}", .{ v.block_id[v.block_id.len -| 6..], v.want_cols, v.want_rows });
         v.server.fitBlock(v.session_id, v.block_id, v.want_cols, v.want_rows, @intFromFloat(@round(v.cell_w)), @intFromFloat(v.cell_h));
     }
 
@@ -1807,7 +1807,6 @@ fn setColor(cr: *cairo.Context, color: u32, alpha: f64) void {
     cr.setSourceRgba(r / 255, g / 255, b / 255, alpha);
 }
 
-
 fn rgba(color: u32, alpha: f64) gdk.RGBA {
     return .{
         .f_red = @floatCast(@as(f64, @floatFromInt((color >> 16) & 0xff)) / 255),
@@ -1986,7 +1985,7 @@ fn rowHash(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) u64 {
     var hasher = std.hash.Wyhash.init(0);
     const prefs = &settings.current;
     // The font by what it is, not where it lives: a freed font's address can be given out again.
-    hasher.update(std.mem.asBytes(&[_]u64{ f_font.id, @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection), @bitCast(pad_x), @intFromBool(prefs.ligatures), @intFromEnum(prefs.bold_italic), prefs.selection_bg, prefs.selection_fg, @intFromBool(prefs.font_smoothing) }));
+    hasher.update(std.mem.asBytes(&[_]u64{ f_font.id, @bitCast(v.cell_w), @bitCast(v.cell_h), f.fg, f.bg, f.cols, @intFromBool(prefs.improve_contrast), @intFromBool(prefs.rounded_selection), @bitCast(pad_x), @intFromBool(prefs.ligatures), @backingInt(prefs.bold_italic), prefs.selection_bg, prefs.selection_fg, @intFromBool(prefs.font_smoothing) }));
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);

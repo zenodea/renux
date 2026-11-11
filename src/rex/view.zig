@@ -182,15 +182,17 @@ fn parseNode(a: std.mem.Allocator, value: ?json.Value) !?*Node {
         if (before == null) return after;
         if (after == null) return before;
         const n = try a.create(Node);
-        n.* = .{ .split = .{
-            .rect = r,
-            .id = try a.dupe(u8, json.str(s, "split_id") orelse ""),
-            // The docs say to draw an unknown direction as horizontal.
-            .horizontal = !std.mem.eql(u8, json.str(s, "direction") orelse "", "vertical"),
-            .ratio = json.float(s, "ratio") orelse 0.5,
-            .before = before.?,
-            .after = after.?,
-        } };
+        n.* = .{
+            .split = .{
+                .rect = r,
+                .id = try a.dupe(u8, json.str(s, "split_id") orelse ""),
+                // The docs say to draw an unknown direction as horizontal.
+                .horizontal = !std.mem.eql(u8, json.str(s, "direction") orelse "", "vertical"),
+                .ratio = json.float(s, "ratio") orelse 0.5,
+                .before = before.?,
+                .after = after.?,
+            },
+        };
         return n;
     };
     const block = json.str(v, "block_id") orelse return null;

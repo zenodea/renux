@@ -464,21 +464,6 @@ fn firstLine(text: []const u8) []const u8 {
 
 // Drawing.
 
-/// What the round trip costs, for RENUX_SHADER_STATS: pictures taken in when a pane changed,
-/// and shader frames drawn from them.
-const Stats = struct {
-    inputs: u32 = 0,
-    outputs: u32 = 0,
-    render: i64 = 0,
-    download: i64 = 0,
-    upload: i64 = 0,
-    shade: i64 = 0,
-    since: i64 = 0,
-    px: u64 = 0,
-};
-var stats: Stats = .{};
-var stats_on: ?bool = null;
-
 /// The renderer the panes' pictures are drawn with on their way to the shader. Not the
 /// window's: GTK's Vulkan renderer hands back dmabufs, and reading one back leaks the whole
 /// picture in GTK 4.22, some 10 MB a frame, until the system runs out of memory. GTK's OpenGL
@@ -516,7 +501,6 @@ pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
     const scale: f32 = if (native.getSurface()) |s| @floatCast(s.getScale()) else 1;
     const pw: c_int = @intFromFloat(@round(w * scale));
     const ph: c_int = @intFromFloat(@round(h * scale));
-    const t0 = glib.getMonotonicTime();
 
     // The pane's picture, at the screen's pixel size, upside down for OpenGL.
     const flip = gtk.Snapshot.new();
@@ -528,7 +512,6 @@ pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
     var viewport: graphene.Rect = .{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatFromInt(pw), .f_height = @floatFromInt(ph) } };
     const picture = renderer.renderTexture(flipped, &viewport);
     defer picture.unref();
-    const t1 = glib.getMonotonicTime();
 
     const downloader = gdk.TextureDownloader.new(picture);
     defer downloader.free();
@@ -538,7 +521,6 @@ pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
     defer bytes.unref();
     var size: usize = 0;
     const data = bytes.getData(&size) orelse return false;
-    const t2 = glib.getMonotonicTime();
 
     ctx.makeCurrent();
     defer gdk.GLContext.clearCurrent();
@@ -561,7 +543,6 @@ pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
     p.scale = scale;
     p.width = w;
     p.height = h;
-    count(.input, t1 - t0, t2 - t1, glib.getMonotonicTime() - t2, @intCast(pw * ph));
     return true;
 }
 
@@ -572,7 +553,6 @@ pub fn drawOutput(p: *Pane, look: *const Look, focused: bool, sn: *gtk.Snapshot)
     const ctx = context orelse return false;
     const pw = p.input_w;
     const ph = p.input_h;
-    const t0 = glib.getMonotonicTime();
     ctx.makeCurrent();
     defer gdk.GLContext.clearCurrent();
 
@@ -623,7 +603,6 @@ pub fn drawOutput(p: *Pane, look: *const Look, focused: bool, sn: *gtk.Snapshot)
     sn.appendTexture(result, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = p.width, .f_height = p.height } });
     sn.restore();
     p.frame +%= 1;
-    count(.output, glib.getMonotonicTime() - t0, 0, 0, @intCast(pw * ph));
     return true;
 }
 
@@ -905,35 +884,6 @@ fn rgba(color: u32, alpha: f32) [4]f32 {
         @as(f32, @floatFromInt(color & 0xff)) / 255,
         alpha,
     };
-}
-
-/// RENUX_SHADER_STATS=1 logs what the round trip costs, every two seconds.
-fn count(comptime kind: enum { input, output }, a: i64, b: i64, c: i64, px: u64) void {
-    if (stats_on == null) stats_on = std.c.getenv("RENUX_SHADER_STATS") != null;
-    if (!stats_on.?) return;
-    const now = glib.getMonotonicTime();
-    if (stats.since == 0) stats.since = now;
-    switch (kind) {
-        .input => {
-            stats.inputs += 1;
-            stats.render += a;
-            stats.download += b;
-            stats.upload += c;
-        },
-        .output => {
-            stats.outputs += 1;
-            stats.shade += a;
-        },
-    }
-    stats.px = @max(stats.px, px);
-    if (now - stats.since < 2 * std.time.us_per_s) return;
-    const ms = struct {
-        fn of(total: i64, n: u32) f64 {
-            return if (n == 0) 0 else @as(f64, @floatFromInt(total)) / 1000 / @as(f64, @floatFromInt(n));
-        }
-    }.of;
-    std.debug.print("shader, last 2 s: {d} pictures taken in (render {d:.2} ms, download {d:.2} ms, upload {d:.2} ms each), {d} shader frames ({d:.2} ms each), largest pane {d} px\n", .{ stats.inputs, ms(stats.render, stats.inputs), ms(stats.download, stats.inputs), ms(stats.upload, stats.inputs), stats.outputs, ms(stats.shade, stats.outputs), stats.px });
-    stats = .{};
 }
 
 test "a shader's adjustable numbers are read from its marked constants" {

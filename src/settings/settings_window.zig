@@ -454,28 +454,6 @@ fn segments(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, comptime E
     }
 }
 
-/// Two segmented buttons for an on-or-off setting whose two states each have a name.
-fn boolSegments(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, field: *bool, off: [:0]const u8, on: [:0]const u8, after: *const fn (*App) void) void {
-    const sc = ctx.keep(Bound(bool){ .ctx = ctx, .field = field, .after = after }) orelse return;
-    const box = segmentBox(g, title);
-    const off_button = gtk.ToggleButton.newWithLabel(off.ptr);
-    const on_button = gtk.ToggleButton.newWithLabel(on.ptr);
-    on_button.setGroup(off_button);
-    (if (field.*) on_button else off_button).setActive(1);
-    box.append(off_button.as(gtk.Widget));
-    box.append(on_button.as(gtk.Widget));
-    const H = struct {
-        // Only the second button is watched: it is on exactly when the setting is.
-        fn changed(btn: *gtk.ToggleButton, s: *Bound(bool)) callconv(.c) void {
-            const v = btn.getActive() != 0;
-            if (v == s.field.*) return;
-            s.field.* = v;
-            s.changed();
-        }
-    };
-    _ = gtk.ToggleButton.signals.toggled.connect(on_button, *Bound(bool), &H.changed, sc, .{});
-}
-
 fn segmentBox(g: *adw.PreferencesGroup, title: [:0]const u8) *gtk.Box {
     const row = adw.ActionRow.new();
     row.as(adw.PreferencesRow).setTitle(title.ptr);

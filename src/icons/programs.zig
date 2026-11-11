@@ -11,35 +11,35 @@ const gpa = std.heap.c_allocator;
 
 const aliases = std.StaticStringMap([]const u8).initComptime(.{
     .{ "claude-code", "claude" }, .{ "cursor-agent", "cursor" }, .{ "gh", "github" },
-    .{ "nvim", "neovim" },        .{ "vi", "vim" },               .{ "python3", "python" },
-    .{ "ipython", "python" },     .{ "pip", "python" },           .{ "pip3", "python" },
-    .{ "npx", "node" },           .{ "nodejs", "node" },          .{ "psql", "postgres" },
-    .{ "sqlite3", "sqlite" },     .{ "kubectl", "kube" },         .{ "kubernetes", "kube" },
-    .{ "tofu", "terraform" },     .{ "nu", "nushell" },           .{ "swiftc", "swift" },
-    .{ "javac", "java" },         .{ "clang++", "clang" },        .{ "gcc", "clang" },
-    .{ "g++", "clang" },          .{ "nix-shell", "nix" },        .{ "redis-server", "redis" },
-    .{ "redis-cli", "redis" },    .{ "mysqld", "mysql" },         .{ "xcodebuild", "xcode" },
-    .{ "hx", "helix" },                .{ "cargo", "rust" },          .{ "rustc", "rust" },
-    .{ "rustup", "rust" },             .{ "irb", "ruby" },            .{ "gem", "ruby" },
-    .{ "bundle", "ruby" },             .{ "rake", "ruby" },           .{ "erl", "erlang" },
-    .{ "dune", "ocaml" },              .{ "opam", "ocaml" },          .{ "composer", "php" },
-    .{ "scp", "ssh" },                 .{ "sftp", "ssh" },            .{ "mosh", "ssh" },
-    .{ "codex-cli", "codex" },         .{ "btop", "htop" },           .{ "top", "htop" },
+    .{ "nvim", "neovim" },        .{ "vi", "vim" },              .{ "python3", "python" },
+    .{ "ipython", "python" },     .{ "pip", "python" },          .{ "pip3", "python" },
+    .{ "npx", "node" },           .{ "nodejs", "node" },         .{ "psql", "postgres" },
+    .{ "sqlite3", "sqlite" },     .{ "kubectl", "kube" },        .{ "kubernetes", "kube" },
+    .{ "tofu", "terraform" },     .{ "nu", "nushell" },          .{ "swiftc", "swift" },
+    .{ "javac", "java" },         .{ "clang++", "clang" },       .{ "gcc", "clang" },
+    .{ "g++", "clang" },          .{ "nix-shell", "nix" },       .{ "redis-server", "redis" },
+    .{ "redis-cli", "redis" },    .{ "mysqld", "mysql" },        .{ "xcodebuild", "xcode" },
+    .{ "hx", "helix" },           .{ "cargo", "rust" },          .{ "rustc", "rust" },
+    .{ "rustup", "rust" },        .{ "irb", "ruby" },            .{ "gem", "ruby" },
+    .{ "bundle", "ruby" },        .{ "rake", "ruby" },           .{ "erl", "erlang" },
+    .{ "dune", "ocaml" },         .{ "opam", "ocaml" },          .{ "composer", "php" },
+    .{ "scp", "ssh" },            .{ "sftp", "ssh" },            .{ "mosh", "ssh" },
+    .{ "codex-cli", "codex" },    .{ "btop", "htop" },           .{ "top", "htop" },
 });
 
 /// Simple Icons names for programs whose icon is named differently.
 const slugs = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "node", "nodedotjs" },         .{ "bash", "gnubash" },        .{ "copilot", "githubcopilot" },
-    .{ "gemini", "googlegemini" },    .{ "kube", "kubernetes" },     .{ "mistral", "mistralai" },
-    .{ "nix", "nixos" },              .{ "postgres", "postgresql" }, .{ "brew", "homebrew" },
-    .{ "clang", "cplusplus" },        .{ "java", "openjdk" },        .{ "fish", "fishshell" },
+    .{ "node", "nodedotjs" },      .{ "bash", "gnubash" },        .{ "copilot", "githubcopilot" },
+    .{ "gemini", "googlegemini" }, .{ "kube", "kubernetes" },     .{ "mistral", "mistralai" },
+    .{ "nix", "nixos" },           .{ "postgres", "postgresql" }, .{ "brew", "homebrew" },
+    .{ "clang", "cplusplus" },     .{ "java", "openjdk" },        .{ "fish", "fishshell" },
 });
 
 /// Coding agents by the names their programs go by, for telling an agent's pane from a shell's.
 const agents = std.StaticStringMap(void).initComptime(.{
-    .{"claude"},   .{"claude-code"}, .{"codex"},  .{"codex-cli"}, .{"opencode"},     .{"pi"},
-    .{"gemini"},   .{"cursor-agent"}, .{"amp"},   .{"aider"},     .{"copilot"},      .{"goose"},
-    .{"crush"},    .{"droid"},        .{"qwen"},  .{"cline"},     .{"kiro"},
+    .{"claude"}, .{"claude-code"},  .{"codex"}, .{"codex-cli"}, .{"opencode"}, .{"pi"},
+    .{"gemini"}, .{"cursor-agent"}, .{"amp"},   .{"aider"},     .{"copilot"},  .{"goose"},
+    .{"crush"},  .{"droid"},        .{"qwen"},  .{"cline"},     .{"kiro"},
 });
 
 /// Whether what a block runs (given as `name/script`) is a coding agent.

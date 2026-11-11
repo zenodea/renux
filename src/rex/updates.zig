@@ -71,7 +71,7 @@ const Numbers = struct {
 pub fn available(version: ?[]const u8) ?[]const u8 {
     if (!settings.current.rex_updates) return null;
     const running = version orelse return null;
-    const newest = latest[@intFromEnum(channelOf(running))] orelse return null;
+    const newest = latest[@backingInt(channelOf(running))] orelse return null;
     return if (isNewer(newest, running)) newest else null;
 }
 
@@ -80,7 +80,7 @@ pub fn check(version: ?[]const u8) void {
     if (!settings.current.rex_updates) return;
     const running = version orelse return;
     const ch = channelOf(running);
-    const k = @intFromEnum(ch);
+    const k = @backingInt(ch);
     const now = glib.getMonotonicTime();
     if (asking[k] or (asked_at[k] != 0 and now - asked_at[k] < fresh_us)) return;
     const url: [:0]const u8 = switch (ch) {
