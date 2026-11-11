@@ -2271,7 +2271,29 @@ fn drawCopy(v: *TermView, sn: *gtk.Snapshot) void {
     sn.translate(&.{ .f_x = -cx, .f_y = -cy });
     const shadow: gsk.Shadow = .{ .f_color = .{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.4 * lift) }, .f_dx = 0, .f_dy = @floatCast(3 * lift), .f_radius = @floatCast(12 * lift) };
     sn.pushShadow(@ptrCast(&shadow), 1);
-    sn.pushFill(shape, .winding);
+    // The copied shape, as the selection draws it: its rows, and its inside corners rounded
+    // where one row reaches further than the next.
+    sn.pushMask(.alpha);
+    const solid: gdk.RGBA = .{ .f_red = 1, .f_green = 1, .f_blue = 1, .f_alpha = 1 };
+    sn.appendFill(shape, .winding, &solid);
+    if (settings.current.rounded_selection) {
+        for (spans) |above| {
+            const a = rowSpan(spans, above.row) orelse continue;
+            if (a.x0 != above.x0) continue;
+            const b = rowSpan(spans, above.row + 1) orelse continue;
+            if (a.x1 <= b.x0 or b.x1 <= a.x0) continue;
+            const py = v.copy_top + @as(f64, @floatFromInt(above.row + 1)) * v.cell_h;
+            if (a.x0 != b.x0) {
+                const r = @min(radius, @as(f64, @floatFromInt(@max(a.x0, b.x0) - @min(a.x0, b.x0))) * v.cell_w / 2);
+                fillet(sn, pad_x + @as(f64, @floatFromInt(@max(a.x0, b.x0))) * v.cell_w, py, -1, if (a.x0 > b.x0) -1 else 1, r, 0xffffff);
+            }
+            if (a.x1 != b.x1) {
+                const r = @min(radius, @as(f64, @floatFromInt(@max(a.x1, b.x1) - @min(a.x1, b.x1))) * v.cell_w / 2);
+                fillet(sn, pad_x + @as(f64, @floatFromInt(@min(a.x1, b.x1))) * v.cell_w, py, 1, if (b.x1 > a.x1) -1 else 1, r, 0xffffff);
+            }
+        }
+    }
+    sn.pop();
     sn.appendNode(node);
     // The glint: a band of light crossing from the start of the copied text to its far edge.
     const g = std.math.clamp((t - 0.08) / 0.78, 0, 1);
@@ -2286,6 +2308,16 @@ fn drawCopy(v: *TermView, sn: *gtk.Snapshot) void {
     sn.pop();
     sn.pop();
     sn.restore();
+}
+
+/// The one run of copied cells on a row, or null if it has none or several, as `selectedSpan`.
+fn rowSpan(spans: []const CopySpan, row: u16) ?CopySpan {
+    var found: ?CopySpan = null;
+    for (spans) |s| if (s.row == row) {
+        if (found != null) return null;
+        found = s;
+    };
+    return found;
 }
 
 /// Whether the copied cells reach the row `dir` (-1 above, 1 below) from `row`, at `col`.
