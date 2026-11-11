@@ -1057,6 +1057,18 @@ pub const TermView = struct {
         v.widget().queueDraw();
     }
 
+    /// The terminal moved its own view, as a find does to show the match it picked: the smooth
+    /// scroll glides there. Without this the next frame would put the view back where the
+    /// smooth scroll was, leaving the match out of sight.
+    pub fn followViewport(v: *TermView) void {
+        const t = v.term() orelse return;
+        _ = t.render(true);
+        v.scroll_target = @as(f64, @floatFromInt(t.frame.rowsUp())) * v.cell_h;
+        v.scroll_velocity = 0;
+        v.clampScroll();
+        v.startScrollTick();
+    }
+
     /// Moves the terminal's viewport to where the smooth scroll is, and says how many whole rows
     /// up into history that is.
     fn syncScroll(v: *TermView, t: *term_mod.Term) f64 {

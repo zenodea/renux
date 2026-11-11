@@ -88,6 +88,8 @@ pub const FindBar = struct {
         } else {
             f.total = t.find(text);
             f.showCount(if (f.total > 0) t.findStep(true) else null);
+            // Picking a match scrolls the terminal to it; the pane follows.
+            if (f.total > 0) f.view.followViewport();
         }
         f.view.widget().queueDraw();
     }
@@ -101,6 +103,7 @@ pub const FindBar = struct {
         const t = f.view.term() orelse return;
         if (!t.finding() or f.total == 0) return;
         f.showCount(t.findStep(older));
+        f.view.followViewport();
         f.view.widget().queueDraw();
     }
 
