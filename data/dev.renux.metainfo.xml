@@ -19,6 +19,7 @@
       <li>Splits, floating layers, tabs and a command palette, driven by Rex's own actions</li>
       <li>An activity panel and notifications for agents that need you</li>
       <li>Themes that follow the host or the system, and your own custom themes</li>
+      <li>A see-through window, and custom shaders over the panes and the cursor</li>
     </ul>
   </description>
   <launchable type="desktop-id">dev.renux.desktop</launchable>

@@ -19,6 +19,9 @@ through libghostty-vt.
   agents, with a dot when one needs you.
 - **Several servers.** Connect to more than one Rex server, on this computer or over Tailscale,
   and be told when one could be updated.
+- **Made to look at.** Themes, a see-through window with the desktop's blur behind it, and
+  custom GLSL shaders as in Ghostty: ten ship with Renux, from a CRT to a cursor that smears as
+  it moves.
 
 | The agent board | Only agents in the sidebar |
 |---|---|
@@ -91,7 +94,7 @@ export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig
 | `src/icons/` | Interface and program icons, and how they are drawn |
 | `src/platform/` | Parts for one operating system only |
 | `src/util/` | Small helpers: JSON, drawing, subprocesses, QR codes |
-| `data/` | What is installed beside the program: desktop file, app icons, fonts, program icons |
+| `data/` | What is installed beside the program: desktop file, app icons, fonts, program icons, shaders |
 | `scripts/` | Generators for the icon tables in `src/icons/` |
 | `third_party/ghostty` | Ghostty, for its terminal library |
 
