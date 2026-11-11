@@ -1,5 +1,6 @@
 //! The agent board: every pane on every host as a card in one of four columns, by what the
-//! program in it reports: Idle, Running, Attention (it needs you, or it failed) and Done.
+//! program in it reports: Idle, Running, Attention (it needs you, or it failed) and Done (it
+//! finished and its pane hasn't been looked at since; after that it is Idle).
 //! Cards move between columns as programs change state, and a click on one goes to its pane.
 const std = @import("std");
 const gtk = @import("gtk");
@@ -358,10 +359,13 @@ pub const Board = struct {
         setLabel(c.title, zt(&zbuf, task orelse own_title orelse programs.displayTitle(&buf, prog, null)));
 
         const status = if (info) |i| (if (i.has_status) i.status else .other) else .other;
+        const unread = if (info) |i| i.attention else false;
         const col: Column = switch (status) {
             .working => .running,
             .blocked, .failed => .attention,
-            .done => .done,
+            // Finished, it waits in Done until its pane has been shown and focused, as the
+            // sidebar's dot does; then it's simply idle.
+            .done => if (unread) .done else .idle,
             .other => .idle,
         };
         c.chip.as(gtk.Widget).setVisible(@intFromBool(status == .failed));
