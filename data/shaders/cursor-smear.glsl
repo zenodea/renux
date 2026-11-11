@@ -45,8 +45,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float ease = 1.0 - pow(1.0 - t, 3.0);
     vec2 tail = mix(before, now, ease);
     float d = swept(fragCoord, tail, now, extent);
+    // Over the cursor's own box too, so the smear and the cursor are one shape while it moves
+    // rather than two that meet at an edge each drew on its own.
     float amount = (1.0 - smoothstep(-0.5, 0.5, d)) * OPACITY;
-    // The cursor's own box is the terminal's to draw, with the letter under it.
-    if (box(fragCoord - now, extent) < 0.0) amount = 0.0;
     fragColor = over(c, iCurrentCursorColor.rgb, amount);
 }
