@@ -1217,6 +1217,8 @@ pub const App = struct {
             },
             .block => {
                 const block = session_id orelse return;
+                // What happens in the pane being looked at is seen as it happens.
+                if (h.server.blockInfo(block)) |info| if (info.attention and a.lookingAt(h, block)) h.server.clearAttention(block);
                 h.workspace.blockChanged(block);
                 a.refreshRows();
                 a.activity.changed();
@@ -3601,6 +3603,17 @@ pub const App = struct {
 
     fn activeChanged(_: *gtk.Window, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
         if (settings.current.fade_inactive_window) a.redrawAll();
+        // Coming back to the window is looking again at the pane with the keyboard.
+        if (a.current) |h| if (h.workspace.focusedBlock()) |block| if (a.lookingAt(h, block)) h.server.clearAttention(block);
+    }
+
+    /// Whether the person is looking at a pane now: it has the keyboard on the host shown, the
+    /// window is the one in use, and the board isn't over it.
+    fn lookingAt(a: *App, h: *Host, block_id: []const u8) bool {
+        if (a.current != h or a.board.shown()) return false;
+        if (a.window.as(gtk.Window).isActive() == 0) return false;
+        const focused = h.workspace.focusedBlock() orelse return false;
+        return std.mem.eql(u8, focused, block_id);
     }
 
     /// Applies the window and terminal opacity and the blur behind them.

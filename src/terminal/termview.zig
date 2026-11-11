@@ -1725,6 +1725,9 @@ pub const TermView = struct {
     }
 
     fn onFocusIn(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
+        // The pane is being looked at, by a click, a key, its tab being picked or the window
+        // coming to the front: whatever finished or rang in it has been seen.
+        v.server.clearAttention(v.block_id);
         v.im.as(gtk.IMContext).focusIn();
         v.server.sendFocus(v.session_id, v.block_id, true);
         v.widget().queueDraw();
