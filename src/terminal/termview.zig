@@ -2210,9 +2210,9 @@ const CopySpan = struct { row: u16, x0: u16, x1: u16 };
 
 /// How long a copy's animation lasts; how much of it the lift takes to rise, and when it starts
 /// to settle back.
-const copy_duration_us = 720 * std.time.us_per_ms;
-const copy_rise = 0.28;
-const copy_settle = 0.42;
+const copy_duration_us = 560 * std.time.us_per_ms;
+const copy_rise = 0.36;
+const copy_settle = 0.55;
 
 /// The copied text, lifted: the pane as it was at the copy, cut to the copied cells' shape,
 /// raised a few points with a soft shadow under it, then settling back, while a glint runs
@@ -2306,7 +2306,7 @@ fn drawCopy(v: *TermView, sn: *gtk.Snapshot) void {
     sn.pop();
     sn.appendNode(node);
     // The glint: a band of light crossing from the start of the copied text to its far edge.
-    const g = std.math.clamp((t - 0.14) / 0.72, 0, 1);
+    const g = std.math.clamp((t - 0.12) / 0.7, 0, 1);
     const along = if (g < 0.5) 2 * g * g else 1 - std.math.pow(f64, -2 * g + 2, 2) / 2;
     const band = @max(v.cell_w * 5, w * 0.18);
     const bx = x0 - band + (w + 2 * band) * along;
