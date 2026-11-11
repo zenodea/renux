@@ -34,6 +34,7 @@ KINDS = [
     ("minimize", "remove", ""),
     ("board", "view_kanban", ""),
     ("eye", "visibility", ""),
+    ("effects", "auto_awesome", ""),
 ]
 
 folder = sys.argv[1]

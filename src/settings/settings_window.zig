@@ -26,6 +26,7 @@ const sections = [_]Section{
     .{ .title = "Server", .icon = .server, .build = serverPage },
     .{ .title = "Interface", .icon = .interface, .build = interfacePage },
     .{ .title = "Themes", .icon = .palette, .build = themesPage },
+    .{ .title = "Effects", .icon = .effects, .build = effectsPage },
     .{ .title = "Terminal", .icon = .terminal, .build = terminalPage },
     .{ .title = "Shortcuts", .icon = .keyboard, .build = shortcutsPage },
     .{ .title = "Notifications", .icon = .bell, .build = notificationsPage },
@@ -548,40 +549,16 @@ fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
 
 fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const p = page();
+    const window = group(p, "Window", null);
+    switchRow(ctx, window, "Show window on launch", "Off starts Renux hidden; renux --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
+    switchRow(ctx, window, "Unread badge", "The number of panes that need you, on the Dock or the desktop's launcher", &settings.current.unread_badge, null);
+    numberRow(ctx, window, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
+
     const tabs = group(p, "Tabs", "Each session's windows, as tabs in the sidebar or above the panes");
     cards(ctx, tabs, "Tab style", settings.TabPosition, &settings.current.tab_position, &.{ "Left Side", "Right Side", "Above" }, &.{ .tabs_left, .tabs_right, .tabs_above }, App.tabsChanged);
     switchRow(ctx, tabs, "Fill available space", "Tabs above the panes share the width", &settings.current.tab_fill, App.tabsChanged);
     switchRow(ctx, tabs, "Show each process", "A tab lists every program in its window", &settings.current.tab_processes, App.tabsChanged);
-    const panes_group = group(p, "Pane Behavior", null);
-    switchRow(ctx, panes_group, "Focus follows mouse", "Pointing at a pane gives it the keyboard", &settings.current.focus_follows_mouse, null);
-    rangePercentRow(ctx, panes_group, "Fade inactive panes", "How much panes without the keyboard dim, in percent", &settings.current.fade_inactive, 0, 60);
-    switchRow(ctx, panes_group, "Fade panes for inactive windows", "Dim every pane while Renux isn't the window in use", &settings.current.fade_inactive_window, App.redrawAllPub);
-    switchRow(ctx, panes_group, "Autobalance splits", "Panes share space evenly after one opens or closes", &settings.current.autobalance, null);
-    switchRow(ctx, panes_group, "Match program backgrounds", "A pane's frame takes the background color of the program in it", &settings.current.match_program_bg, App.applyLook);
-    switchRow(ctx, panes_group, "Rounded selection corners", "Only the outer corners, so a selection over several lines reads as one shape", &settings.current.rounded_selection, App.redrawAllPub);
-    numberRow(ctx, panes_group, "Selection corner radius", "How round those corners are, in points", &settings.current.selection_radius, 1, 16, 1, 0, App.redrawAllPub);
-    const hl = group(p, "Active Pane Highlight", null);
-    switchRow(ctx, hl, "Show border on active pane", null, &settings.current.highlight_border, App.applyLook);
-    switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);
-    rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
-    colorPicker(ctx, hl, "Highlight color", "The theme's accent unless one is picked", &settings.current.highlight_color, "Use Accent", App.applyLook);
-    const extras = group(p, "Window", null);
-    switchRow(ctx, extras, "Show window on launch", "Off starts Renux hidden; renux --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
-    switchRow(ctx, extras, "Trackpad gestures", "Swipe sideways with two fingers to switch tabs", &settings.current.trackpad_gestures, null);
-    numberRow(ctx, extras, "Trackpad scroll speed", "How far text moves for the fingers' movement; 2 is what terminals on a Mac do", &settings.current.scroll_speed, 0.5, 5, 0.25, 2, App.redrawAllPub);
-    numberRow(ctx, extras, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
-    switchRow(ctx, extras, "Unread badge", "The number of panes that need you, on the Dock or the desktop's launcher", &settings.current.unread_badge, null);
-    const go = group(p, "Go to Anything", null);
-    switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
-    const look = group(p, "Appearance", null);
-    cards(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, &.{ .scheme_auto, .scheme_light, .scheme_dark }, App.themeChanged);
-    // Each is one layer: the terminals aren't drawn over the window's own background.
-    const mac = @import("builtin").os.tag == .macos;
-    const see = group(p, "Transparency", if (mac) "Below 100%, the desktop shows through" else "Below 100%, the desktop shows through. Hyprland and KDE blur it; GNOME doesn't");
-    percentRow(ctx, see, "Window", "The sidebar, the board and the space around the panes", &settings.current.window_opacity);
-    percentRow(ctx, see, "Terminals", "The panes, floating ones too, and the board's columns", &settings.current.terminal_opacity);
-    // On Linux the desktop does any blurring, so there's nothing for Renux to switch.
-    if (mac) switchRow(ctx, see, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
+
     const panes = group(p, "Panes", null);
     const Tight = struct {
         fn apply(app: *App) void {
@@ -591,6 +568,43 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     boolCards(ctx, panes, "Pane style", &settings.current.tight, "Comfortable", .panes_roomy, "Compact", .panes_compact, Tight.apply);
     switchRow(ctx, panes, "Show pane headers", "The title row with the program, folder and pane buttons", &settings.current.show_headers, App.headersChanged);
     switchRow(ctx, panes, "Use color for program icons", "Brand colors for known programs, like Rex's tab icons", &settings.current.brand_icons, App.redrawAll);
+    switchRow(ctx, panes, "Match program backgrounds", "A pane's frame takes the background color of the program in it", &settings.current.match_program_bg, App.applyLook);
+    switchRow(ctx, panes, "Autobalance splits", "Panes share space evenly after one opens or closes", &settings.current.autobalance, null);
+
+    const focus = group(p, "Focus", "Which pane has the keyboard, and how the others look");
+    switchRow(ctx, focus, "Focus follows mouse", "Pointing at a pane gives it the keyboard", &settings.current.focus_follows_mouse, null);
+    rangePercentRow(ctx, focus, "Fade inactive panes", "How much panes without the keyboard dim, in percent", &settings.current.fade_inactive, 0, 60);
+    switchRow(ctx, focus, "Fade panes for inactive windows", "Dim every pane while Renux isn't the window in use", &settings.current.fade_inactive_window, App.redrawAllPub);
+
+    const hl = group(p, "Active Pane Highlight", null);
+    switchRow(ctx, hl, "Show border on active pane", null, &settings.current.highlight_border, App.applyLook);
+    switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);
+    rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
+    colorPicker(ctx, hl, "Highlight color", "The theme's accent unless one is picked", &settings.current.highlight_color, "Use Accent", App.applyLook);
+
+    const trackpad = group(p, "Trackpad", null);
+    switchRow(ctx, trackpad, "Trackpad gestures", "Swipe sideways with two fingers to switch tabs", &settings.current.trackpad_gestures, null);
+    numberRow(ctx, trackpad, "Trackpad scroll speed", "How far text moves for the fingers' movement; 2 is what terminals on a Mac do", &settings.current.scroll_speed, 0.5, 5, 0.25, 2, App.redrawAllPub);
+
+    const go = group(p, "Go to Anything", null);
+    switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
+    return p.as(gtk.Widget);
+}
+
+// Effects.
+
+/// What's drawn over and through the window: how much of the desktop shows through, and the
+/// shaders, each with its sliders.
+fn effectsPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    // Each is one layer: the terminals aren't drawn over the window's own background.
+    const mac = @import("builtin").os.tag == .macos;
+    const see = group(p, "Transparency", if (mac) "Below 100%, the desktop shows through" else "Below 100%, the desktop shows through. Hyprland and KDE blur it; GNOME doesn't");
+    percentRow(ctx, see, "Window", "The sidebar, the board and the space around the panes", &settings.current.window_opacity);
+    percentRow(ctx, see, "Terminals", "The panes, floating ones too, and the board's columns", &settings.current.terminal_opacity);
+    // On Linux the desktop does any blurring, so there's nothing for Renux to switch.
+    if (mac) switchRow(ctx, see, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
+    shaderRow(ctx, p);
     return p.as(gtk.Widget);
 }
 
@@ -925,6 +939,7 @@ fn themesPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     ctx.theme_checks.clearRetainingCapacity();
     const look = group(p, "Appearance", null);
+    cards(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, &.{ .scheme_auto, .scheme_light, .scheme_dark }, App.themeChanged);
     switchRow(ctx, look, "Separate light and dark themes", "Follow the system's appearance with a theme for each", &settings.current.theme_follow_system, App.themeChanged);
     slotRow(ctx, look, "Light theme", &settings.current.theme_light);
     slotRow(ctx, look, "Dark theme", &settings.current.theme_dark);
@@ -1041,21 +1056,21 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     numberRow(ctx, padding, "Vertical padding", "Points above and below the text", &settings.current.pad_y, 0, 40, 1, 0, App.terminalChanged);
     segments(ctx, padding, "Padding color", settings.PaddingColor, &settings.current.padding_color, &.{ "Terminal", "Theme" }, App.terminalChanged);
 
-    shaderRow(ctx, p);
-
     const c = group(p, "Cursor", null);
     sampleRow(ctx, c, .cursor);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
     numberRow(ctx, c, "Bar width", "In pixels, for the bar and underline cursors. The cursor takes the theme's accent color", &settings.current.cursor_width, 1, 6, 0.5, 1, App.redrawAll);
     switchRow(ctx, c, "Blink", "In the pane with the keyboard", &settings.current.cursor_blink, App.redrawAll);
-    switchRow(ctx, c, "Cursor in other panes", "An outline where the cursor is in panes without the keyboard", &settings.current.inactive_cursor, App.redrawAll);
     numberRow(ctx, c, "Blink interval", "Milliseconds between blinks", &settings.current.cursor_blink_ms, 200, 2000, 50, 0, App.terminalChanged);
+    switchRow(ctx, c, "Cursor in other panes", "An outline where the cursor is in panes without the keyboard", &settings.current.inactive_cursor, App.redrawAll);
     colorPicker(ctx, c, "Cursor text color", "The character under a block cursor", &settings.current.cursor_text_color, "Default", App.redrawAllPub);
 
     const sel = group(p, "Selection", null);
     sampleRow(ctx, sel, .selection);
     colorPicker(ctx, sel, "Background", "Selected text swaps its colors unless one is picked", &settings.current.selection_bg, "Theme", App.redrawAllPub);
     colorPicker(ctx, sel, "Foreground", null, &settings.current.selection_fg, "Theme", App.redrawAllPub);
+    switchRow(ctx, sel, "Rounded corners", "Every corner of a selection's outline, so one over several lines reads as one shape", &settings.current.rounded_selection, App.redrawAllPub);
+    numberRow(ctx, sel, "Corner radius", "How round those corners are, in points", &settings.current.selection_radius, 1, 16, 1, 0, App.redrawAllPub);
     const colors = group(p, "Colors and Bell", null);
     switchRow(ctx, colors, "Improve text contrast", "Adjust text that would be hard to read against its background", &settings.current.improve_contrast, App.redrawAll);
     switchRow(ctx, colors, "Extended theme palette", "Make colors 16 to 255 from the theme's own colors", &settings.current.extended_palette, App.terminalChanged);
