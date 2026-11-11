@@ -2084,6 +2084,69 @@ fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, to
         const c = rgba(sh.color, 1);
         sn.appendFill(path, .winding, &c);
     }
+    if (!rounded) return;
+    // The corners inside the selection's outline, where one line of it reaches further than
+    // the next, are rounded too: each gets a small curved fill in the corner, so every corner
+    // of the shape is round.
+    var row: usize = 0;
+    while (row + 1 < @min(rows, f.rows)) : (row += 1) {
+        const a = selectedSpan(f, row) orelse continue;
+        const b = selectedSpan(f, row + 1) orelse continue;
+        // Lines whose selections don't touch have no corner between them.
+        if (a[1] <= b[0] or b[1] <= a[0]) continue;
+        const py = top + @as(f64, @floatFromInt(row + 1)) * v.cell_h;
+        if (py - v.cell_h > h) break;
+        if (a[0] != b[0]) {
+            // The line that starts later leaves a corner beside it, above or below.
+            const col = @max(a[0], b[0]);
+            const upper_later = a[0] > b[0];
+            const r = @min(radius, @as(f64, @floatFromInt(@max(a[0], b[0]) - @min(a[0], b[0]))) * v.cell_w / 2);
+            const color = cellBg(f, f.cell(col - 1, if (upper_later) row + 1 else row));
+            fillet(sn, pad_x + @as(f64, @floatFromInt(col)) * v.cell_w, py, -1, if (upper_later) -1 else 1, r, color);
+        }
+        if (a[1] != b[1]) {
+            // The line that ends sooner leaves a corner past its end, above or below.
+            const col = @min(a[1], b[1]);
+            const lower_longer = b[1] > a[1];
+            const r = @min(radius, @as(f64, @floatFromInt(@max(a[1], b[1]) - @min(a[1], b[1]))) * v.cell_w / 2);
+            const color = cellBg(f, f.cell(col, if (lower_longer) row + 1 else row));
+            fillet(sn, pad_x + @as(f64, @floatFromInt(col)) * v.cell_w, py, 1, if (lower_longer) -1 else 1, r, color);
+        }
+    }
+}
+
+/// The one run of selected cells on a row, start and end, or null if it has none or several.
+fn selectedSpan(f: *const term_mod.Frame, row: usize) ?[2]usize {
+    var start: ?usize = null;
+    var end: usize = 0;
+    var x: usize = 0;
+    while (x < f.cols) : (x += 1) {
+        if (!f.cell(x, row).flags.selected) continue;
+        if (start != null and x != end) return null;
+        if (start == null) start = x;
+        end = x + 1;
+    }
+    return if (start) |s| .{ s, end } else null;
+}
+
+/// Rounds an inside corner of a shape at (px, py): fills the corner of the empty quarter that
+/// lies `dx`, `dy` from it (each 1 or -1) up to a quarter circle of radius `r`, reaching a
+/// little into the shape so no seam shows where they meet.
+fn fillet(sn: *gtk.Snapshot, px: f64, py: f64, dx: f64, dy: f64, r: f64, color: u32) void {
+    if (r < 0.5) return;
+    const e = 0.5;
+    const b = gsk.PathBuilder.new();
+    b.moveTo(@floatCast(px - dx * e), @floatCast(py - dy * e));
+    b.lineTo(@floatCast(px + dx * r), @floatCast(py - dy * e));
+    b.lineTo(@floatCast(px + dx * r), @floatCast(py));
+    // A quarter circle, bowing in toward the corner.
+    b.conicTo(@floatCast(px), @floatCast(py), @floatCast(px), @floatCast(py + dy * r), std.math.sqrt1_2);
+    b.lineTo(@floatCast(px - dx * e), @floatCast(py + dy * r));
+    b.close();
+    const path = b.freeToPath();
+    defer path.unref();
+    const c = rgba(color, 1);
+    sn.appendFill(path, .winding, &c);
 }
 
 /// A cell's background as `cellColors` gives it, without working out its text color.
