@@ -559,6 +559,7 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, panes_group, "Autobalance splits", "Panes share space evenly after one opens or closes", &settings.current.autobalance, null);
     switchRow(ctx, panes_group, "Match program backgrounds", "A pane's frame takes the background color of the program in it", &settings.current.match_program_bg, App.applyLook);
     switchRow(ctx, panes_group, "Rounded selection corners", "Only the outer corners, so a selection over several lines reads as one shape", &settings.current.rounded_selection, App.redrawAllPub);
+    numberRow(ctx, panes_group, "Selection corner radius", "How round those corners are, in points", &settings.current.selection_radius, 1, 16, 1, 0, App.redrawAllPub);
     const hl = group(p, "Active Pane Highlight", null);
     switchRow(ctx, hl, "Show border on active pane", null, &settings.current.highlight_border, App.applyLook);
     switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);

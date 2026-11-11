@@ -2017,7 +2017,7 @@ fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, to
     var shapes: [24]Shape = undefined;
     var n_shapes: usize = 0;
     const rounded = settings.current.rounded_selection;
-    const radius: f64 = @min(4, v.cell_h / 4);
+    const radius: f64 = @min(settings.current.selection_radius, v.cell_h / 2);
     const S = struct {
         fn selected(fr: *const term_mod.Frame, col: usize, row: isize) bool {
             if (row < 0 or row >= fr.rows) return false;
@@ -2059,18 +2059,21 @@ fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, to
                 shape.builder.addRect(&rect);
                 continue;
             }
-            // Rounded where nothing selected lies above or below that corner.
+            // Rounded where nothing selected lies beyond that corner: above or below it, or
+            // beside it on the same line, where the selection only changes color.
             const row: isize = @intCast(y);
+            const left = start > 0 and f.cell(start - 1, y).flags.selected;
+            const right = x < f.cols and f.cell(x, y).flags.selected;
             const r: f32 = @floatCast(@min(radius, @as(f64, @floatFromInt(x - start)) * v.cell_w / 2));
             const round: graphene.Size = .{ .f_width = r, .f_height = r };
             const square: graphene.Size = .{ .f_width = 0, .f_height = 0 };
             var rr: gsk.RoundedRect = undefined;
             _ = rr.init(
                 &rect,
-                if (S.selected(f, start, row - 1)) &square else &round,
-                if (S.selected(f, x - 1, row - 1)) &square else &round,
-                if (S.selected(f, x - 1, row + 1)) &square else &round,
-                if (S.selected(f, start, row + 1)) &square else &round,
+                if (left or S.selected(f, start, row - 1)) &square else &round,
+                if (right or S.selected(f, x - 1, row - 1)) &square else &round,
+                if (right or S.selected(f, x - 1, row + 1)) &square else &round,
+                if (left or S.selected(f, start, row + 1)) &square else &round,
             );
             shape.builder.addRoundedRect(&rr);
         }

@@ -81,6 +81,8 @@ pub const Settings = struct {
     /// A pane's frame takes its program's background color.
     match_program_bg: bool = false,
     rounded_selection: bool = true,
+    /// How round a rounded selection's outer corners are, in points.
+    selection_radius: f64 = 7,
     ligatures: bool = true,
     font_smoothing: bool = true,
     /// Bold and italic text in their own faces, or all in the regular one.
@@ -221,6 +223,7 @@ const ranges = [_]struct { []const u8, f64, f64 }{
     .{ "sidebar_text_scale", 0.8, 1.4 },
     .{ "fade_inactive", 0, 0.6 },
     .{ "highlight_opacity", 0.1, 1 },
+    .{ "selection_radius", 1, 16 },
     .{ "cursor_blink_ms", 200, 2000 },
     .{ "pad_x", 0, 40 },
     .{ "pad_y", 0, 40 },
