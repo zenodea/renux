@@ -2208,9 +2208,11 @@ fn fillet(sn: *gtk.Snapshot, px: f64, py: f64, dx: f64, dy: f64, r: f64, color: 
 
 const CopySpan = struct { row: u16, x0: u16, x1: u16 };
 
-/// How long a copy's animation lasts, and how much of it the lift takes to rise.
-const copy_duration_us = 560 * std.time.us_per_ms;
-const copy_rise = 0.16;
+/// How long a copy's animation lasts; how much of it the lift takes to rise, and when it starts
+/// to settle back.
+const copy_duration_us = 720 * std.time.us_per_ms;
+const copy_rise = 0.28;
+const copy_settle = 0.42;
 
 /// The copied text, lifted: the pane as it was at the copy, cut to the copied cells' shape,
 /// raised a few points with a soft shadow under it, then settling back, while a glint runs
@@ -2256,20 +2258,28 @@ fn drawCopy(v: *TermView, sn: *gtk.Snapshot) void {
     const h = y1 - y0;
     if (w <= 0 or h <= 0) return;
 
-    // Up fast, then down slowly; a few points either way, however big the selection.
-    const lift = if (t < copy_rise) 1 - std.math.pow(f64, 1 - t / copy_rise, 3) else blk: {
-        const d = (t - copy_rise) / (1 - copy_rise);
-        break :blk 1 - (if (d < 0.5) 4 * d * d * d else 1 - std.math.pow(f64, -2 * d + 2, 3) / 2);
+    // Up, easing in and out so it doesn't jump, a moment held at the top, then slowly down; a
+    // few points either way, however big the selection.
+    const Ease = struct {
+        fn inOut(x: f64) f64 {
+            return 0.5 - 0.5 * @cos(std.math.pi * std.math.clamp(x, 0, 1));
+        }
     };
-    const grow = @min(0.06, 10 / @max(w, h));
+    const lift = if (t < copy_rise)
+        Ease.inOut(t / copy_rise)
+    else if (t < copy_settle)
+        1
+    else
+        1 - Ease.inOut((t - copy_settle) / (1 - copy_settle));
+    const grow = @min(0.045, 8 / @max(w, h));
     const s: f32 = @floatCast(1 + lift * grow);
     const cx: f32 = @floatCast(x0 + w / 2);
     const cy: f32 = @floatCast(y0 + h / 2);
     sn.save();
-    sn.translate(&.{ .f_x = cx, .f_y = cy - @as(f32, @floatCast(2 * lift)) });
+    sn.translate(&.{ .f_x = cx, .f_y = cy - @as(f32, @floatCast(1.5 * lift)) });
     sn.scale(s, s);
     sn.translate(&.{ .f_x = -cx, .f_y = -cy });
-    const shadow: gsk.Shadow = .{ .f_color = .{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.4 * lift) }, .f_dx = 0, .f_dy = @floatCast(3 * lift), .f_radius = @floatCast(12 * lift) };
+    const shadow: gsk.Shadow = .{ .f_color = .{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.32 * lift) }, .f_dx = 0, .f_dy = @floatCast(3 * lift), .f_radius = @floatCast(14 * lift) };
     sn.pushShadow(@ptrCast(&shadow), 1);
     // The copied shape, as the selection draws it: its rows, and its inside corners rounded
     // where one row reaches further than the next.
@@ -2296,13 +2306,13 @@ fn drawCopy(v: *TermView, sn: *gtk.Snapshot) void {
     sn.pop();
     sn.appendNode(node);
     // The glint: a band of light crossing from the start of the copied text to its far edge.
-    const g = std.math.clamp((t - 0.08) / 0.78, 0, 1);
+    const g = std.math.clamp((t - 0.14) / 0.72, 0, 1);
     const along = if (g < 0.5) 2 * g * g else 1 - std.math.pow(f64, -2 * g + 2, 2) / 2;
     const band = @max(v.cell_w * 5, w * 0.18);
     const bx = x0 - band + (w + 2 * band) * along;
     const bounds: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(x0), .f_y = @floatCast(y0) }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } };
     const clear: gdk.RGBA = .{ .f_red = 1, .f_green = 1, .f_blue = 1, .f_alpha = 0 };
-    const light: gdk.RGBA = .{ .f_red = 1, .f_green = 1, .f_blue = 1, .f_alpha = 0.42 };
+    const light: gdk.RGBA = .{ .f_red = 1, .f_green = 1, .f_blue = 1, .f_alpha = 0.34 };
     const stops = [_]gsk.ColorStop{ .{ .f_offset = 0, .f_color = clear }, .{ .f_offset = 0.5, .f_color = light }, .{ .f_offset = 1, .f_color = clear } };
     sn.appendLinearGradient(&bounds, &.{ .f_x = @floatCast(bx - band / 2), .f_y = @floatCast(y0) }, &.{ .f_x = @floatCast(bx + band / 2), .f_y = @floatCast(y1) }, &stops, stops.len);
     sn.pop();
