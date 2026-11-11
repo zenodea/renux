@@ -1733,12 +1733,8 @@ pub const TermView = struct {
     /// does. The selection may be cleared the moment it's copied, so the pane as it is now,
     /// selection and all, is kept to draw it from.
     fn startCopyAnimation(v: *TermView, t: *term_mod.Term) void {
-        const own = gtk.Snapshot.new();
-        snapshotTermImpl(v, own);
-        const node = own.freeToNode() orelse return;
-        if (v.copy_node) |old| old.unref();
-        v.copy_node = node;
-        v.copy_spans.clearRetainingCapacity();
+        // An earlier copy's lift isn't part of this one's picture.
+        v.endCopyAnimation();
         const f = &t.frame;
         var row: usize = 0;
         while (row < f.rows) : (row += 1) {
@@ -1753,7 +1749,10 @@ pub const TermView = struct {
                 v.copy_spans.append(gpa, .{ .row = @intCast(row), .x0 = @intCast(start), .x1 = @intCast(x) }) catch {};
             }
         }
-        if (v.copy_spans.items.len == 0) return v.endCopyAnimation();
+        if (v.copy_spans.items.len == 0) return;
+        const own = gtk.Snapshot.new();
+        snapshotTermImpl(v, own);
+        v.copy_node = own.freeToNode() orelse return v.endCopyAnimation();
         v.copy_top = pad_y + v.draw_frac;
         v.copy_started = glib.getMonotonicTime();
         if (v.copy_tick == 0) v.copy_tick = v.widget().addTickCallback(&copyTick, v, null);
@@ -2317,6 +2316,20 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
     sn.restore();
 }
 
+/// Reads the terminal into its frame for drawing. While copied text is lifted, the cells it
+/// left are empty, so the terminal's own background shows behind it, not the text and its
+/// selection. The cache of drawn rows keys on the cells, so it stays right.
+fn renderFrame(v: *TermView, t: *term_mod.Term) void {
+    _ = t.render(true);
+    if (v.copy_node == null) return;
+    const f = &t.frame;
+    for (v.copy_spans.items) |s| {
+        if (s.row >= f.rows) continue;
+        var x = s.x0;
+        while (x < s.x1 and x < f.cols) : (x += 1) f.cells.items[@as(usize, s.row) * f.cols + x] = .{};
+    }
+}
+
 pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     if (perf_log and echo_at != 0) {
         const now = glib.getMonotonicTime();
@@ -2345,7 +2358,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         // A pane is nearly always on screen a moment later, so nothing is written meanwhile.
         else => "",
     });
-    _ = t.render(true);
+    renderFrame(v, t);
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
     v.shader_look.bg = f.bg;
@@ -2382,7 +2395,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         drawBackgrounds(v, sn, &t.frame, pad_y + frac - v.cell_h, 1, h);
         placeRow(sn, rowNode(v, t.frame.rows, &t.frame, 0, f_font), pad_y + frac - v.cell_h);
         t.scroll(1);
-        _ = t.render(true);
+        renderFrame(v, t);
     }
     drawBackgrounds(v, sn, f, pad_y + frac, f.rows, h);
     drawImages(v, sn, t, false, frac);
