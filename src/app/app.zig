@@ -269,7 +269,7 @@ pub const App = struct {
     sidebar: *gtk.ListBox = undefined,
     split: *adw.OverlaySplitView = undefined,
     card: *gtk.Widget = undefined,
-    /// The window's see-through background, under everything, with holes for the terminals.
+    /// The window's see-through background, one even layer under everything, panes included.
     window_bg: *gtk.Widget = undefined,
     /// The window's one cursor, as the cursor shader draws it, over every pane.
     cursor_layer: *gtk.Widget = undefined,
@@ -618,9 +618,7 @@ pub const App = struct {
         const window_bg = @import("../ui/window_bg.zig");
         a.window_bg = window_bg.WindowBackground.new().as(gtk.Widget);
         a.window_bg.setVisible(0);
-        window_bg.holes = &windowHoles;
         @import("../terminal/shader.zig").on_error = &shaderError;
-        @import("../ui/workspace.zig").on_layout = &cardsPlaced;
         const base = gtk.Overlay.new();
         base.setChild(a.window_bg);
         base.addOverlay(a.toasts.as(gtk.Widget));
@@ -823,9 +821,8 @@ pub const App = struct {
         if (on == a.board.shown()) return;
         a.board.show(on);
         // The board is see-through when the window is, so the panes under it are hidden while
-        // it is open, and the window's background has no holes for them.
+        // it is open.
         a.stack.as(gtk.Widget).setOpacity(if (on) 0 else 1);
-        a.window_bg.queueDraw();
         // The button shows which it is; setting it runs `boardToggled`, which finds nothing
         // left to do.
         a.board_button.setActive(@intFromBool(on));
@@ -3621,13 +3618,13 @@ pub const App = struct {
         // A Mac window has round corners. On Linux the desktop decides, as Hyprland does with
         // its own rounding, so the window itself stays square.
         const radius: f64 = if (builtin.os.tag == .macos) window_radius else 0;
-        // While see-through, one background lies under the whole window, with holes where the
-        // terminals are (`window_bg.zig`): the window, sidebar and board draw none of their own,
-        // so they all show that one layer, and a terminal shows only its own background.
+        // While see-through, one even background lies under the whole window (`window_bg.zig`):
+        // the window, sidebar and board draw none of their own, so they all show that one layer,
+        // and each pane lays its own over it, so the panes are frosted more than the window.
         a.window_bg.setVisible(@intFromBool(see_through));
-        // Floating cards are cut out of the tiled ones under them too, so they show the desktop.
+        // Floating cards are cut out of the tiled ones under them, so a tiled pane's text doesn't
+        // show through a floating one.
         @import("../ui/workspace.zig").cut_floating = see_through;
-        @import("../ui/window_bg.zig").tiled_radius = if (prefs.tight) 0 else 11;
         @import("../ui/window_bg.zig").floating_radius = if (prefs.tight) 8 else 11;
         const look_text = if (!see_through) "" else std.fmt.bufPrintSentinel(&buf,
             \\window.renux, window.renux .sidebar-pane, .board {{ background-color: transparent; }}
@@ -3804,15 +3801,6 @@ fn useAppIcon() void {
 
 var mode_app: ?*App = null;
 
-/// The holes in the window's see-through background: the terminal cards on screen, unless the
-/// board is open over them.
-fn windowHoles(background: *gtk.Widget, out: []@import("../ui/window_bg.zig").Hole) usize {
-    const a = mode_app orelse return 0;
-    if (a.board.shown()) return 0;
-    const ws = a.workspace orelse return 0;
-    return ws.cardBounds(background, out);
-}
-
 /// The pane that has the window's one cursor: the one with the keyboard, while panes show.
 fn cursorPane() ?*termview.TermView {
     const a = mode_app orelse return null;
@@ -3837,11 +3825,6 @@ fn shaderError(message: []const u8) void {
     a.toastText(z);
 }
 
-/// The cards moved, so the holes under them move too.
-fn cardsPlaced() void {
-    const a = mode_app orelse return;
-    if (a.window_bg.getVisible() != 0) a.window_bg.queueDraw();
-}
 /// Whether $RENUX_OPEN's tab has been shown.
 var open_done = false;
 /// The font size Renux started with, which client.font.reset goes back to.

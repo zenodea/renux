@@ -1028,22 +1028,6 @@ pub const Workspace = struct {
     }
 
     /// The focused pane's terminal view.
-    /// Where each card on screen is, tiled or floating, in `target`'s coordinates, for the
-    /// window's see-through background to leave holes at. Returns how many it wrote.
-    pub fn cardBounds(ws: *Workspace, target: *gtk.Widget, out: []window_bg.Hole) usize {
-        if (ws.root.getMapped() == 0) return 0;
-        var n: usize = 0;
-        for (ws.panes.items) |*p| {
-            if (n == out.len) return n;
-            if (p.floating or p.frame.getMapped() == 0) continue;
-            if (p.frame.computeBounds(target, &out[n].rect) != 0) {
-                out[n].radius = window_bg.tiled_radius;
-                n += 1;
-            }
-        }
-        return n + ws.floatingHoles(target, out[n..]);
-    }
-
     /// Where each floating card on screen is, and each joined layer's card around its panes.
     fn floatingHoles(ws: *Workspace, target: *gtk.Widget, out: []window_bg.Hole) usize {
         var n: usize = 0;
@@ -1945,12 +1929,7 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     ws.tray.as(gtk.Widget).sizeAllocate(&tray, -1);
     // Where the floating cards are decides what is cut from the tiled ones under them.
     if (cut_floating) widget.queueDraw();
-    if (on_layout) |f| f();
 }
-
-/// Told each time the cards are placed, which is every frame while they move, so the window's
-/// see-through background can keep its holes under them.
-pub var on_layout: ?*const fn () void = null;
 
 /// Set while the window is see-through: the tiled cards are cut where a floating card lies
 /// over them, so a floating pane shows the desktop behind the window, as the other panes do,

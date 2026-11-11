@@ -1,8 +1,7 @@
-//! The window's background while it is see-through: one layer of the window's color behind
-//! everything, with a hole wherever a terminal's card sits. The sidebar, the board and the gaps
-//! between panes all show this one layer, so they match. A terminal shows only its own
-//! background in its hole, so the window's opacity and the terminals' don't stack, and a
-//! terminal can be clearer than the window around it.
+//! The window's background while it is see-through: one even layer of the window's color behind
+//! everything, the panes included. The sidebar, the board and the gaps between panes all show
+//! this one layer, so they match, and each pane lays its own over it, so a pane is frosted more
+//! than the window around it, as a pane on a window.
 const std = @import("std");
 const gtk = @import("gtk");
 const gsk = @import("gsk");
@@ -13,11 +12,7 @@ const graphene = @import("graphene");
 /// A card's place, with the radius of its corners.
 pub const Hole = struct { rect: graphene.Rect, radius: f32 };
 
-/// Finds the holes: each terminal card on screen, tiled or floating, in this widget's
-/// coordinates. Returns how many it wrote.
-pub var holes: ?*const fn (background: *gtk.Widget, out: []Hole) usize = null;
-/// The corners of tiled and of floating cards, which their holes match.
-pub var tiled_radius: f32 = 11;
+/// The corners of floating cards, which what's cut from under them matches.
 pub var floating_radius: f32 = 11;
 
 /// Starts drawing what follows with `holes` cut out of it, until the second `pop`: the holes,
@@ -66,14 +61,8 @@ pub const WindowBackground = extern struct {
     }
 
     fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
-        const w = self.as(gtk.Widget);
         const fill = self.fill orelse return;
-        var cut: [64]Hole = undefined;
-        const n = if (holes) |f| f(w, &cut) else 0;
-        if (n == 0) return w.snapshotChild(fill, sn);
-        pushCut(sn, cut[0..n]);
-        w.snapshotChild(fill, sn);
-        sn.pop();
+        self.as(gtk.Widget).snapshotChild(fill, sn);
     }
 
     fn dispose(self: *Self) callconv(.c) void {

@@ -600,8 +600,8 @@ fn effectsPage(ctx: *Ctx) *gtk.Widget {
     // Each is one layer: the terminals aren't drawn over the window's own background.
     const mac = @import("builtin").os.tag == .macos;
     const see = group(p, "Transparency", if (mac) "Below 100%, the desktop shows through" else "Below 100%, the desktop shows through. Hyprland and KDE blur it; GNOME doesn't");
-    percentRow(ctx, see, "Window", "The sidebar, the board and the space around the panes", &settings.current.window_opacity);
-    percentRow(ctx, see, "Terminals", "The panes, floating ones too, and the board's columns", &settings.current.terminal_opacity);
+    percentRow(ctx, see, "Window", "One layer over the whole window: the sidebar, the board, and behind the panes", &settings.current.window_opacity);
+    percentRow(ctx, see, "Terminals", "The panes and the board's columns, laid over the window's layer, so they're frosted more", &settings.current.terminal_opacity);
     // On Linux the desktop does any blurring, so there's nothing for Renux to switch.
     if (mac) switchRow(ctx, see, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
     shaderRow(ctx, p);
