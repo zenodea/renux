@@ -2081,6 +2081,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         v.shader_look.cursor_color = color;
         if (blinks and !blink_on) {
             // The hidden half of a blink.
+        } else if (!focused and !prefs.inactive_cursor) {
+            // Panes without the keyboard can leave their cursor out altogether.
         } else if (!focused or style == 3) {
             fillRect(sn, color, 1, cx, cy, cw, 1);
             fillRect(sn, color, 1, cx, cy + v.cell_h - 1, cw, 1);

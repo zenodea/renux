@@ -27,6 +27,8 @@ pub const Settings = struct {
     brand_icons: bool = true,
     cursor_style: CursorStyle = .program,
     cursor_blink: bool = true,
+    /// Panes without the keyboard show where their cursor is as an outline; off leaves it out.
+    inactive_cursor: bool = true,
     /// The bar cursor's width in pixels.
     cursor_width: f64 = 2,
     /// Row height as a multiple of the font's own line height.
