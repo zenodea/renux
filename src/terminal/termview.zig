@@ -2358,11 +2358,14 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
     sn.restore();
 }
 
-/// Reads the terminal into its frame for drawing. While copied text is lifted, the cells it
-/// left are empty, so the terminal's own background shows behind it, not the text and its
+/// Reads the terminal into its frame for drawing. While copied text is lifted, the cursor is
+/// hidden and the cells the text left are empty, so the terminal's own background shows behind it, not the text and its
 /// selection. The cache of drawn rows keys on the cells, so it stays right.
 fn renderFrame(v: *TermView, t: *term_mod.Term) void {
     _ = t.render(true);
+    // From the copy's picture until the lifted text is back down, there's no cursor: not in
+    // the picture, and not jumping about under or beside the text while it moves.
+    if (v.copy_spans.items.len > 0) t.frame.cursor_visible = false;
     if (v.copy_node == null) return;
     const f = &t.frame;
     for (v.copy_spans.items) |s| {
