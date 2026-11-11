@@ -6,6 +6,9 @@ A native Linux client for [Rex](https://rex.superlogical.com), written in Zig wi
 libadwaita. It shows a Rex server's sessions, windows and panes, with live terminals drawn
 through libghostty-vt.
 
+Renux is an independent project, not made by the Rex team. It is early, so expect rough edges,
+and please report them as [issues](https://github.com/zenodea/renux/issues).
+
 ![Three panes side by side: a shell, and two coding agents at work](docs/screenshots/panes.png)
 
 ## What it does
@@ -46,7 +49,7 @@ see [Rex's installation guide](https://www.superlogical.com/rex/docs/linux/insta
    where your desktop looks for them:
 
    ```sh
-   git clone --recurse-submodules <the address of this repository> renux
+   git clone --recurse-submodules https://github.com/zenodea/renux
    cd renux
    zig build -Doptimize=ReleaseFast -p ~/.local
    ```
