@@ -392,12 +392,14 @@ pub const App = struct {
         a.window = adw.ApplicationWindow.new(a.app.as(gtk.Application));
         const win = a.window.as(gtk.Window);
         win.setDefaultSize(1180, 760);
-        // Development: RENUX_SIZE=WIDTHxHEIGHT starts the window at another size.
+        // Development: RENUX_SIZE=WIDTHxHEIGHT starts the window at another size, and keeps it
+        // there even on a smaller screen, for screenshots.
         if (build_options.dev) if (std.c.getenv("RENUX_SIZE")) |size| {
             var parts = std.mem.splitScalar(u8, std.mem.span(size), 'x');
             const w = std.fmt.parseInt(c_int, parts.first(), 10) catch 1180;
             const h = std.fmt.parseInt(c_int, parts.next() orelse "760", 10) catch 760;
             win.setDefaultSize(w, h);
+            win.as(gtk.Widget).setSizeRequest(w, h);
         };
         win.setTitle("Renux");
         win.as(gtk.Widget).addCssClass("renux");
