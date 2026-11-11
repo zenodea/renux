@@ -1959,38 +1959,9 @@ fn rowNode(v: *TermView, slot: usize, f: *const term_mod.Frame, y: usize, f_font
 fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gsk.RenderNode {
     const sn = gtk.Snapshot.new();
     const layout = layoutOf(v);
-    // Backgrounds first, so wide glyphs can overhang into the next cell.
-    const rounded = settings.current.rounded_selection;
+    // Cell backgrounds are drawn for all rows at once, under these (`drawBackgrounds`).
     var x: usize = 0;
-    while (x < f.cols) : (x += 1) {
-        const cl = f.cell(x, y);
-        if (rounded and cl.flags.selected) continue;
-        const colors = cellColors(f, cl);
-        if (colors.bg == f.bg) continue;
-        const span: f64 = if (cl.flags.wide) 2 else 1;
-        fillRect(sn, colors.bg, 1, pad_x + @as(f64, @floatFromInt(x)) * v.cell_w, 0, v.cell_w * span + 0.5, v.cell_h);
-    }
-    // A selection reads as one soft-cornered shape for each run of selected cells.
-    if (rounded) {
-        x = 0;
-        while (x < f.cols) {
-            if (!f.cell(x, y).flags.selected) {
-                x += 1;
-                continue;
-            }
-            const start = x;
-            const color = cellColors(f, f.cell(x, y)).bg;
-            while (x < f.cols and f.cell(x, y).flags.selected) x += 1;
-            const rect: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(pad_x + @as(f64, @floatFromInt(start)) * v.cell_w), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(@as(f64, @floatFromInt(x - start)) * v.cell_w), .f_height = @floatCast(v.cell_h) } };
-            var rr: gsk.RoundedRect = undefined;
-            _ = rr.initFromRect(&rect, @floatCast(@min(4, v.cell_h / 4)));
-            sn.pushRoundedClip(&rr);
-            const c = rgba(color, 1);
-            sn.appendColor(&c, &rect);
-            sn.pop();
-        }
-    }
-    // Then text, in runs of one style. Anything outside ASCII is placed on its own cell, since
+    // Text, in runs of one style. Anything outside ASCII is placed on its own cell, since
     // fallback fonts don't keep to the grid.
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
@@ -2033,6 +2004,95 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
         if (cl.flags.strike) fillRect(sn, colors.fg, alpha, left, v.cell_h / 2, run_w, 1);
     }
     return sn.freeToNode();
+}
+
+/// The background of each cell that has one of its own, for `rows` rows from the one at `top`,
+/// drawn together. Each color is one shape made of its runs of cells, each a hair taller than a
+/// row so they overlap, filled at once: rows that meet show no seam, as they did when each row
+/// painted its own at a fractional height and both edges came out half drawn. With rounded
+/// selection on, a selection rounds only the corners with nothing selected beyond them, so the
+/// whole selection is rounded on its outside rather than each line of it.
+fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, top: f64, rows: usize, h: f64) void {
+    const Shape = struct { color: u32, builder: *gsk.PathBuilder };
+    var shapes: [24]Shape = undefined;
+    var n_shapes: usize = 0;
+    const rounded = settings.current.rounded_selection;
+    const radius: f64 = @min(4, v.cell_h / 4);
+    const S = struct {
+        fn selected(fr: *const term_mod.Frame, col: usize, row: isize) bool {
+            if (row < 0 or row >= fr.rows) return false;
+            return fr.cell(col, @intCast(row)).flags.selected;
+        }
+    };
+    var y: usize = 0;
+    while (y < @min(rows, f.rows)) : (y += 1) {
+        const row_top = top + @as(f64, @floatFromInt(y)) * v.cell_h;
+        if (row_top > h) break;
+        if (row_top + v.cell_h < 0) continue;
+        var x: usize = 0;
+        while (x < f.cols) {
+            const first = f.cell(x, y);
+            const color = cellBg(f, first);
+            const sel = first.flags.selected;
+            const start = x;
+            x += 1;
+            while (x < f.cols and cellBg(f, f.cell(x, y)) == color and f.cell(x, y).flags.selected == sel) x += 1;
+            if (color == f.bg and !sel) continue;
+            // Its color's shape, made the first time the color comes up.
+            const shape = for (shapes[0..n_shapes]) |*sh| {
+                if (sh.color == color) break sh;
+            } else blk: {
+                if (n_shapes == shapes.len) {
+                    // So many colors that a shape each would cost more than it saves.
+                    fillRect(sn, color, 1, pad_x + @as(f64, @floatFromInt(start)) * v.cell_w, row_top, @as(f64, @floatFromInt(x - start)) * v.cell_w + 0.5, v.cell_h + 0.5);
+                    continue;
+                }
+                shapes[n_shapes] = .{ .color = color, .builder = gsk.PathBuilder.new() };
+                n_shapes += 1;
+                break :blk &shapes[n_shapes - 1];
+            };
+            const rect: graphene.Rect = .{
+                .f_origin = .{ .f_x = @floatCast(pad_x + @as(f64, @floatFromInt(start)) * v.cell_w), .f_y = @floatCast(row_top) },
+                .f_size = .{ .f_width = @floatCast(@as(f64, @floatFromInt(x - start)) * v.cell_w), .f_height = @floatCast(v.cell_h + 0.05) },
+            };
+            if (!(rounded and sel)) {
+                shape.builder.addRect(&rect);
+                continue;
+            }
+            // Rounded where nothing selected lies above or below that corner.
+            const row: isize = @intCast(y);
+            const r: f32 = @floatCast(@min(radius, @as(f64, @floatFromInt(x - start)) * v.cell_w / 2));
+            const round: graphene.Size = .{ .f_width = r, .f_height = r };
+            const square: graphene.Size = .{ .f_width = 0, .f_height = 0 };
+            var rr: gsk.RoundedRect = undefined;
+            _ = rr.init(
+                &rect,
+                if (S.selected(f, start, row - 1)) &square else &round,
+                if (S.selected(f, x - 1, row - 1)) &square else &round,
+                if (S.selected(f, x - 1, row + 1)) &square else &round,
+                if (S.selected(f, start, row + 1)) &square else &round,
+            );
+            shape.builder.addRoundedRect(&rr);
+        }
+    }
+    for (shapes[0..n_shapes]) |sh| {
+        const path = sh.builder.freeToPath();
+        defer path.unref();
+        const c = rgba(sh.color, 1);
+        sn.appendFill(path, .winding, &c);
+    }
+}
+
+/// A cell's background as `cellColors` gives it, without working out its text color.
+fn cellBg(f: *const term_mod.Frame, cl: term_mod.Cell) u32 {
+    var fg = if (cl.fg != 0) cl.fg else f.fg;
+    var bg = if (cl.bg != 0) cl.bg else f.bg;
+    if (cl.flags.inverse) std.mem.swap(u32, &fg, &bg);
+    if (cl.flags.selected) {
+        const sel_bg = settings.current.selection_bg;
+        bg = if (sel_bg != 0) sel_bg else fg;
+    }
+    return bg;
 }
 
 fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
@@ -2105,10 +2165,12 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     if (frac > 0.01 and rows_up < max_up) {
         t.scroll(-1);
         _ = t.render(true);
+        drawBackgrounds(v, sn, &t.frame, pad_y + frac - v.cell_h, 1, h);
         placeRow(sn, rowNode(v, t.frame.rows, &t.frame, 0, f_font), pad_y + frac - v.cell_h);
         t.scroll(1);
         _ = t.render(true);
     }
+    drawBackgrounds(v, sn, f, pad_y + frac, f.rows, h);
     drawImages(v, sn, t, false, frac);
     var y: usize = 0;
     while (y < f.rows) : (y += 1) {
