@@ -134,18 +134,7 @@ const Canvas = extern struct {
         defer if (v.shader_view) |sv| sv.as(gtk.Widget).queueDraw();
         // The window's cursor layer follows the cursor this drew, if this pane has it.
         defer if (on_drawn) |f| f(v);
-        if (!shader.pane.active()) {
-            v.shader_drawn = false;
-            return snapshotTermImpl(v, sn);
-        }
-        // Through a custom shader: the pane draws itself aside, that becomes the shader's
-        // picture, and the shader's view over this one shows what the shader makes of it.
-        const own = gtk.Snapshot.new();
-        snapshotTermImpl(v, own);
-        const node = own.freeToNode() orelse return;
-        defer node.unref();
-        v.shader_drawn = shader.updateInput(&v.shader_pane, self.as(gtk.Widget), node);
-        if (!v.shader_drawn) sn.appendNode(node);
+        snapshotTermImpl(v, sn);
     }
 
     fn sizeAllocate(self: *Self, width: c_int, height: c_int, _: c_int) callconv(.c) void {
@@ -160,6 +149,79 @@ const Canvas = extern struct {
         fn init(class: *Class) callconv(.c) void {
             gtk.Widget.virtual_methods.snapshot.implement(class, &snapshot);
             gtk.Widget.virtual_methods.size_allocate.implement(class, &sizeAllocate);
+        }
+
+        pub fn as(class: *Class, comptime T: type) *T {
+            return gobject.ext.as(T, class);
+        }
+    };
+};
+
+/// What a card holds, its header above its terminal, laid out top to bottom. While a pane shader
+/// is on, this is the shader's picture: it draws its children aside, into the picture, and the
+/// shader's view over it shows what the shader makes of them, header and all. It only draws when
+/// what it holds has changed, so a shader moving with time doesn't take a new picture each frame.
+pub const ShaderSource = extern struct {
+    parent_instance: Parent,
+    view: ?*TermView,
+
+    pub const Parent = gtk.Widget;
+    const Self = @This();
+
+    pub const getGObjectType = gobject.ext.defineClass(Self, .{
+        .name = "RenuxShaderSource",
+        .classInit = &Class.init,
+        .parent_class = &Class.parent,
+    });
+
+    pub fn as(self: *Self, comptime T: type) *T {
+        return gobject.ext.as(T, self);
+    }
+
+    fn children(w: *gtk.Widget, sn: *gtk.Snapshot) void {
+        var c = w.getFirstChild();
+        while (c) |child| : (c = child.getNextSibling()) w.snapshotChild(child, sn);
+    }
+
+    fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
+        const w = self.as(gtk.Widget);
+        const v = self.view orelse return children(w, sn);
+        // The shader's view shows what this drew, so it draws again after this does.
+        defer if (v.shader_view) |sv| sv.as(gtk.Widget).queueDraw();
+        if (!shader.pane.active()) {
+            v.shader_drawn = false;
+            return children(w, sn);
+        }
+        const own = gtk.Snapshot.new();
+        children(w, own);
+        const node = own.freeToNode() orelse {
+            v.shader_drawn = false;
+            return;
+        };
+        defer node.unref();
+        // The cursor is in the terminal's points; the header puts it lower in this picture.
+        var at: graphene.Point = undefined;
+        if (v.widget().computePoint(w, &.{ .f_x = 0, .f_y = 0 }, &at) != 0) v.shader_origin = .{ at.f_x, at.f_y };
+        v.shader_drawn = shader.updateInput(&v.shader_pane, w, node);
+        if (!v.shader_drawn) sn.appendNode(node);
+    }
+
+    fn dispose(self: *Self) callconv(.c) void {
+        const w = self.as(gtk.Widget);
+        while (w.getFirstChild()) |child| child.unparent();
+        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+    }
+
+    pub const Class = extern struct {
+        parent_class: Parent.Class,
+
+        var parent: *Parent.Class = undefined;
+
+        pub const Instance = Self;
+
+        fn init(class: *Class) callconv(.c) void {
+            gtk.Widget.virtual_methods.snapshot.implement(class, &snapshot);
+            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
         }
 
         pub fn as(class: *Class, comptime T: type) *T {
@@ -195,7 +257,10 @@ const ShaderView = extern struct {
         const v = self.view orelse return;
         if (!v.shader_drawn or !shader.pane.active()) return;
         const focused = v.widget().hasFocus() != 0;
-        _ = shader.drawOutput(&v.shader_pane, &v.shader_look, focused, sn);
+        var look = v.shader_look;
+        look.cursor[0] += v.shader_origin[0];
+        look.cursor[1] += v.shader_origin[1];
+        _ = shader.drawOutput(&v.shader_pane, &look, focused, sn);
         // A shader that moves with time draws the pane with the keyboard again every frame, as
         // Ghostty does; the others keep their last frame until the pane changes.
         if (focused and v.shader_tick == 0 and shader.pane.wantsFrames(&v.shader_pane)) v.shader_tick = self.as(gtk.Widget).addTickCallback(&shaderTick, v, null);
@@ -380,6 +445,9 @@ pub const TermView = struct {
     /// drawing went through the shader at all.
     shader_view: ?*ShaderView = null,
     shader_drawn: bool = false,
+    /// Where the terminal starts in the card's picture, below the header.
+    shader_origin: [2]f32 = .{ 0, 0 },
+    shader_source: ?*ShaderSource = null,
     /// What the last drawing knew of the cursor and colors, for the shader.
     shader_look: shader.Look = .{},
     last_frame_us: i64 = 0,
@@ -506,9 +574,20 @@ pub const TermView = struct {
         v.size_timer = 0;
     }
 
-    /// The custom shader's picture of the pane, laid over `widget`, which the card shows too.
+    /// The custom shader's picture of the pane, laid over the card's content.
     pub fn shaderWidget(v: *TermView) *gtk.Widget {
         return v.shader_view.?.as(gtk.Widget);
+    }
+
+    /// A container for the card's header and terminal, top to bottom, which a pane shader takes
+    /// its picture from.
+    pub fn shaderSource(v: *TermView) *gtk.Widget {
+        const s = gobject.ext.newInstance(ShaderSource, .{});
+        s.view = v;
+        const w = s.as(gtk.Widget);
+        w.setLayoutManager(gtk.BoxLayout.new(.vertical).as(gtk.LayoutManager));
+        v.shader_source = s;
+        return w;
     }
 
     pub fn widget(v: *TermView) *gtk.Widget {
@@ -610,6 +689,7 @@ pub const TermView = struct {
             if (v.shader_tick != 0) sv.as(gtk.Widget).removeTickCallback(v.shader_tick);
             sv.view = null;
         }
+        if (v.shader_source) |s| s.view = null;
         v.shader_pane.deinit();
         if (v.title_label) |l| l.as(gobject.Object).unref();
         v.title_label = null;

@@ -730,18 +730,17 @@ pub const Workspace = struct {
         // The drag handlers find their pane by the widget, so tag it with the block.
         gobject.Object.setData(row.as(gobject.Object), "renux-block", owned.ptr);
 
-        const card = gtk.Box.new(.vertical, 0);
-        card.as(gtk.Widget).setOverflow(.hidden);
-        card.append(row.as(gtk.Widget));
+        // The header above the terminal, in the container a pane shader takes its picture from.
+        const card = tv.shaderSource();
+        card.setOverflow(.hidden);
+        row.as(gtk.Widget).setParent(card);
         // The pane's own find bar floats over its terminal's top right corner.
         const find = @import("findbar.zig").FindBar.create(tv);
         const body = gtk.Overlay.new();
         body.setChild(tv.widget());
-        // A custom shader's picture of the pane lies over the terminal, under the find bar.
-        body.addOverlay(tv.shaderWidget());
         if (find) |f| body.addOverlay(f.widget());
         body.as(gtk.Widget).setVexpand(1);
-        card.append(body.as(gtk.Widget));
+        body.as(gtk.Widget).setParent(card);
         tv.setTitleLabel(label);
 
         // Floating cards resize from their bottom-right corner.
@@ -783,7 +782,9 @@ pub const Workspace = struct {
         gobject.Object.setData(gw.as(gobject.Object), "renux-block", owned.ptr);
 
         const frame_overlay = gtk.Overlay.new();
-        frame_overlay.setChild(card.as(gtk.Widget));
+        frame_overlay.setChild(card);
+        // A pane shader's picture of the whole card, header and terminal, lies over it.
+        frame_overlay.addOverlay(tv.shaderWidget());
         frame_overlay.addOverlay(gw);
         const copied = gtk.Label.new("Copied");
         const cw = copied.as(gtk.Widget);
