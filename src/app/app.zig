@@ -34,8 +34,6 @@ const css =
     \\window.renux, window.renux .sidebar-pane { background-color: @renux_shell; }
     \\*, *:focus-visible, *:focus-within { outline: none; outline-width: 0; }
     \\.carry-ghost { background-color: mix(@view_bg_color, @window_fg_color, 0.1); border: 1.5px solid alpha(@accent_bg_color, 0.9); border-radius: 10px; box-shadow: 0 5px 18px alpha(black, 0.35); }
-    \\.copied-chip { opacity: 0; transform: translateY(-6px) scale(0.92); transition: opacity 180ms ease-out, transform 240ms cubic-bezier(0.2, 0.9, 0.3, 1.2); background-color: @accent_bg_color; color: @accent_fg_color; border-radius: 99px; padding: 3px 11px; font-size: 0.85em; font-weight: 600; box-shadow: 0 3px 12px alpha(black, 0.3); }
-    \\.copied-chip.shown { opacity: 1; transform: none; }
     \\.font-preview { padding: 12px 14px; }
     \\.hover-card > contents { padding: 12px 14px; border-radius: 13px; min-width: 250px; }
     \\.hover-title { font-weight: 700; }

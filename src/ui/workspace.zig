@@ -63,10 +63,6 @@ const Pane = struct {
     /// until the server answers, or this moment passes if it never does.
     minimizing_until: i64 = 0,
     minimize_button: ?*gtk.Widget = null,
-    /// "Copied", shown for a moment after the pane's selection reaches the clipboard.
-    copied: *gtk.Widget,
-    copied_timer: c_uint = 0,
-    copied_until: i64 = 0,
     rect: view.Rect = .{},
     floating: bool = false,
     /// A floating pane's whole layer, in window fractions; its panes move and resize together.
@@ -572,7 +568,6 @@ pub const Workspace = struct {
 
     /// Lets a card fade out where it was before it goes.
     fn leave(ws: *Workspace, p: Pane) void {
-        if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         p.frame.setCanTarget(0);
         defer gpa.free(p.layer_id);
         // The terminal stays until the card has faded, so it fades with its text.
@@ -618,7 +613,6 @@ pub const Workspace = struct {
     }
 
     fn drop(ws: *Workspace, p: Pane) void {
-        if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
         p.frame.unparent();
         ws.server.parkTerminal(p.block_id);
         gpa.free(p.block_id);
@@ -669,7 +663,6 @@ pub const Workspace = struct {
         tv.floating = floating;
         tv.on_bg = .{ .ctx = ws, .f = programBg };
         tv.on_focus = .{ .ctx = ws, .f = clicked };
-        tv.on_copied = .{ .ctx = ws, .f = showCopied };
         const owned = gpa.dupe(u8, block_id) catch return;
 
         // The title row: the program's tile and title, then this pane's buttons.
@@ -786,15 +779,6 @@ pub const Workspace = struct {
         // A pane shader's picture of the whole card, header and terminal, lies over it.
         frame_overlay.addOverlay(tv.shaderWidget());
         frame_overlay.addOverlay(gw);
-        const copied = gtk.Label.new("Copied");
-        const cw = copied.as(gtk.Widget);
-        cw.addCssClass("copied-chip");
-        cw.setHalign(.end);
-        cw.setValign(.start);
-        cw.setMarginTop(if (show_headers) 46 else 10);
-        cw.setMarginEnd(14);
-        cw.setCanTarget(0);
-        frame_overlay.addOverlay(cw);
         const frame = frame_overlay.as(gtk.Widget);
         frame.addCssClass("pane-card");
         frame.setOverflow(.hidden);
@@ -817,7 +801,6 @@ pub const Workspace = struct {
             .float_button = float_button,
             .find = find,
             .minimize_button = minimize_button,
-            .copied = cw,
             .rect = rect,
             .floating = floating,
             .bounds = bounds orelse .{},
@@ -863,30 +846,6 @@ pub const Workspace = struct {
             ws.server.focusBlock(s, block_id);
             if (ws.paneOf(block_id)) |p| if (p.floating) ws.server.raiseLayer(s, p.layer_id);
         }
-    }
-
-    /// Fades "Copied" in on the pane, then out again; CSS does the easing.
-    fn showCopied(ctx: *anyopaque, block_id: []const u8) void {
-        const ws: *Workspace = @ptrCast(@alignCast(ctx));
-        const p = ws.paneOf(block_id) orelse return;
-        if (!settings.current.copy_animation) return;
-        p.copied.addCssClass("shown");
-        if (p.copied_timer != 0) _ = glib.Source.remove(p.copied_timer);
-        const Hide = struct {
-            fn run(data: ?*anyopaque) callconv(.c) c_int {
-                const w: *Workspace = @ptrCast(@alignCast(data.?));
-                // Only the pane whose timer this is: another pane's stays its own to remove, or
-                // it would be left running after its pane, and the workspace, are gone.
-                const id = if (glib.mainCurrentSource()) |source| source.getId() else 0;
-                for (w.panes.items) |*q| if (q.copied_timer != 0 and q.copied_timer == id) {
-                    q.copied.removeCssClass("shown");
-                    q.copied_timer = 0;
-                };
-                return 0;
-            }
-        };
-        p.copied_until = glib.getMonotonicTime() + 900_000;
-        p.copied_timer = glib.timeoutAdd(900, &Hide.run, ws);
     }
 
     fn markFocus(ws: *Workspace) void {

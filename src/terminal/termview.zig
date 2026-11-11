@@ -488,7 +488,13 @@ pub const TermView = struct {
     /// Called when this pane is clicked, so the workspace can mark it focused.
     on_focus: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
     /// Told when this pane's selection reaches the clipboard, to show that it did.
-    on_copied: ?struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, block_id: []const u8) void } = null,
+    /// The copy's moment: the pane as it was at the copy, selection and all, the selected runs
+    /// of cells, where the first row sat, when it began, and the tick that draws it.
+    copy_node: ?*gsk.RenderNode = null,
+    copy_spans: std.ArrayList(CopySpan) = .empty,
+    copy_top: f64 = 0,
+    copy_started: i64 = 0,
+    copy_tick: c_uint = 0,
 
     pub fn create(server: *Server, session_id: []const u8, block_id: []const u8) !*TermView {
         const v = try gpa.create(TermView);
@@ -691,6 +697,9 @@ pub const TermView = struct {
         }
         if (v.shader_source) |s| s.view = null;
         v.shader_pane.deinit();
+        if (v.copy_tick != 0) v.widget().removeTickCallback(v.copy_tick);
+        v.endCopyAnimation();
+        v.copy_spans.deinit(gpa);
         if (v.title_label) |l| l.as(gobject.Object).unref();
         v.title_label = null;
         v.canvas.view = null;
@@ -1717,7 +1726,53 @@ pub const TermView = struct {
         defer gpa.free(text);
         const clipboard = if (primary) v.widget().getPrimaryClipboard() else v.widget().getClipboard();
         clipboard.setText(text.ptr);
-        if (!primary and text.len > 0) if (v.on_copied) |cb| cb.f(cb.ctx, v.block_id);
+        if (!primary and text.len > 0 and settings.current.copy_animation) v.startCopyAnimation(t);
+    }
+
+    /// The copied text lifts off the pane and a glint runs across it to its far edge, as Rex
+    /// does. The selection may be cleared the moment it's copied, so the pane as it is now,
+    /// selection and all, is kept to draw it from.
+    fn startCopyAnimation(v: *TermView, t: *term_mod.Term) void {
+        const own = gtk.Snapshot.new();
+        snapshotTermImpl(v, own);
+        const node = own.freeToNode() orelse return;
+        if (v.copy_node) |old| old.unref();
+        v.copy_node = node;
+        v.copy_spans.clearRetainingCapacity();
+        const f = &t.frame;
+        var row: usize = 0;
+        while (row < f.rows) : (row += 1) {
+            var x: usize = 0;
+            while (x < f.cols) {
+                if (!f.cell(x, row).flags.selected) {
+                    x += 1;
+                    continue;
+                }
+                const start = x;
+                while (x < f.cols and f.cell(x, row).flags.selected) x += 1;
+                v.copy_spans.append(gpa, .{ .row = @intCast(row), .x0 = @intCast(start), .x1 = @intCast(x) }) catch {};
+            }
+        }
+        if (v.copy_spans.items.len == 0) return v.endCopyAnimation();
+        v.copy_top = pad_y + v.draw_frac;
+        v.copy_started = glib.getMonotonicTime();
+        if (v.copy_tick == 0) v.copy_tick = v.widget().addTickCallback(&copyTick, v, null);
+        v.widget().queueDraw();
+    }
+
+    fn endCopyAnimation(v: *TermView) void {
+        if (v.copy_node) |n| n.unref();
+        v.copy_node = null;
+        v.copy_spans.clearRetainingCapacity();
+    }
+
+    fn copyTick(w: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        w.queueDraw();
+        if (glib.getMonotonicTime() - v.copy_started < copy_duration_us) return 1;
+        v.copy_tick = 0;
+        v.endCopyAnimation();
+        return 0;
     }
 
     fn pastePrimary(v: *TermView) void {
@@ -2152,6 +2207,96 @@ fn fillet(sn: *gtk.Snapshot, px: f64, py: f64, dx: f64, dy: f64, r: f64, color: 
     sn.appendFill(path, .winding, &c);
 }
 
+const CopySpan = struct { row: u16, x0: u16, x1: u16 };
+
+/// How long a copy's animation lasts, and how much of it the lift takes to rise.
+const copy_duration_us = 560 * std.time.us_per_ms;
+const copy_rise = 0.16;
+
+/// The copied text, lifted: the pane as it was at the copy, cut to the copied cells' shape,
+/// raised a few points with a soft shadow under it, then settling back, while a glint runs
+/// across it from its start to its far edge.
+fn drawCopy(v: *TermView, sn: *gtk.Snapshot) void {
+    const node = v.copy_node orelse return;
+    const elapsed: f64 = @floatFromInt(glib.getMonotonicTime() - v.copy_started);
+    const t = elapsed / @as(f64, @floatFromInt(copy_duration_us));
+    if (t >= 1) return;
+    const spans = v.copy_spans.items;
+    // The copied shape, and the box around it.
+    var x0: f64 = std.math.inf(f64);
+    var x1: f64 = -std.math.inf(f64);
+    var y0: f64 = std.math.inf(f64);
+    var y1: f64 = -std.math.inf(f64);
+    const builder = gsk.PathBuilder.new();
+    const radius: f64 = if (settings.current.rounded_selection) @min(settings.current.selection_radius, v.cell_h / 2) else 0;
+    for (spans) |s| {
+        const left = pad_x + @as(f64, @floatFromInt(s.x0)) * v.cell_w;
+        const right = pad_x + @as(f64, @floatFromInt(s.x1)) * v.cell_w;
+        const top = v.copy_top + @as(f64, @floatFromInt(s.row)) * v.cell_h;
+        x0 = @min(x0, left);
+        x1 = @max(x1, right);
+        y0 = @min(y0, top);
+        y1 = @max(y1, top + v.cell_h);
+        const rect: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(left), .f_y = @floatCast(top) }, .f_size = .{ .f_width = @floatCast(right - left), .f_height = @floatCast(v.cell_h + 0.05) } };
+        const r: f32 = @floatCast(@min(radius, (right - left) / 2));
+        const round: graphene.Size = .{ .f_width = r, .f_height = r };
+        const square: graphene.Size = .{ .f_width = 0, .f_height = 0 };
+        var rr: gsk.RoundedRect = undefined;
+        _ = rr.init(
+            &rect,
+            if (copied(spans, s.row, -1, s.x0)) &square else &round,
+            if (copied(spans, s.row, -1, s.x1 - 1)) &square else &round,
+            if (copied(spans, s.row, 1, s.x1 - 1)) &square else &round,
+            if (copied(spans, s.row, 1, s.x0)) &square else &round,
+        );
+        builder.addRoundedRect(&rr);
+    }
+    const shape = builder.freeToPath();
+    defer shape.unref();
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w <= 0 or h <= 0) return;
+
+    // Up fast, then down slowly; a few points either way, however big the selection.
+    const lift = if (t < copy_rise) 1 - std.math.pow(f64, 1 - t / copy_rise, 3) else blk: {
+        const d = (t - copy_rise) / (1 - copy_rise);
+        break :blk 1 - (if (d < 0.5) 4 * d * d * d else 1 - std.math.pow(f64, -2 * d + 2, 3) / 2);
+    };
+    const grow = @min(0.06, 10 / @max(w, h));
+    const s: f32 = @floatCast(1 + lift * grow);
+    const cx: f32 = @floatCast(x0 + w / 2);
+    const cy: f32 = @floatCast(y0 + h / 2);
+    sn.save();
+    sn.translate(&.{ .f_x = cx, .f_y = cy - @as(f32, @floatCast(2 * lift)) });
+    sn.scale(s, s);
+    sn.translate(&.{ .f_x = -cx, .f_y = -cy });
+    const shadow: gsk.Shadow = .{ .f_color = .{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.4 * lift) }, .f_dx = 0, .f_dy = @floatCast(3 * lift), .f_radius = @floatCast(12 * lift) };
+    sn.pushShadow(@ptrCast(&shadow), 1);
+    sn.pushFill(shape, .winding);
+    sn.appendNode(node);
+    // The glint: a band of light crossing from the start of the copied text to its far edge.
+    const g = std.math.clamp((t - 0.08) / 0.78, 0, 1);
+    const along = if (g < 0.5) 2 * g * g else 1 - std.math.pow(f64, -2 * g + 2, 2) / 2;
+    const band = @max(v.cell_w * 5, w * 0.18);
+    const bx = x0 - band + (w + 2 * band) * along;
+    const bounds: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(x0), .f_y = @floatCast(y0) }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } };
+    const clear: gdk.RGBA = .{ .f_red = 1, .f_green = 1, .f_blue = 1, .f_alpha = 0 };
+    const light: gdk.RGBA = .{ .f_red = 1, .f_green = 1, .f_blue = 1, .f_alpha = 0.42 };
+    const stops = [_]gsk.ColorStop{ .{ .f_offset = 0, .f_color = clear }, .{ .f_offset = 0.5, .f_color = light }, .{ .f_offset = 1, .f_color = clear } };
+    sn.appendLinearGradient(&bounds, &.{ .f_x = @floatCast(bx - band / 2), .f_y = @floatCast(y0) }, &.{ .f_x = @floatCast(bx + band / 2), .f_y = @floatCast(y1) }, &stops, stops.len);
+    sn.pop();
+    sn.pop();
+    sn.restore();
+}
+
+/// Whether the copied cells reach the row `dir` (-1 above, 1 below) from `row`, at `col`.
+fn copied(spans: []const CopySpan, row: u16, dir: i32, col: u16) bool {
+    const want = @as(i32, row) + dir;
+    if (want < 0) return false;
+    for (spans) |s| if (s.row == want and s.x0 <= col and col < s.x1) return true;
+    return false;
+}
+
 /// A cell's background as `cellColors` gives it, without working out its text color.
 fn cellBg(f: *const term_mod.Frame, cl: term_mod.Cell) u32 {
     var fg = if (cl.fg != 0) cl.fg else f.fg;
@@ -2362,6 +2507,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         v.last_bg = f.bg;
         if (v.on_bg) |cb| cb.f(cb.ctx, v.block_id, f.bg);
     }
+
+    drawCopy(v, sn);
 
     // The bell's flash, fading over its last moments.
     const flash_left = v.flash_until - glib.getMonotonicTime();
