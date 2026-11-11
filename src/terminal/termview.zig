@@ -135,15 +135,19 @@ const Canvas = extern struct {
         const node = own.freeToNode() orelse return;
         defer node.unref();
         const w = self.as(gtk.Widget);
-        if (!shader.drawPane(&v.shader_pane, w, node, w.hasFocus() != 0, sn)) sn.appendNode(node);
-        // A shader that moves with time draws again every frame.
-        if (shader.animated() and v.shader_tick == 0) v.shader_tick = w.addTickCallback(&shaderTick, v, null);
+        const focused = w.hasFocus() != 0;
+        if (!shader.drawPane(&v.shader_pane, w, node, &v.shader_look, focused, sn)) sn.appendNode(node);
+        // A shader that moves with time draws the pane with the keyboard again every frame, as
+        // Ghostty does; the others keep their last picture until they change.
+        if (shader.animated() and focused and v.shader_tick == 0) v.shader_tick = w.addTickCallback(&shaderTick, v, null);
     }
 
     fn shaderTick(widget: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
         const v: *TermView = @ptrCast(@alignCast(data.?));
-        if (!shader.animated()) {
+        if (!shader.animated() or widget.hasFocus() == 0) {
             v.shader_tick = 0;
+            // One more drawing, so a fading effect doesn't stay half drawn.
+            widget.queueDraw();
             return 0;
         }
         widget.queueDraw();
@@ -321,6 +325,8 @@ pub const TermView = struct {
     /// moves with time.
     shader_pane: shader.Pane = .{},
     shader_tick: c_uint = 0,
+    /// What the last drawing knew of the cursor and colors, for the shader.
+    shader_look: shader.Look = .{},
     last_frame_us: i64 = 0,
     last_total: u64 = 0,
     draw_frac: f64 = 0,
@@ -1890,6 +1896,9 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     _ = t.render(true);
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
+    v.shader_look.bg = f.bg;
+    v.shader_look.fg = f.fg;
+    v.shader_look.cursor_visible = f.cursor_visible;
 
     const bg_alpha: f64 = term_opacity;
     if (settings.current.padding_color == .theme and theme_bg != 0) {
@@ -1976,6 +1985,13 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         if (blinks) blinkWanted(v);
         const under = f.cell(f.cursor_x, f.cursor_y);
         const cw = v.cell_w * @as(f64, if (under.flags.wide) 2 else 1);
+        // What a custom shader is told of the cursor: its box and shape, as Ghostty numbers
+        // them, whichever half of a blink this is.
+        const hollow = !focused or style == 3;
+        const box: [4]f64 = if (hollow or style == 1) .{ cx, cy, cw, v.cell_h } else if (style == 0) .{ cx, cy, prefs.cursor_width, v.cell_h } else .{ cx, cy + v.cell_h - prefs.cursor_width, cw, prefs.cursor_width };
+        for (box, 0..) |x, i| v.shader_look.cursor[i] = @floatCast(x);
+        v.shader_look.cursor_style = if (hollow) 1 else if (style == 0) 2 else if (style == 2) 3 else 0;
+        v.shader_look.cursor_color = color;
         if (blinks and !blink_on) {
             // The hidden half of a blink.
         } else if (!focused or style == 3) {

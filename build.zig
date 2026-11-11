@@ -80,6 +80,8 @@ pub fn build(b: *std.Build) void {
     // Nerd Font symbols, so icons in prompts show with any font.
     b.installFile("data/fonts/SymbolsNerdFontMono-Regular.ttf", "share/renux/fonts/SymbolsNerdFontMono-Regular.ttf");
     b.installFile("data/fonts/SymbolsNerdFont-LICENSE.txt", "share/renux/fonts/SymbolsNerdFont-LICENSE.txt");
+    // The shaders that come with Renux, chosen by name in Settings.
+    b.installDirectory(.{ .source_dir = b.path("data/shaders"), .install_dir = .prefix, .install_subdir = "share/renux/shaders", .include_extensions = &.{".glsl"} });
     // Fontconfig takes the bundled font on Linux.
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("fontconfig", .{});
 

@@ -624,6 +624,60 @@ fn themeNames(ctx: *Ctx, list: *gtk.StringList) void {
     }
 }
 
+/// The shader the panes are drawn through: none, one that comes with Renux, or the person's
+/// own file, which settings.ini names as custom-shader.
+fn shaderRow(ctx: *Ctx, p: *adw.PreferencesPage) void {
+    const shader = @import("../terminal/shader.zig");
+    const g = group(p, "Shader", "Drawn over each pane, as Ghostty's custom shaders are; those work here too. For your own, put its path in settings.ini as custom-shader.");
+    var values: std.ArrayList([]const u8) = .empty;
+    const list = gtk.StringList.new(null);
+    defer list.as(gobject.Object).unref();
+    values.append(ctx.al(), "") catch return;
+    list.append("None");
+    for (shader.bundledNames(ctx.al())) |name| {
+        values.append(ctx.al(), name) catch return;
+        var buf: [64]u8 = undefined;
+        list.append(shaderTitle(&buf, name).ptr);
+    }
+    // A file of the person's own is listed too, while it's the one set.
+    const current = settings.current.custom_shader;
+    const known = for (values.items) |v| {
+        if (std.mem.eql(u8, v, current)) break true;
+    } else false;
+    if (!known) {
+        values.append(ctx.al(), ctx.al().dupe(u8, current) catch return) catch return;
+        var buf: [300]u8 = undefined;
+        const base = current[if (std.mem.lastIndexOfScalar(u8, current, '/')) |i| i + 1 else 0..];
+        const title: [:0]const u8 = std.fmt.bufPrintSentinel(&buf, "Your own: {s}", .{base}, 0) catch "Your own";
+        list.append(title.ptr);
+    }
+    const row = adw.ComboRow.new();
+    row.as(adw.PreferencesRow).setTitle("Shader");
+    row.setModel(list.as(gio.ListModel));
+    for (values.items, 0..) |v, i| if (std.mem.eql(u8, v, current)) row.setSelected(@intCast(i));
+    g.add(row.as(gtk.Widget));
+    const Picked = struct { ctx: *Ctx, values: []const []const u8 };
+    const choice = ctx.keep(Picked{ .ctx = ctx, .values = values.items }) orelse return;
+    const H = struct {
+        fn changed(r: *adw.ComboRow, _: *gobject.ParamSpec, pk: *Picked) callconv(.c) void {
+            const i = r.getSelected();
+            if (i >= pk.values.len or std.mem.eql(u8, pk.values[i], settings.current.custom_shader)) return;
+            settings.setString(&settings.current.custom_shader, pk.values[i]);
+            pk.ctx.app.redrawAll();
+        }
+    };
+    _ = gobject.Object.signals.notify.connect(row, *Picked, &H.changed, choice, .{ .detail = "selected" });
+}
+
+/// A bundled shader's name as a title: crt is CRT, cursor-trail is Cursor trail.
+fn shaderTitle(buf: []u8, name: []const u8) [:0]const u8 {
+    if (std.mem.eql(u8, name, "crt")) return "CRT";
+    const n = @min(name.len, buf.len - 1);
+    for (name[0..n], 0..) |ch, i| buf[i] = if (ch == '-') ' ' else if (i == 0) std.ascii.toUpper(ch) else ch;
+    buf[n] = 0;
+    return buf[0..n :0];
+}
+
 const Slot = struct { ctx: *Ctx, field: *[]u8 };
 
 /// A drop-down of every theme, for the light or the dark appearance.
@@ -876,6 +930,8 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     numberRow(ctx, padding, "Horizontal padding", "Points left and right of the text", &settings.current.pad_x, 0, 40, 1, 0, App.terminalChanged);
     numberRow(ctx, padding, "Vertical padding", "Points above and below the text", &settings.current.pad_y, 0, 40, 1, 0, App.terminalChanged);
     segments(ctx, padding, "Padding color", settings.PaddingColor, &settings.current.padding_color, &.{ "Terminal", "Theme" }, App.terminalChanged);
+
+    shaderRow(ctx, p);
 
     const c = group(p, "Cursor", null);
     sampleRow(ctx, c, .cursor);

@@ -40,7 +40,21 @@ var started_at: i64 = 0;
 
 const recheck_us = 500 * std.time.us_per_ms;
 
-/// Each pane's own textures, kept between frames.
+/// What a pane's drawing knows that a shader may use: where its cursor is, in the pane's own
+/// points from its top left, and the colors.
+pub const Look = struct {
+    /// The cursor's box: x, y, width and height. Kept from the last time it was drawn.
+    cursor: [4]f32 = @splat(0),
+    cursor_color: u32 = 0,
+    /// As Ghostty numbers them: block, hollow block, bar, underline.
+    cursor_style: i32 = 0,
+    /// Whether the program shows its cursor at all; a blink doesn't count.
+    cursor_visible: bool = false,
+    bg: u32 = 0,
+    fg: u32 = 0,
+};
+
+/// Each pane's own textures, kept between frames, and what its shader was last told.
 pub const Pane = struct {
     input: c_uint = 0,
     input_w: c_int = 0,
@@ -48,6 +62,17 @@ pub const Pane = struct {
     fbo: c_uint = 0,
     frame: i32 = 0,
     last_us: i64 = 0,
+    /// The cursor in the shader's terms, now and before it last moved or changed color, and
+    /// when that was. Ghostty gives the same, which is what cursor trails are made of.
+    current_cursor: [4]f32 = @splat(0),
+    previous_cursor: [4]f32 = @splat(0),
+    current_color: [4]f32 = @splat(0),
+    previous_color: [4]f32 = @splat(0),
+    current_style: i32 = 0,
+    previous_style: i32 = 0,
+    cursor_changed_at: f32 = 0,
+    focused: bool = false,
+    focused_at: f32 = 0,
 
     /// Frees the pane's textures, such as when it closes.
     pub fn deinit(p: *Pane) void {
@@ -71,7 +96,19 @@ const Locations = struct {
     mouse: c_int = -1,
     date: c_int = -1,
     focus: c_int = -1,
+    time_focus: c_int = -1,
     channel0: c_int = -1,
+    current_cursor: c_int = -1,
+    previous_cursor: c_int = -1,
+    current_cursor_color: c_int = -1,
+    previous_cursor_color: c_int = -1,
+    current_cursor_style: c_int = -1,
+    previous_cursor_style: c_int = -1,
+    cursor_visible: c_int = -1,
+    time_cursor_change: c_int = -1,
+    background_color: c_int = -1,
+    foreground_color: c_int = -1,
+    cursor_color: c_int = -1,
 };
 
 /// Whether a shader is set and ready. Reads the file again now and then, and builds the
@@ -111,9 +148,47 @@ pub fn animated() bool {
     return program != 0 and uses_time;
 }
 
+/// Where the shaders that come with Renux are: PREFIX/share/renux/shaders, beside the program.
+pub fn bundledDir(buf: []u8) ?[:0]const u8 {
+    var exe_buf: [4096]u8 = undefined;
+    const n = std.process.executableDirPath(@import("../main.zig").io, &exe_buf) catch return null;
+    return std.fmt.bufPrintSentinel(buf, "{s}/../share/renux/shaders", .{exe_buf[0..n]}, 0) catch null;
+}
+
+// The binding says a name always comes back, but the end of the folder is NULL.
+extern fn g_dir_read_name(dir: *glib.Dir) ?[*:0]const u8;
+
+/// The names of the shaders that come with Renux, such as crt, sorted. Each is allocated.
+pub fn bundledNames(al: std.mem.Allocator) []const []const u8 {
+    var buf: [4200]u8 = undefined;
+    const path = bundledDir(&buf) orelse return &.{};
+    const dir = glib.Dir.open(path.ptr, 0, null) orelse return &.{};
+    defer dir.close();
+    var names: std.ArrayList([]const u8) = .empty;
+    while (g_dir_read_name(dir)) |raw| {
+        const name = std.mem.span(raw);
+        if (!std.mem.endsWith(u8, name, ".glsl")) continue;
+        names.append(al, al.dupe(u8, name[0 .. name.len - ".glsl".len]) catch continue) catch {};
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    return names.items;
+}
+
+/// The setting is a bundled shader's name, such as crt, or a file's path.
+pub fn isBundledName(setting: []const u8) bool {
+    return std.mem.indexOfScalar(u8, setting, '/') == null and !std.mem.endsWith(u8, setting, ".glsl");
+}
+
 fn readSource(path: []const u8) ?[]u8 {
-    // ~ is the home folder, as in a shell.
-    const full = if (std.mem.startsWith(u8, path, "~/"))
+    var dir_buf: [4200]u8 = undefined;
+    const full = if (isBundledName(path))
+        std.fmt.allocPrintSentinel(gpa, "{s}/{s}.glsl", .{ bundledDir(&dir_buf) orelse return null, path }, 0) catch return null
+    else if (std.mem.startsWith(u8, path, "~/"))
+        // ~ is the home folder, as in a shell.
         std.fmt.allocPrintSentinel(gpa, "{s}{s}", .{ std.mem.span(glib.getHomeDir()), path[1..] }, 0) catch return null
     else
         gpa.dupeSentinel(u8, path, 0) catch return null;
@@ -328,7 +403,7 @@ var stats_on: ?bool = null;
 
 /// Draws `node`, a pane's own drawing, through the shader into `sn`. False if it couldn't, and
 /// the caller draws `node` as it is.
-pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, focused: bool, sn: *gtk.Snapshot) bool {
+pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *const Look, focused: bool, sn: *gtk.Snapshot) bool {
     if (program == 0) return false;
     const ctx = context orelse return false;
     const w: f32 = @floatFromInt(widget.getWidth());
@@ -396,7 +471,7 @@ pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, focused: b
     gl.epoxy_glViewport.?(0, 0, pw, ph);
     gl.epoxy_glDisable.?(gl.GL_BLEND);
     gl.epoxy_glUseProgram.?(program);
-    setUniforms(p, pw, ph, focused);
+    setUniforms(p, pw, ph, scale, look, focused);
     gl.epoxy_glActiveTexture.?(gl.GL_TEXTURE0);
     gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, p.input);
     gl.epoxy_glBindVertexArray.?(vao);
@@ -447,7 +522,7 @@ const Held = struct {
     }
 };
 
-fn setUniforms(p: *Pane, pw: c_int, ph: c_int, focused: bool) void {
+fn setUniforms(p: *Pane, pw: c_int, ph: c_int, scale: f32, look: *const Look, focused: bool) void {
     const now = glib.getMonotonicTime();
     const fw: f32 = @floatFromInt(pw);
     const fh: f32 = @floatFromInt(ph);
@@ -461,13 +536,59 @@ fn setUniforms(p: *Pane, pw: c_int, ph: c_int, focused: bool) void {
     gl.epoxy_glUniform1i.?(loc.frame, p.frame);
     gl.epoxy_glUniform3f.?(loc.channel_resolution, fw, fh, 1);
     gl.epoxy_glUniform4f.?(loc.mouse, 0, 0, 0, 0);
-    gl.epoxy_glUniform1i.?(loc.focus, @intFromBool(focused));
     gl.epoxy_glUniform1i.?(loc.channel0, 0);
+
+    // Focus, and when it came.
+    if (focused and !p.focused) p.focused_at = time;
+    p.focused = focused;
+    gl.epoxy_glUniform1i.?(loc.focus, @intFromBool(focused));
+    gl.epoxy_glUniform1f.?(loc.time_focus, p.focused_at);
+
+    // The cursor as Ghostty gives it: its left edge and its top edge counted up from the
+    // bottom, then its size, in the picture's pixels. A move or a new color keeps the last
+    // place as the previous one and notes the time, which is what trails are drawn from.
+    const c = look.cursor;
+    const cursor: [4]f32 = .{ c[0] * scale, fh - c[1] * scale, c[2] * scale, c[3] * scale };
+    const color = rgba(look.cursor_color, 1);
+    if (!std.meta.eql(cursor, p.current_cursor) or !std.meta.eql(color, p.current_color)) {
+        p.previous_cursor = p.current_cursor;
+        p.previous_color = p.current_color;
+        p.previous_style = p.current_style;
+        p.current_cursor = cursor;
+        p.current_color = color;
+        p.cursor_changed_at = time;
+    }
+    p.current_style = look.cursor_style;
+    gl.epoxy_glUniform4fv.?(loc.current_cursor, 1, &p.current_cursor);
+    gl.epoxy_glUniform4fv.?(loc.previous_cursor, 1, &p.previous_cursor);
+    gl.epoxy_glUniform4fv.?(loc.current_cursor_color, 1, &p.current_color);
+    gl.epoxy_glUniform4fv.?(loc.previous_cursor_color, 1, &p.previous_color);
+    gl.epoxy_glUniform1i.?(loc.current_cursor_style, p.current_style);
+    gl.epoxy_glUniform1i.?(loc.previous_cursor_style, p.previous_style);
+    gl.epoxy_glUniform1i.?(loc.cursor_visible, @intFromBool(look.cursor_visible));
+    gl.epoxy_glUniform1f.?(loc.time_cursor_change, p.cursor_changed_at);
+
+    // The colors.
+    const bg = rgba(look.bg, 1);
+    const fg = rgba(look.fg, 1);
+    gl.epoxy_glUniform3f.?(loc.background_color, bg[0], bg[1], bg[2]);
+    gl.epoxy_glUniform3f.?(loc.foreground_color, fg[0], fg[1], fg[2]);
+    gl.epoxy_glUniform3f.?(loc.cursor_color, color[0], color[1], color[2]);
+
     // The date as Shadertoy gives it: year, month from 0, day, and seconds into the day.
     const dt = glib.DateTime.newNowLocal() orelse return;
     defer dt.unref();
     const secs: f32 = @floatFromInt(dt.getHour() * 3600 + dt.getMinute() * 60);
     gl.epoxy_glUniform4f.?(loc.date, @floatFromInt(dt.getYear()), @floatFromInt(dt.getMonth() - 1), @floatFromInt(dt.getDayOfMonth()), secs + @as(f32, @floatCast(dt.getSeconds())));
+}
+
+fn rgba(color: u32, alpha: f32) [4]f32 {
+    return .{
+        @as(f32, @floatFromInt((color >> 16) & 0xff)) / 255,
+        @as(f32, @floatFromInt((color >> 8) & 0xff)) / 255,
+        @as(f32, @floatFromInt(color & 0xff)) / 255,
+        alpha,
+    };
 }
 
 /// RENUX_SHADER_STATS=1 logs what the round trip costs, every two seconds.
