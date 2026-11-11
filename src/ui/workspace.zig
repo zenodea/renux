@@ -737,6 +737,8 @@ pub const Workspace = struct {
         const find = @import("findbar.zig").FindBar.create(tv);
         const body = gtk.Overlay.new();
         body.setChild(tv.widget());
+        // A custom shader's picture of the pane lies over the terminal, under the find bar.
+        body.addOverlay(tv.shaderWidget());
         if (find) |f| body.addOverlay(f.widget());
         body.as(gtk.Widget).setVexpand(1);
         card.append(body.as(gtk.Widget));

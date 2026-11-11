@@ -36,6 +36,8 @@ var source_hash: u64 = 0;
 var checked_at: i64 = 0;
 /// The source uses the time, so the panes draw every frame.
 var uses_time = false;
+/// Its time is measured from the cursor's last move or from focus coming, so it settles.
+var follows_changes = false;
 var started_at: i64 = 0;
 
 const recheck_us = 500 * std.time.us_per_ms;
@@ -60,6 +62,10 @@ pub const Pane = struct {
     input_w: c_int = 0,
     input_h: c_int = 0,
     fbo: c_uint = 0,
+    /// The picture's size in the pane's own points, and the screen's scale.
+    width: f32 = 0,
+    height: f32 = 0,
+    scale: f32 = 1,
     frame: i32 = 0,
     last_us: i64 = 0,
     /// The cursor in the shader's terms, now and before it last moved or changed color, and
@@ -146,6 +152,21 @@ pub fn active() bool {
 /// Whether the shader draws differently as time passes, so its panes draw every frame.
 pub fn animated() bool {
     return program != 0 and uses_time;
+}
+
+/// How long after the cursor moves or focus comes a shader that only moves then, such as a
+/// cursor trail, is given frames.
+const settle_s = 1.5;
+
+/// Whether the pane should draw another frame now. A shader whose time is only ever measured
+/// from the cursor's last move or from focus coming only moves for a moment after one, so it
+/// stops asking for frames once that moment has passed, rather than drawing an unchanged
+/// picture sixty times a second.
+pub fn wantsFrames(p: *const Pane) bool {
+    if (!animated()) return false;
+    if (!follows_changes) return true;
+    const now: f32 = @floatCast(@as(f64, @floatFromInt(glib.getMonotonicTime() - started_at)) / std.time.us_per_s);
+    return now - @max(p.cursor_changed_at, p.focused_at) < settle_s;
 }
 
 /// Where the shaders that come with Renux are: PREFIX/share/renux/shaders, beside the program.
@@ -342,6 +363,7 @@ fn build(source: []const u8) void {
         @field(loc, field) = gl.epoxy_glGetUniformLocation.?(p, name.ptr);
     }
     uses_time = std.mem.indexOf(u8, source, "iTime") != null or std.mem.indexOf(u8, source, "iFrame") != null or std.mem.indexOf(u8, source, "iDate") != null;
+    follows_changes = std.mem.indexOf(u8, source, "iTimeCursorChange") != null or std.mem.indexOf(u8, source, "iTimeFocus") != null;
     started_at = glib.getMonotonicTime();
     log.info("shader ready: {s}", .{source_path orelse ""});
 }
@@ -388,9 +410,11 @@ fn firstLine(text: []const u8) []const u8 {
 
 // Drawing.
 
-/// What one pane's frame cost, for RENUX_SHADER_STATS.
+/// What the round trip costs, for RENUX_SHADER_STATS: pictures taken in when a pane changed,
+/// and shader frames drawn from them.
 const Stats = struct {
-    frames: u32 = 0,
+    inputs: u32 = 0,
+    outputs: u32 = 0,
     render: i64 = 0,
     download: i64 = 0,
     upload: i64 = 0,
@@ -401,22 +425,46 @@ const Stats = struct {
 var stats: Stats = .{};
 var stats_on: ?bool = null;
 
-/// Draws `node`, a pane's own drawing, through the shader into `sn`. False if it couldn't, and
-/// the caller draws `node` as it is.
-pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *const Look, focused: bool, sn: *gtk.Snapshot) bool {
+/// The renderer the panes' pictures are drawn with on their way to the shader. Not the
+/// window's: GTK's Vulkan renderer hands back dmabufs, and reading one back leaks the whole
+/// picture in GTK 4.22, some 10 MB a frame, until the system runs out of memory. GTK's OpenGL
+/// renderer doesn't.
+var picture_renderer: ?*gsk.Renderer = null;
+var picture_renderer_failed = false;
+
+fn pictureRenderer() ?*gsk.Renderer {
+    if (picture_renderer) |r| return r;
+    if (picture_renderer_failed) return null;
+    const r = gsk.GLRenderer.new().as(gsk.Renderer);
+    var err: ?*glib.Error = null;
+    if (r.realizeForDisplay(gdk.Display.getDefault() orelse return null, &err) == 0) {
+        picture_renderer_failed = true;
+        const why: []const u8 = if (err) |e| std.mem.span(e.f_message orelse "") else "";
+        report("Shaders need GTK's OpenGL renderer, which didn't start", why);
+        if (err) |e| e.free();
+        return null;
+    }
+    picture_renderer = r;
+    return r;
+}
+
+/// Takes in a pane's own drawing, `node`, as the shader's iChannel0. Only needed when what the
+/// pane shows has changed: frames that only move the shader along keep the last picture.
+/// False if it couldn't, and the pane draws itself as usual.
+pub fn updateInput(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode) bool {
     if (program == 0) return false;
     const ctx = context orelse return false;
+    const renderer = pictureRenderer() orelse return false;
     const w: f32 = @floatFromInt(widget.getWidth());
     const h: f32 = @floatFromInt(widget.getHeight());
     if (w < 1 or h < 1) return false;
     const native = widget.getNative() orelse return false;
-    const renderer = native.getRenderer() orelse return false;
     const scale: f32 = if (native.getSurface()) |s| @floatCast(s.getScale()) else 1;
     const pw: c_int = @intFromFloat(@round(w * scale));
     const ph: c_int = @intFromFloat(@round(h * scale));
     const t0 = glib.getMonotonicTime();
 
-    // 1. The pane's picture, at the screen's pixel size, upside down for OpenGL.
+    // The pane's picture, at the screen's pixel size, upside down for OpenGL.
     const flip = gtk.Snapshot.new();
     flip.translate(&.{ .f_x = 0, .f_y = @floatFromInt(ph) });
     flip.scale(scale, -scale);
@@ -428,7 +476,6 @@ pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *con
     defer picture.unref();
     const t1 = glib.getMonotonicTime();
 
-    // 2. Into OpenGL.
     const downloader = gdk.TextureDownloader.new(picture);
     defer downloader.free();
     downloader.setFormat(.r8g8b8a8_premultiplied);
@@ -457,9 +504,25 @@ pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *con
         p.input_h = ph;
     } else gl.epoxy_glTexSubImage2D.?(gl.GL_TEXTURE_2D, 0, 0, 0, pw, ph, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data);
     gl.epoxy_glPixelStorei.?(gl.GL_UNPACK_ROW_LENGTH, 0);
-    const t3 = glib.getMonotonicTime();
+    p.scale = scale;
+    p.width = w;
+    p.height = h;
+    count(.input, t1 - t0, t2 - t1, glib.getMonotonicTime() - t2, @intCast(pw * ph));
+    return true;
+}
 
-    // 3. The shader, into a texture of its own that GTK holds until it has shown it.
+/// Runs the shader over the pane's last picture and draws what it makes into `sn`. Cheap: no
+/// picture is drawn or read back, so a shader that moves with time costs little per frame.
+pub fn drawOutput(p: *Pane, look: *const Look, focused: bool, sn: *gtk.Snapshot) bool {
+    if (program == 0 or p.input == 0) return false;
+    const ctx = context orelse return false;
+    const pw = p.input_w;
+    const ph = p.input_h;
+    const t0 = glib.getMonotonicTime();
+    ctx.makeCurrent();
+    defer gdk.GLContext.clearCurrent();
+
+    // The shader, into a texture of its own that GTK holds until it has shown it.
     var out: c_uint = 0;
     gl.epoxy_glGenTextures.?(1, &out);
     gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, out);
@@ -471,7 +534,7 @@ pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *con
     gl.epoxy_glViewport.?(0, 0, pw, ph);
     gl.epoxy_glDisable.?(gl.GL_BLEND);
     gl.epoxy_glUseProgram.?(program);
-    setUniforms(p, pw, ph, scale, look, focused);
+    setUniforms(p, pw, ph, p.scale, look, focused);
     gl.epoxy_glActiveTexture.?(gl.GL_TEXTURE0);
     gl.epoxy_glBindTexture.?(gl.GL_TEXTURE_2D, p.input);
     gl.epoxy_glBindVertexArray.?(vao);
@@ -480,9 +543,8 @@ pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *con
     gl.epoxy_glBindFramebuffer.?(gl.GL_FRAMEBUFFER, 0);
     const sync = gl.epoxy_glFenceSync.?(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     gl.epoxy_glFlush.?();
-    const t4 = glib.getMonotonicTime();
 
-    // 4. Back to GTK, turned the right way up again.
+    // Back to GTK, turned the right way up again.
     const held = gpa.create(Held) catch return false;
     held.* = .{ .texture = out, .sync = sync };
     const builder = gdk.GLTextureBuilder.new();
@@ -496,13 +558,12 @@ pub fn drawPane(p: *Pane, widget: *gtk.Widget, node: *gsk.RenderNode, look: *con
     const result = builder.build(&Held.release, held);
     defer result.unref();
     sn.save();
-    sn.translate(&.{ .f_x = 0, .f_y = h });
+    sn.translate(&.{ .f_x = 0, .f_y = p.height });
     sn.scale(1, -1);
-    sn.appendTexture(result, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = w, .f_height = h } });
+    sn.appendTexture(result, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = p.width, .f_height = p.height } });
     sn.restore();
-
     p.frame +%= 1;
-    count(t1 - t0, t2 - t1, t3 - t2, t4 - t3, @intCast(pw * ph));
+    count(.output, glib.getMonotonicTime() - t0, 0, 0, @intCast(pw * ph));
     return true;
 }
 
@@ -565,7 +626,8 @@ fn setUniforms(p: *Pane, pw: c_int, ph: c_int, scale: f32, look: *const Look, fo
     gl.epoxy_glUniform4fv.?(loc.previous_cursor_color, 1, &p.previous_color);
     gl.epoxy_glUniform1i.?(loc.current_cursor_style, p.current_style);
     gl.epoxy_glUniform1i.?(loc.previous_cursor_style, p.previous_style);
-    gl.epoxy_glUniform1i.?(loc.cursor_visible, @intFromBool(look.cursor_visible));
+    // One cursor at a time: the pane with the keyboard has it, so cursor effects show only there.
+    gl.epoxy_glUniform1i.?(loc.cursor_visible, @intFromBool(look.cursor_visible and focused));
     gl.epoxy_glUniform1f.?(loc.time_cursor_change, p.cursor_changed_at);
 
     // The colors.
@@ -592,24 +654,30 @@ fn rgba(color: u32, alpha: f32) [4]f32 {
 }
 
 /// RENUX_SHADER_STATS=1 logs what the round trip costs, every two seconds.
-fn count(render: i64, download: i64, upload: i64, shade: i64, px: u64) void {
+fn count(comptime kind: enum { input, output }, a: i64, b: i64, c: i64, px: u64) void {
     if (stats_on == null) stats_on = std.c.getenv("RENUX_SHADER_STATS") != null;
     if (!stats_on.?) return;
     const now = glib.getMonotonicTime();
     if (stats.since == 0) stats.since = now;
-    stats.frames += 1;
-    stats.render += render;
-    stats.download += download;
-    stats.upload += upload;
-    stats.shade += shade;
+    switch (kind) {
+        .input => {
+            stats.inputs += 1;
+            stats.render += a;
+            stats.download += b;
+            stats.upload += c;
+        },
+        .output => {
+            stats.outputs += 1;
+            stats.shade += a;
+        },
+    }
     stats.px = @max(stats.px, px);
     if (now - stats.since < 2 * std.time.us_per_s) return;
-    const n: f64 = @floatFromInt(stats.frames);
     const ms = struct {
-        fn of(total: i64, frames: f64) f64 {
-            return @as(f64, @floatFromInt(total)) / 1000 / frames;
+        fn of(total: i64, n: u32) f64 {
+            return if (n == 0) 0 else @as(f64, @floatFromInt(total)) / 1000 / @as(f64, @floatFromInt(n));
         }
     }.of;
-    std.debug.print("shader: {d} pane frames in 2 s, per frame: render {d:.2} ms, download {d:.2} ms, upload {d:.2} ms, shader {d:.2} ms (largest pane {d} px)\n", .{ stats.frames, ms(stats.render, n), ms(stats.download, n), ms(stats.upload, n), ms(stats.shade, n), stats.px });
+    std.debug.print("shader, last 2 s: {d} pictures taken in (render {d:.2} ms, download {d:.2} ms, upload {d:.2} ms each), {d} shader frames ({d:.2} ms each), largest pane {d} px\n", .{ stats.inputs, ms(stats.render, stats.inputs), ms(stats.download, stats.inputs), ms(stats.upload, stats.inputs), stats.outputs, ms(stats.shade, stats.outputs), stats.px });
     stats = .{};
 }

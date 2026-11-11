@@ -128,30 +128,20 @@ const Canvas = extern struct {
 
     fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
         const v = self.view orelse return;
-        if (!shader.active()) return snapshotTermImpl(v, sn);
-        // Through the custom shader: the pane draws itself aside, and the shader draws that.
+        // The shader's view shows what this drew, so it draws again after this does.
+        defer if (v.shader_view) |sv| sv.as(gtk.Widget).queueDraw();
+        if (!shader.active()) {
+            v.shader_drawn = false;
+            return snapshotTermImpl(v, sn);
+        }
+        // Through a custom shader: the pane draws itself aside, that becomes the shader's
+        // picture, and the shader's view over this one shows what the shader makes of it.
         const own = gtk.Snapshot.new();
         snapshotTermImpl(v, own);
         const node = own.freeToNode() orelse return;
         defer node.unref();
-        const w = self.as(gtk.Widget);
-        const focused = w.hasFocus() != 0;
-        if (!shader.drawPane(&v.shader_pane, w, node, &v.shader_look, focused, sn)) sn.appendNode(node);
-        // A shader that moves with time draws the pane with the keyboard again every frame, as
-        // Ghostty does; the others keep their last picture until they change.
-        if (shader.animated() and focused and v.shader_tick == 0) v.shader_tick = w.addTickCallback(&shaderTick, v, null);
-    }
-
-    fn shaderTick(widget: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
-        const v: *TermView = @ptrCast(@alignCast(data.?));
-        if (!shader.animated() or widget.hasFocus() == 0) {
-            v.shader_tick = 0;
-            // One more drawing, so a fading effect doesn't stay half drawn.
-            widget.queueDraw();
-            return 0;
-        }
-        widget.queueDraw();
-        return 1;
+        v.shader_drawn = shader.updateInput(&v.shader_pane, self.as(gtk.Widget), node);
+        if (!v.shader_drawn) sn.appendNode(node);
     }
 
     fn sizeAllocate(self: *Self, width: c_int, height: c_int, _: c_int) callconv(.c) void {
@@ -166,6 +156,63 @@ const Canvas = extern struct {
         fn init(class: *Class) callconv(.c) void {
             gtk.Widget.virtual_methods.snapshot.implement(class, &snapshot);
             gtk.Widget.virtual_methods.size_allocate.implement(class, &sizeAllocate);
+        }
+
+        pub fn as(class: *Class, comptime T: type) *T {
+            return gobject.ext.as(T, class);
+        }
+    };
+};
+
+/// Where a custom shader's picture of the pane is shown, over the terminal's own widget. A
+/// widget of its own, so a shader that moves with time redraws only this: GTK keeps the
+/// terminal's drawing as it is, and the pane isn't drawn and read back again every frame.
+const ShaderView = extern struct {
+    parent_instance: Parent,
+    view: ?*TermView,
+
+    pub const Parent = gtk.Widget;
+    const Self = @This();
+
+    pub const getGObjectType = gobject.ext.defineClass(Self, .{
+        .name = "RenuxShaderView",
+        .classInit = &Class.init,
+    });
+
+    pub fn new() *Self {
+        return gobject.ext.newInstance(Self, .{});
+    }
+
+    pub fn as(self: *Self, comptime T: type) *T {
+        return gobject.ext.as(T, self);
+    }
+
+    fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
+        const v = self.view orelse return;
+        if (!v.shader_drawn or !shader.active()) return;
+        const focused = v.widget().hasFocus() != 0;
+        _ = shader.drawOutput(&v.shader_pane, &v.shader_look, focused, sn);
+        // A shader that moves with time draws the pane with the keyboard again every frame, as
+        // Ghostty does; the others keep their last frame until the pane changes.
+        if (focused and v.shader_tick == 0 and shader.wantsFrames(&v.shader_pane)) v.shader_tick = self.as(gtk.Widget).addTickCallback(&shaderTick, v, null);
+    }
+
+    fn shaderTick(widget: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        widget.queueDraw();
+        if (v.widget().hasFocus() != 0 and shader.wantsFrames(&v.shader_pane)) return 1;
+        // One more frame is drawn, so a fading effect doesn't stay half done.
+        v.shader_tick = 0;
+        return 0;
+    }
+
+    pub const Class = extern struct {
+        parent_class: Parent.Class,
+
+        pub const Instance = Self;
+
+        fn init(class: *Class) callconv(.c) void {
+            gtk.Widget.virtual_methods.snapshot.implement(class, &snapshot);
         }
 
         pub fn as(class: *Class, comptime T: type) *T {
@@ -325,6 +372,10 @@ pub const TermView = struct {
     /// moves with time.
     shader_pane: shader.Pane = .{},
     shader_tick: c_uint = 0,
+    /// The widget over the terminal that shows the shader's picture, and whether the last
+    /// drawing went through the shader at all.
+    shader_view: ?*ShaderView = null,
+    shader_drawn: bool = false,
     /// What the last drawing knew of the cursor and colors, for the shader.
     shader_look: shader.Look = .{},
     last_frame_us: i64 = 0,
@@ -378,6 +429,10 @@ pub const TermView = struct {
         };
         const w = canvas.as(gtk.Widget);
         canvas.view = v;
+        const sv = ShaderView.new();
+        sv.view = v;
+        sv.as(gtk.Widget).setCanTarget(0);
+        v.shader_view = sv;
         w.setFocusable(1);
         w.setHexpand(1);
         w.setVexpand(1);
@@ -389,7 +444,12 @@ pub const TermView = struct {
         // Typed text goes through the input method, so dead keys, compose sequences and input
         // methods for other scripts commit real text; other keys reach `onKey`.
         v.im = gtk.IMMulticontext.new();
-        v.im.as(gtk.IMContext).setClientWidget(w);
+        // The input method holds on to the widget it serves, so it's given the widget only while
+        // the widget is on screen. Held for longer, the widget could never be freed once its
+        // card went: the pane lived on, still hearing its terminal, and wrote titles into a
+        // label that was gone, which crashed.
+        _ = gtk.Widget.signals.realize.connect(w, *TermView, &onRealize, v, .{});
+        _ = gtk.Widget.signals.unrealize.connect(w, *TermView, &onUnrealize, v, .{});
         _ = gtk.IMContext.signals.commit.connect(v.im.as(gtk.IMContext), *TermView, &onCommit, v, .{});
         // What's being composed (pinyin before a character is picked, a dead key's accent) is
         // drawn at the cursor, or the person would type blind until it commits.
@@ -442,6 +502,11 @@ pub const TermView = struct {
         v.size_timer = 0;
     }
 
+    /// The custom shader's picture of the pane, laid over `widget`, which the card shows too.
+    pub fn shaderWidget(v: *TermView) *gtk.Widget {
+        return v.shader_view.?.as(gtk.Widget);
+    }
+
     pub fn widget(v: *TermView) *gtk.Widget {
         return v.canvas.as(gtk.Widget);
     }
@@ -463,6 +528,10 @@ pub const TermView = struct {
     }
 
     pub fn setTitleLabel(v: *TermView, label: *gtk.Label) void {
+        // Held until the pane goes: the card can be taken apart before this view is, and a
+        // title arriving in between would otherwise be written into a freed label.
+        _ = label.as(gobject.Object).ref();
+        if (v.title_label) |old| old.as(gobject.Object).unref();
         v.title_label = label;
         v.title_len = std.math.maxInt(usize);
         v.updateTitle();
@@ -512,6 +581,14 @@ pub const TermView = struct {
         label.setText(@ptrCast(&v.title_buf));
     }
 
+    fn onRealize(w: *gtk.Widget, v: *TermView) callconv(.c) void {
+        v.im.as(gtk.IMContext).setClientWidget(w);
+    }
+
+    fn onUnrealize(_: *gtk.Widget, v: *TermView) callconv(.c) void {
+        v.im.as(gtk.IMContext).setClientWidget(null);
+    }
+
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
         v.im.as(gtk.IMContext).setClientWidget(null);
         if (v.edge_timer != 0) _ = glib.Source.remove(v.edge_timer);
@@ -525,8 +602,13 @@ pub const TermView = struct {
             v.widget().removeTickCallback(v.scroll_tick);
             scroll_ticking -= 1;
         }
-        if (v.shader_tick != 0) v.widget().removeTickCallback(v.shader_tick);
+        if (v.shader_view) |sv| {
+            if (v.shader_tick != 0) sv.as(gtk.Widget).removeTickCallback(v.shader_tick);
+            sv.view = null;
+        }
         v.shader_pane.deinit();
+        if (v.title_label) |l| l.as(gobject.Object).unref();
+        v.title_label = null;
         v.canvas.view = null;
         if (blink_view == v) blink_view = null;
         if (v.own_font) |*f| f.deinit();
