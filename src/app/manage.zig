@@ -31,62 +31,30 @@ fn showOutput(row: *adw.ActionRow, argv: []const [:0]const u8, comptime fallback
     if (!proc.run(argv, row, &H.answered)) H.answered(row, null);
 }
 
-fn showServerStatus(row: *adw.ActionRow) void {
-    showOutput(row, &.{ "rex", "--autostart=false", "server", "status" }, "Unknown");
-}
-
 fn rexInstalled() bool {
     const path = glib.findProgramInPath("rex") orelse return false;
     glib.free(path);
     return true;
 }
 
-/// Settings > Server's group for the Rex server on this computer.
-pub fn localServerGroup(p: *adw.PreferencesPage, a: *App) void {
-    const g = adw.PreferencesGroup.new();
-    g.setTitle("Rex Server on This Computer");
-    p.add(g);
-    if (!rexInstalled()) {
-        const row = adw.ActionRow.new();
-        row.as(adw.PreferencesRow).setTitle("Rex isn't installed here");
-        row.setSubtitle("Install Rex to run a server on this computer");
-        g.add(row.as(gtk.Widget));
-        return;
-    }
-    g.setDescription("Starts and stops the server on this computer only.");
-    const row = adw.ActionRow.new();
-    row.as(adw.PreferencesRow).setTitle("Status");
-    row.setSubtitle("Checking…");
-    row.setSubtitleLines(2);
-    showServerStatus(row);
-    inline for (.{ .{ "Start", "start", "Starting the Rex server" }, .{ "Stop", "stop", "Stopping the Rex server" } }) |b| {
-        const button = gtk.Button.newWithLabel(b[0]);
-        button.as(gtk.Widget).setValign(.center);
-        button.as(gtk.Widget).addCssClass("flat");
-        const H = struct {
-            fn run(btn: *gtk.Button, app: *App) callconv(.c) void {
-                if (!proc.start(&.{ "rex", "server", b[1] })) return app.toastText("Couldn't run rex");
-                app.toastText(b[2]);
-                // The row this button sits in shows the status; read it again once the server
-                // has had a moment to start or stop.
-                const status_row = btn.as(gtk.Widget).getAncestor(adw.ActionRow.getGObjectType()) orelse return;
-                _ = status_row.as(gobject.Object).ref();
-                _ = glib.timeoutAdd(1500, &reread, status_row);
-            }
-            fn reread(data: ?*anyopaque) callconv(.c) c_int {
-                const status_row: *adw.ActionRow = @ptrCast(@alignCast(data.?));
-                showServerStatus(status_row);
-                status_row.as(gobject.Object).unref();
-                return 0;
-            }
-        };
-        _ = gtk.Button.signals.clicked.connect(button, *App, &H.run, a, .{});
-        row.addSuffix(button.as(gtk.Widget));
-    }
-    g.add(row.as(gtk.Widget));
+/// The address of the Rex server on this computer: its socket, where the rex command looks for
+/// it. Null when Rex isn't installed here.
+pub fn localServerUrl() ?[]u8 {
+    if (!rexInstalled()) return null;
+    if (std.c.getenv("REX_RUNTIME_DIR")) |dir| if (dir[0] != 0) {
+        return std.fmt.allocPrint(gpa, "unix://{s}/server.sock", .{std.mem.span(dir)}) catch null;
+    };
+    return std.fmt.allocPrint(gpa, "unix://{s}/rex/server.sock", .{std.mem.span(glib.getUserRuntimeDir())}) catch null;
+}
 
+/// Settings > Server's group for setting coding agents up to use Rex on this computer.
+pub fn agentsGroup(p: *adw.PreferencesPage, a: *App) void {
+    if (!rexInstalled()) return;
+    const g = adw.PreferencesGroup.new();
+    g.setTitle("Agents");
+    p.add(g);
     const agents = adw.ActionRow.new();
-    agents.as(adw.PreferencesRow).setTitle("Agents");
+    agents.as(adw.PreferencesRow).setTitle("Coding agents");
     agents.setSubtitle("Let coding agents such as Claude Code use Rex");
     showOutput(agents, &.{ "rex", "--autostart=false", "skill", "status" }, "Let coding agents such as Claude Code use Rex");
     const setup = gtk.Button.newWithLabel("Set Up");

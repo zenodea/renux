@@ -58,7 +58,13 @@ pub fn build(b: *std.Build) void {
     // The app icon and desktop entry, where Linux desktops look for them.
     b.installFile("data/icons/dev.renux.svg", "share/icons/hicolor/scalable/apps/dev.renux.svg");
     b.installFile("data/icons/dev.renux.png", "share/icons/hicolor/512x512/apps/dev.renux.png");
-    b.installFile("data/dev.renux.desktop", "share/applications/dev.renux.desktop");
+    // The entry names the program by its full path: a desktop's own PATH often leaves out
+    // ~/.local/bin, where a build installed with `-p ~/.local` puts it.
+    const desktop = b.addSystemCommand(&.{ "sed", "-e" });
+    desktop.addDirectoryArg2(.{ .relative = .{ .base = .deployed_bin } }, .{ .prefix = "s|^Exec=renux$|Exec=", .suffix = "/renux|", .make_absolute = true });
+    desktop.addFileArg(b.path("data/dev.renux.desktop"));
+    const desktop_file = desktop.captureStdOut(.{ .basename = "dev.renux.desktop" });
+    b.getInstallStep().dependOn(&b.addInstallFile(desktop_file, "share/applications/dev.renux.desktop").step);
     // What software centers show, and the license.
     b.installFile("data/dev.renux.metainfo.xml", "share/metainfo/dev.renux.metainfo.xml");
     b.installFile("LICENSE", "share/licenses/renux/LICENSE");

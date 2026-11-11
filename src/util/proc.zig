@@ -9,7 +9,7 @@ const gpa = std.heap.c_allocator;
 
 /// A command that hasn't answered by now is stuck, and is ended.
 const patience_ms = 10_000;
-const max_args = 8;
+const max_args = 12;
 
 /// Hears what the command printed, or null if it failed to answer. The text lives only for the call.
 pub const Done = *const fn (ctx: ?*anyopaque, output: ?[]const u8) void;

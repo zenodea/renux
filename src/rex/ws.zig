@@ -35,7 +35,8 @@ pub const Handler = struct {
 };
 
 pub const Options = struct {
-    /// Base address, such as http://host:port or https://host.
+    /// Base address, such as http://host:port, https://host, or unix:///path/to/server.sock for
+    /// a server on this computer.
     url: []const u8,
     path: []const u8,
     protocol: []const u8,
@@ -324,12 +325,16 @@ fn run(s: *Socket, ending: *Ending) !void {
     client.setTimeout(15);
     const tls = std.mem.startsWith(u8, s.url, "https://");
     if (tls) client.setTls(1);
+    const unix_path = unixPath(s.url);
 
     const uri = try std.fmt.allocPrintSentinel(gpa, "{s}{s}", .{ s.url, s.path }, 0);
     defer gpa.free(uri);
     var err: ?*glib.Error = null;
     // GIO only takes the port from the address itself, so give it the scheme's usual one.
-    const conn = client.connectToUri(uri.ptr, if (tls) 443 else 80, s.cancellable, &err) orelse {
+    const conn = (if (unix_path) |p|
+        connectUnix(client, p, s.cancellable, &err)
+    else
+        client.connectToUri(uri.ptr, if (tls) 443 else 80, s.cancellable, &err)) orelse {
         const msg: []const u8 = if (err) |e| std.mem.span(e.f_message orelse "") else "";
         log.info("connect {s} failed: {s}", .{ uri, msg });
         if (err) |e| e.free();
@@ -347,7 +352,8 @@ fn run(s: *Socket, ending: *Ending) !void {
     for (0..4) |i| std.mem.writeInt(u32, key_bytes[i * 4 ..][0..4], glib.randomInt(), .little);
     var key: [24]u8 = undefined;
     _ = std.base64.standard.Encoder.encode(&key, &key_bytes);
-    const host = hostOf(s.url);
+    // A socket has no host name; the rex command sends "rex" in its place.
+    const host = if (unix_path != null) "rex" else hostOf(s.url);
     const request = try std.fmt.allocPrint(gpa, "GET {s} HTTP/1.1\r\nHost: {s}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
         "Sec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {s}\r\n\r\n", .{ s.path, host, key, s.protocol });
     defer gpa.free(request);
@@ -375,7 +381,7 @@ fn run(s: *Socket, ending: *Ending) !void {
 
     // From here a quiet connection is a lost one: the pings below keep a live one talking.
     conn.getSocket().setTimeout(silence_limit_s);
-    conn.getSocket().setKeepalive(1);
+    if (unix_path == null) conn.getSocket().setKeepalive(1);
     s.lock.lock();
     s.writing = true;
     s.lock.unlock();
@@ -453,6 +459,22 @@ fn run(s: *Socket, ending: *Ending) !void {
             else => {},
         }
     }
+}
+
+/// The socket file a unix:// address names, such as /run/user/1000/rex/server.sock from
+/// unix:///run/user/1000/rex/server.sock; null for any other address.
+pub fn unixPath(url: []const u8) ?[]const u8 {
+    const scheme = "unix://";
+    if (!std.mem.startsWith(u8, url, scheme) or url.len == scheme.len) return null;
+    return url[scheme.len..];
+}
+
+fn connectUnix(client: *gio.SocketClient, path: []const u8, cancellable: ?*gio.Cancellable, err: *?*glib.Error) ?*gio.SocketConnection {
+    const z = gpa.dupeSentinel(u8, path, 0) catch return null;
+    defer gpa.free(z);
+    const address = gio.UnixSocketAddress.new(z.ptr);
+    defer address.as(gobject.Object).unref();
+    return client.connect(address.as(gio.SocketConnectable), cancellable, err);
 }
 
 fn hostOf(url: []const u8) []const u8 {
@@ -575,6 +597,9 @@ fn deliver(s: *Socket, p: Posted) void {
 test "host and status parsing" {
     try std.testing.expectEqualStrings("127.0.0.1:18765", hostOf("http://127.0.0.1:18765"));
     try std.testing.expectEqualStrings("mac.tail.ts.net", hostOf("https://mac.tail.ts.net/x"));
+    try std.testing.expectEqualStrings("/run/user/1000/rex/server.sock", unixPath("unix:///run/user/1000/rex/server.sock").?);
+    try std.testing.expect(unixPath("unix://") == null);
+    try std.testing.expect(unixPath("http://box:8765") == null);
     try std.testing.expectEqual(@as(u16, 101), statusOf("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket"));
     try std.testing.expectEqual(@as(u16, 403), statusOf("HTTP/1.1 403 Forbidden"));
 }

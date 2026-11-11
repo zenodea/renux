@@ -17,7 +17,6 @@ const shortcuts = @import("shortcuts.zig");
 const icons = @import("../icons/icons.zig");
 const art = @import("settings_art.zig");
 const App = @import("../app/app.zig").App;
-const updates = @import("../rex/updates.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -46,9 +45,8 @@ const Ctx = struct {
     built: [sections.len]bool = @splat(false),
     banner: *adw.Banner,
     tick: c_uint = 0,
-    /// The Server page's status row, kept up to date while the window is open.
-    status: ?*adw.ActionRow = null,
-    status_retry: ?*gtk.Widget = null,
+    /// The Server page, kept up to date while the window is open.
+    server_page: ?*adw.PreferencesPage = null,
     /// The check marks of the theme rows.
     theme_checks: std.ArrayList(*ThemePick) = .empty,
     /// Theme values for the light and dark pickers: "" follows the host.
@@ -165,7 +163,7 @@ fn ticked(data: ?*anyopaque) callconv(.c) c_int {
 fn refresh(ctx: *Ctx) void {
     if (settings.problem) |why| ctx.banner.setTitle(why.ptr);
     ctx.banner.setRevealed(@intFromBool(settings.problem != null));
-    showStatus(ctx);
+    if (ctx.server_page) |p| @import("../app/server_panel.zig").tick(p);
 }
 
 fn picked(_: *gtk.ListBox, row: ?*gtk.ListBoxRow, ctx: *Ctx) callconv(.c) void {
@@ -503,39 +501,27 @@ fn setRowText(row: *adw.ActionRow, title: ?[]const u8, subtitle: ?[]const u8) vo
 
 // Server.
 
+/// Laid out as the Rex app lays it out: the server and its address, its Tailscale device, then
+/// how this computer appears to Rex.
 fn serverPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const a = ctx.app;
-    const g = group(p, "Rex Server", "The server Renux is showing now. Add more under Remote Hosts.");
-    const status = adw.ActionRow.new();
-    const retry = gtk.Button.newWithLabel("Reconnect");
-    retry.as(gtk.Widget).setValign(.center);
-    retry.as(gtk.Actionable).setActionName("app.retry");
-    status.addSuffix(retry.as(gtk.Widget));
-    g.add(status.as(gtk.Widget));
-    ctx.status = status;
-    ctx.status_retry = retry.as(gtk.Widget);
-    showStatus(ctx);
-    if (a.server) |s| {
-        const addr = adw.ActionRow.new();
-        addr.as(adw.PreferencesRow).setTitle("Address");
-        setRowText(addr, null, s.url);
-        addr.setSubtitleSelectable(1);
-        g.add(addr.as(gtk.Widget));
-    }
-    switchRow(ctx, g, "Look for Rex updates", "Reads Rex's public list of releases and says when a server could be updated. Updating is done on the server's computer.", &settings.current.rex_updates, &App.lookForUpdates);
+    @import("../app/server_panel.zig").build(p, a);
+    ctx.server_page = p;
 
-    if (a.server != null) {
-        const pair = group(p, "Pair a Phone", null);
-        const row = adw.ActionRow.new();
-        row.as(adw.PreferencesRow).setTitle("Pair device with QR code");
-        row.setSubtitle("Compy on Android scans this server's address");
-        const show = rowButton("Show Code");
-        _ = gtk.Button.signals.clicked.connect(show, *Ctx, &showPairing, ctx, .{});
-        row.addSuffix(show.as(gtk.Widget));
-        pair.add(row.as(gtk.Widget));
-    }
-    @import("../app/manage.zig").localServerGroup(p, a);
+    const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. A new label applies on the next connection.");
+    const label = adw.EntryRow.new();
+    label.as(adw.PreferencesRow).setTitle("Label");
+    if (gpa.dupeSentinel(u8, if (settings.current.client_label.len > 0) settings.current.client_label else std.mem.span(glib.getHostName()), 0)) |current| {
+        defer gpa.free(current);
+        label.as(gtk.Editable).setText(current.ptr);
+    } else |_| {}
+    label.setShowApplyButton(1);
+    _ = adw.EntryRow.signals.apply.connect(label, *Ctx, &labelApplied, ctx, .{});
+    info.add(label.as(gtk.Widget));
+    switchRow(ctx, info, "Remote Control", "Let Rex and other clients perform actions in this app", &settings.current.remote_control, null);
+
+    @import("../app/manage.zig").agentsGroup(p, a);
     const more = group(p, "Help", null);
     inline for (.{ .{ "Diagnostics", "What Renux knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
         const row = adw.ActionRow.new();
@@ -551,68 +537,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
         row.addSuffix(open_button.as(gtk.Widget));
         more.add(row.as(gtk.Widget));
     }
-
-    // This computer's Tailscale, which Rex servers often use to let it in.
-    const tsg = group(p, "Tailscale", "Read from this computer. Rex's own Tailscale settings live in the Rex app on the server's machine.");
-    const ts_row = adw.ActionRow.new();
-    ts_row.as(adw.PreferencesRow).setTitle("Checking Tailscale…");
-    // Asked without waiting; the row is kept until the answer has been written on it.
-    _ = ts_row.as(gobject.Object).ref();
-    @import("../rex/tailscale.zig").read(ts_row, &tailscaleRead);
-    tsg.add(ts_row.as(gtk.Widget));
-
-    const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. It applies on the next connection.");
-    const label = adw.EntryRow.new();
-    label.as(adw.PreferencesRow).setTitle("Label");
-    if (gpa.dupeSentinel(u8, if (settings.current.client_label.len > 0) settings.current.client_label else std.mem.span(glib.getHostName()), 0)) |current| {
-        defer gpa.free(current);
-        label.as(gtk.Editable).setText(current.ptr);
-    } else |_| {}
-    label.setShowApplyButton(1);
-    _ = adw.EntryRow.signals.apply.connect(label, *Ctx, &labelApplied, ctx, .{});
-    info.add(label.as(gtk.Widget));
     return p.as(gtk.Widget);
-}
-
-/// Writes the connection's state on the Server page's first row, now and as it changes.
-fn showStatus(ctx: *Ctx) void {
-    const status = ctx.status orelse return;
-    const s = ctx.app.server orelse {
-        status.as(adw.PreferencesRow).setTitle("Not connected");
-        status.setSubtitle("");
-        if (ctx.status_retry) |r| r.setVisible(0);
-        return;
-    };
-    setRowText(status, if (ctx.app.current) |h| h.label else "Rex", null);
-    var buf: [320]u8 = undefined;
-    const sub = switch (s.state) {
-        .online => if (updates.available(s.rex_version)) |newer|
-            std.fmt.bufPrintSentinel(&buf, "Connected · Rex {s}\nUpdate available: {s}", .{ s.rex_version orelse "", newer }, 0)
-        else
-            std.fmt.bufPrintSentinel(&buf, "Connected{s}{s}", .{ if (s.rex_version != null) " · Rex " else "", s.rex_version orelse "" }, 0),
-        .connecting => std.fmt.bufPrintSentinel(&buf, "Connecting…", .{}, 0),
-        .offline => std.fmt.bufPrintSentinel(&buf, "Offline: {s}", .{s.reason.items}, 0),
-    } catch "";
-    status.setSubtitle(sub.ptr);
-    if (ctx.status_retry) |r| r.setVisible(1);
-}
-
-fn tailscaleRead(data: ?*anyopaque, ts: *@import("../rex/tailscale.zig").Status) void {
-    const ts_row: *adw.ActionRow = @ptrCast(@alignCast(data.?));
-    defer ts_row.as(gobject.Object).unref();
-    if (ts.running) {
-        var tb: [256]u8 = undefined;
-        const title = std.fmt.bufPrintSentinel(&tb, "Signed in{s}{s}", .{ if (ts.login != null) " as " else "", ts.login orelse "" }, 0) catch "Signed in";
-        ts_row.as(adw.PreferencesRow).setTitle(title.ptr);
-        var sb: [256]u8 = undefined;
-        const sub = std.fmt.bufPrintSentinel(&sb, "{s}{s}{d} Rex host{s} on the tailnet", .{ ts.tailnet orelse "", if (ts.tailnet != null) " · " else "", ts.rex_hosts.items.len, if (ts.rex_hosts.items.len == 1) "" else "s" }, 0) catch "";
-        ts_row.setSubtitle(sub.ptr);
-    } else {
-        ts_row.as(adw.PreferencesRow).setTitle("Not on Tailscale");
-        var wb: [256]u8 = undefined;
-        const why = std.fmt.bufPrintSentinel(&wb, "{s}", .{ts.problem orelse "Tailscale isn't connected"}, 0) catch "";
-        ts_row.setSubtitle(why.ptr);
-    }
 }
 
 fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
@@ -649,6 +574,13 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     const look = group(p, "Appearance", null);
     cards(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, &.{ .scheme_auto, .scheme_light, .scheme_dark }, App.themeChanged);
+    // Each is one layer: the terminals aren't drawn over the window's own background.
+    const mac = @import("builtin").os.tag == .macos;
+    const see = group(p, "Transparency", if (mac) "Below 100%, the desktop shows through" else "Below 100%, the desktop shows through. Hyprland and KDE blur it; GNOME doesn't");
+    percentRow(ctx, see, "Window", "The sidebar, the board and the space around the panes", &settings.current.window_opacity);
+    percentRow(ctx, see, "Terminals", "The panes, floating ones too, and the board's columns", &settings.current.terminal_opacity);
+    // On Linux the desktop does any blurring, so there's nothing for Renux to switch.
+    if (mac) switchRow(ctx, see, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
     const panes = group(p, "Panes", null);
     const Tight = struct {
         fn apply(app: *App) void {
@@ -825,10 +757,6 @@ fn rebuildThemes(ctx: *Ctx) void {
     if (shown) stack.setVisibleChildName("Themes");
 }
 
-fn showPairing(_: *gtk.Button, ctx: *Ctx) callconv(.c) void {
-    if (ctx.app.current) |h| _ = App.perform(h, "client.pair_device", null, null);
-}
-
 fn themesPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     ctx.theme_checks.clearRetainingCapacity();
@@ -948,11 +876,6 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     numberRow(ctx, padding, "Horizontal padding", "Points left and right of the text", &settings.current.pad_x, 0, 40, 1, 0, App.terminalChanged);
     numberRow(ctx, padding, "Vertical padding", "Points above and below the text", &settings.current.pad_y, 0, 40, 1, 0, App.terminalChanged);
     segments(ctx, padding, "Padding color", settings.PaddingColor, &settings.current.padding_color, &.{ "Terminal", "Theme" }, App.terminalChanged);
-
-    const look = group(p, "Transparency", "Below 100%, the desktop shows through. On Linux, KDE and Hyprland blur it; GNOME doesn't.");
-    percentRow(ctx, look, "Window", "Behind the panes and the sidebar", &settings.current.window_opacity);
-    percentRow(ctx, look, "Terminals", "Floating panes stay solid", &settings.current.terminal_opacity);
-    switchRow(ctx, look, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
 
     const c = group(p, "Cursor", null);
     sampleRow(ctx, c, .cursor);

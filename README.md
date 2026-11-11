@@ -48,8 +48,9 @@ see [Rex's installation guide](https://www.superlogical.com/rex/docs/linux/insta
    zig build -Doptimize=ReleaseFast -p ~/.local
    ```
 
-3. Start Renux from your applications menu, or run `renux`. On first start it asks for your
-   Rex server's address.
+3. Start Renux from your applications menu, or run `renux`. With Rex installed on this
+   computer, it connects to the Rex server here, and starts it if it isn't running. Otherwise
+   it asks for your Rex server's address.
 
 `renux --toggle` shows or hides the running window, for a desktop shortcut.
 `renux --version` prints the version.

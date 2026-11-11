@@ -114,6 +114,10 @@ pub const Server = struct {
     /// The last error from an action, for showing to the person.
     message: std.ArrayList(u8) = .empty,
     reconnect_token: ?[]u8 = null,
+    /// Whether a failed connection to this computer's server, reached by its socket, first
+    /// runs `rex server start`, as the rex command does. Only until the first connection is
+    /// made, and again when the person asks to retry, so a server they stop stays stopped.
+    autostart: bool = true,
     retries: u5 = 0,
     retry_timer: c_uint = 0,
     rex_version: ?[]u8 = null,
@@ -269,6 +273,7 @@ pub const Server = struct {
 
     fn scheduleReconnect(s: *Server, reason: []const u8) void {
         if (!s.wanted) return;
+        if (s.startLocalServer()) return;
         // Rex can limit access to one Tailscale account; say what to do about it.
         const explained = if (std.mem.eql(u8, reason, "This server doesn't allow your account"))
             "This server only allows its owner's Tailscale account. Sign this computer in to Tailscale with that account."
@@ -278,6 +283,48 @@ pub const Server = struct {
         const wait = @import("ws.zig").backoffMs(1000, 30_000, &s.retries);
         if (s.retry_timer != 0) _ = glib.Source.remove(s.retry_timer);
         s.retry_timer = glib.timeoutAdd(wait, &retryNow, s);
+    }
+
+    /// Runs `rex server start` for this computer's server and connects again once it has
+    /// finished; start does nothing to a server that is already running. False if this isn't
+    /// the time to, or rex couldn't be run.
+    fn startLocalServer(s: *Server) bool {
+        if (!s.autostart or @import("ws.zig").unixPath(s.url) == null) return false;
+        s.autostart = false;
+        const H = struct {
+            fn started(ctx: ?*anyopaque, _: ?[]const u8) void {
+                const server: *Server = @ptrCast(@alignCast(ctx.?));
+                if (!server.isLive() or !server.wanted) return;
+                if (server.control == null and server.attempt == null) server.startConnecting();
+            }
+        };
+        if (!@import("../util/proc.zig").run(&.{ "rex", "server", "start" }, s, &H.started)) return false;
+        log.info("starting this computer's Rex server", .{});
+        return true;
+    }
+
+    /// For this computer's server, when Settings has it on the tailnet: a restarted server
+    /// starts with its Tailscale node off, so turn it on again. Doing so when it's already on
+    /// changes nothing, and its sign-in is kept, so no new one is asked for.
+    fn keepOnTailnet(s: *Server) void {
+        if (!@import("../settings/settings.zig").current.local_tailscale) return;
+        if (@import("ws.zig").unixPath(s.url) == null) return;
+        const url = gpa.dupeSentinel(u8, s.url, 0) catch return;
+        defer gpa.free(url);
+        var buf: [96]u8 = undefined;
+        var argv: [9][:0]const u8 = undefined;
+        _ = @import("../util/proc.zig").start(tailscaleOnArgv(url, &buf, &argv));
+    }
+
+    /// `rex server tailscale on` for the server at `url`, with the access and the device name
+    /// Settings keeps. `buf` holds the text of the name; the result points into it and `argv`.
+    pub fn tailscaleOnArgv(url: [:0]const u8, buf: *[96]u8, argv: *[9][:0]const u8) []const [:0]const u8 {
+        const st = &@import("../settings/settings.zig").current;
+        argv[0..7].* = .{ "rex", "--autostart=false", "-S", url, "server", "tailscale", "on" };
+        argv[7] = if (st.tailscale_open) "--allow-tailnet-members=true" else "--allow-tailnet-members=false";
+        if (st.tailscale_hostname.len == 0) return argv[0..8];
+        argv[8] = std.fmt.bufPrintSentinel(buf, "--hostname={s}", .{st.tailscale_hostname}, 0) catch return argv[0..8];
+        return argv[0..9];
     }
 
     fn retryNow(data: ?*anyopaque) callconv(.c) c_int {
@@ -293,6 +340,7 @@ pub const Server = struct {
         if (s.retry_timer != 0) _ = glib.Source.remove(s.retry_timer);
         s.retry_timer = 0;
         s.retries = 0;
+        s.autostart = true;
         s.startConnecting();
     }
 
@@ -309,6 +357,7 @@ pub const Server = struct {
     fn onWelcome(ctx: *anyopaque, c: *Control, w: control.Welcome) void {
         const s: *Server = @ptrCast(@alignCast(ctx));
         if (c != s.attempt) return;
+        s.autostart = false;
         if (s.reconnect_token) |t| gpa.free(t);
         s.reconnect_token = if (w.reconnect_token) |t| gpa.dupe(u8, t) catch null else null;
         s.api_revision = w.api_revision;
@@ -351,6 +400,7 @@ pub const Server = struct {
                 for (s.sessions.items) |session| s.refreshView(session.id, -1);
                 s.retries = 0;
                 s.setState(.online, "");
+                s.keepOnTailnet();
                 s.fetchKeymap();
                 s.call("server.version", no_args, void, {}, gotVersion);
                 s.notify(.sessions, null);
@@ -403,6 +453,10 @@ pub const Server = struct {
             s.removeSession(id);
         } else if (eql(kind, "session_moved")) {
             s.call("session.list", no_args, void, {}, listed);
+        } else if (eql(kind, "keymap_changed")) {
+            // The server read its config again, such as after init.lua was saved: the keys and
+            // prefixes it binds may be new.
+            s.fetchKeymap();
         } else if (eql(kind, "client_perform_requested")) {
             s.handlePerform(payload orelse return);
         } else if (eql(kind, "client_call_requested")) {
@@ -694,6 +748,9 @@ pub const Server = struct {
     /// so every request gets one, even if it's only that Renux can't do it.
     fn handlePerform(s: *Server, payload: json.Value) void {
         const call_id = json.str(payload, "call_id") orelse return;
+        if (!@import("../settings/settings.zig").current.remote_control) {
+            return s.reply(call_id, "not_supported", "Remote control is off in Renux's settings");
+        }
         const action = json.str(payload, "action") orelse "";
         const args = json.get(payload, "args");
         const session_id = json.str(args, "session_id") orelse json.str(payload, "session_id");

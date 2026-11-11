@@ -23,6 +23,7 @@ const blockicon = @import("../icons/blockicon.zig");
 const draw = @import("../util/draw.zig");
 const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
+const window_bg = @import("window_bg.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -179,8 +180,7 @@ pub const Workspace = struct {
 
     pub fn create(server: *Server) !*Workspace {
         const ws = try gpa.create(Workspace);
-        const box = gtk.Box.new(.horizontal, 0);
-        const root = box.as(gtk.Widget);
+        const root = PaneArea.new().as(gtk.Widget);
         root.setHexpand(1);
         root.setVexpand(1);
         root.addCssClass("workspace");
@@ -342,7 +342,9 @@ pub const Workspace = struct {
         // Only a pane whose title is level with the corner; tabs above push panes down.
         const room: f64 = if (top_left and origin[1] + at[1] < 30) @max(0, corner_right + 6 - (origin[0] + at[0] + 13)) else 0;
         const want: c_int = @intFromFloat(@round(room));
-        if (p.title_row.getMarginStart() != want) p.title_row.setMarginStart(want);
+        // The room goes before the title's contents, not before the row: the row's background
+        // still runs under the corner, so the window's buttons sit on the pane's own color.
+        if (p.tile.getMarginStart() != want) p.tile.setMarginStart(want);
     }
 
     /// Floating layers draw over every tiled pane, in the server's order, back to front; the
@@ -1023,6 +1025,49 @@ pub const Workspace = struct {
     }
 
     /// The focused pane's terminal view.
+    /// Where each card on screen is, tiled or floating, in `target`'s coordinates, for the
+    /// window's see-through background to leave holes at. Returns how many it wrote.
+    pub fn cardBounds(ws: *Workspace, target: *gtk.Widget, out: []window_bg.Hole) usize {
+        if (ws.root.getMapped() == 0) return 0;
+        var n: usize = 0;
+        for (ws.panes.items) |*p| {
+            if (n == out.len) return n;
+            if (p.floating or p.frame.getMapped() == 0) continue;
+            if (p.frame.computeBounds(target, &out[n].rect) != 0) {
+                out[n].radius = window_bg.tiled_radius;
+                n += 1;
+            }
+        }
+        return n + ws.floatingHoles(target, out[n..]);
+    }
+
+    /// Where each floating card on screen is, and each joined layer's card around its panes.
+    fn floatingHoles(ws: *Workspace, target: *gtk.Widget, out: []window_bg.Hole) usize {
+        var n: usize = 0;
+        for (ws.panes.items) |*p| {
+            if (n == out.len) return n;
+            if (!p.floating or p.frame.getMapped() == 0) continue;
+            if (p.frame.computeBounds(target, &out[n].rect) != 0) {
+                out[n].radius = window_bg.floating_radius;
+                n += 1;
+            }
+        }
+        for (ws.backdrops.items) |bd| {
+            if (n == out.len) return n;
+            if (bd.widget.getMapped() == 0) continue;
+            if (bd.widget.computeBounds(target, &out[n].rect) != 0) {
+                out[n].radius = window_bg.floating_radius;
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    fn isTiledCard(ws: *Workspace, w: *gtk.Widget) bool {
+        for (ws.panes.items) |p| if (p.frame == w) return !p.floating;
+        return false;
+    }
+
     pub fn focusedView(ws: *Workspace) ?*TermView {
         if (ws.focused) |f| if (ws.paneOf(f)) |p| return p.term;
         return if (ws.panes.items.len > 0) ws.panes.items[0].term else null;
@@ -1895,7 +1940,84 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     ws.tray.as(gtk.Widget).measure(.vertical, -1, &th_min, &th, null, null);
     var tray: gtk.Allocation = .{ .f_x = 10, .f_y = height - th - 10, .f_width = @max(0, @min(nat, width - 20)), .f_height = th };
     ws.tray.as(gtk.Widget).sizeAllocate(&tray, -1);
+    // Where the floating cards are decides what is cut from the tiled ones under them.
+    if (cut_floating) widget.queueDraw();
+    if (on_layout) |f| f();
 }
+
+/// Told each time the cards are placed, which is every frame while they move, so the window's
+/// see-through background can keep its holes under them.
+pub var on_layout: ?*const fn () void = null;
+
+/// Set while the window is see-through: the tiled cards are cut where a floating card lies
+/// over them, so a floating pane shows the desktop behind the window, as the other panes do,
+/// rather than the pane under it.
+pub var cut_floating: bool = false;
+
+/// The workspace's own widget: a container that lays its cards out itself (`allocate`) and,
+/// while see-through, draws the tiled cards with the floating cards' places cut out.
+const PaneArea = extern struct {
+    parent_instance: Parent,
+
+    pub const Parent = gtk.Widget;
+    const Self = @This();
+
+    pub const getGObjectType = gobject.ext.defineClass(Self, .{
+        .name = "RenuxPaneArea",
+        .classInit = &Class.init,
+        .parent_class = &Class.parent,
+    });
+
+    pub fn new() *Self {
+        return gobject.ext.newInstance(Self, .{});
+    }
+
+    pub fn as(self: *Self, comptime T: type) *T {
+        return gobject.ext.as(T, self);
+    }
+
+    fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
+        const w = self.as(gtk.Widget);
+        var cut: [32]window_bg.Hole = undefined;
+        const ws = Workspace.fromWidget(w);
+        const n = if (!cut_floating) 0 else if (ws) |x| x.floatingHoles(w, &cut) else 0;
+        if (n == 0) {
+            var c = w.getFirstChild();
+            while (c) |child| : (c = child.getNextSibling()) w.snapshotChild(child, sn);
+            return;
+        }
+        // The tiled cards first, cut, then everything else in its own order above them.
+        window_bg.pushCut(sn, cut[0..n]);
+        var c = w.getFirstChild();
+        while (c) |child| : (c = child.getNextSibling()) if (ws.?.isTiledCard(child)) w.snapshotChild(child, sn);
+        sn.pop();
+        c = w.getFirstChild();
+        while (c) |child| : (c = child.getNextSibling()) if (!ws.?.isTiledCard(child)) w.snapshotChild(child, sn);
+    }
+
+    fn dispose(self: *Self) callconv(.c) void {
+        const w = self.as(gtk.Widget);
+        while (w.getFirstChild()) |child| child.unparent();
+        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+    }
+
+    pub const Class = extern struct {
+        parent_class: Parent.Class,
+
+        var parent: *Parent.Class = undefined;
+
+        pub const Instance = Self;
+
+        fn init(class: *Class) callconv(.c) void {
+            gtk.Widget.virtual_methods.snapshot.implement(class, &snapshot);
+            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+        }
+
+        pub fn as(class: *Class, comptime T: type) *T {
+            return gobject.ext.as(T, class);
+        }
+    };
+};
 
 /// How many workspaces are animating, for RENUX_PERF.
 pub var ticking: u32 = 0;

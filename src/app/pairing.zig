@@ -9,6 +9,25 @@ const gpa = std.heap.c_allocator;
 
 var shown: ?qr.Code = null;
 
+/// For this computer's server, reached by its socket, which a phone can't use: shows the
+/// server's tailnet address instead, which Rex gives once the server's Tailscale node is on.
+pub fn openLocal(a: *@import("app.zig").App, socket_url: [:0]const u8) void {
+    const H = struct {
+        fn answered(data: ?*anyopaque, output: ?[]const u8) void {
+            const app: *@import("app.zig").App = @ptrCast(@alignCast(data.?));
+            // `rex server tailscale pair --json` names the address; it prints nothing on stdout
+            // while Tailscale is off.
+            const text = output orelse "";
+            const start = std.mem.indexOf(u8, text, "\"https://") orelse
+                return app.toastText("Turn on Tailscale for this server first: run rex server tailscale on, then sign in with the link it gives.");
+            const rest = text[start + 1 ..];
+            const url = rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse rest.len];
+            open(app.window.as(gtk.Widget), url);
+        }
+    };
+    if (!@import("../util/proc.zig").run(&.{ "rex", "--autostart=false", "-S", socket_url, "server", "tailscale", "pair", "--json" }, a, &H.answered)) a.toastText("Couldn't run rex");
+}
+
 pub fn open(parent: *gtk.Widget, url: []const u8) void {
     shown = qr.encode(url) orelse return;
     const dialog = adw.Dialog.new();

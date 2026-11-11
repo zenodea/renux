@@ -265,7 +265,7 @@ pub const TermView = struct {
     layout: ?*pango.Layout = null,
     /// The letter spacing the layout was given, in pixels.
     spacing: f64 = 0,
-    /// Floating panes stay solid when terminals are see-through, so what's below doesn't show.
+    /// Whether the pane floats over the others.
     floating: bool = false,
     /// Textures of the Kitty images this pane shows, by image and generation.
     textures: std.ArrayList(TextureEntry) = .empty,
@@ -1698,7 +1698,7 @@ fn layoutOf(v: *TermView) *pango.Layout {
 /// is still connecting doesn't flash dark in a light theme, and a line saying which it is.
 fn snapshotEmpty(v: *TermView, sn: *gtk.Snapshot, w: f64, h: f64, message: [:0]const u8) void {
     const bg: u32 = if (theme_bg != 0) theme_bg else 0x1a1a1f;
-    fillRect(sn, bg, if (v.floating) 1 else term_opacity, 0, 0, w, h);
+    fillRect(sn, bg, term_opacity, 0, 0, w, h);
     const ink: u32 = if (luminance(bg) > 0.4) 0x000000 else 0xffffff;
     const f = font orelse return;
     const layout = layoutOf(v);
@@ -1864,7 +1864,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
 
-    const bg_alpha: f64 = if (v.floating) 1 else term_opacity;
+    const bg_alpha: f64 = term_opacity;
     if (settings.current.padding_color == .theme and theme_bg != 0) {
         fillRect(sn, theme_bg, bg_alpha, 0, 0, w, h);
         fillRect(sn, f.bg, bg_alpha, pad_x, pad_y, @max(0, @as(f64, @floatFromInt(f.cols)) * v.cell_w), @max(0, @as(f64, @floatFromInt(f.rows)) * v.cell_h));

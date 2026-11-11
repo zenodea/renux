@@ -113,6 +113,16 @@ pub const Settings = struct {
     client_label: []u8,
     /// Look up whether a later Rex than a server runs has been released.
     rex_updates: bool = true,
+    /// Keep this computer's Rex server on the tailnet. A restarted server starts with its
+    /// Tailscale node off, so Renux turns it on again each time it connects.
+    local_tailscale: bool = false,
+    /// Let anyone the tailnet's access rules allow reach that server, not only the Tailscale
+    /// account that signed it in.
+    tailscale_open: bool = false,
+    /// The name its Tailscale device asks for; empty takes Rex's own choice.
+    tailscale_hostname: []u8,
+    /// Let Rex and other clients perform actions in this app, such as focusing a pane.
+    remote_control: bool = true,
     /// The release last announced, so each is announced once and not at every start.
     rex_update_told: []u8,
     /// Separate themes for a light and a dark system appearance, instead of `theme`.
@@ -504,6 +514,8 @@ fn migrateOldServer() void {
 
 /// A short name for an address: its host part, before any dot.
 pub fn labelFor(url: []const u8) []const u8 {
+    // A socket is only ever this computer's own server.
+    if (std.mem.startsWith(u8, url, "unix://")) return "This Computer";
     var rest = if (std.mem.indexOf(u8, url, "://")) |i| url[i + 3 ..] else url;
     rest = rest[0 .. std.mem.indexOfAny(u8, rest, ":/") orelse rest.len];
     // A numeric address says nothing without all of it.
@@ -813,4 +825,5 @@ test "labels from addresses" {
     try std.testing.expectEqualStrings("my-mac-rex", labelFor("https://my-mac-rex.tail0000.ts.net"));
     try std.testing.expectEqualStrings("127.0.0.1", labelFor("http://127.0.0.1:18765"));
     try std.testing.expectEqualStrings("box", labelFor("box:8765"));
+    try std.testing.expectEqualStrings("This Computer", labelFor("unix:///run/user/1000/rex/server.sock"));
 }

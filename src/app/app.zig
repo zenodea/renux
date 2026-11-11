@@ -269,6 +269,8 @@ pub const App = struct {
     sidebar: *gtk.ListBox = undefined,
     split: *adw.OverlaySplitView = undefined,
     card: *gtk.Widget = undefined,
+    /// The window's see-through background, under everything, with holes for the terminals.
+    window_bg: *gtk.Widget = undefined,
     corner: *gtk.Widget = undefined,
     corner_tick: c_uint = 0,
     corner_until: i64 = 0,
@@ -604,7 +606,17 @@ pub const App = struct {
         termview.on_chord_changed = chordChanged;
         termview.TermView.enablePerfLog();
         a.toasts.setChild(layered.as(gtk.Widget));
-        a.window.setContent(a.toasts.as(gtk.Widget));
+        // The window's background while see-through lies under everything else.
+        const window_bg = @import("../ui/window_bg.zig");
+        a.window_bg = window_bg.WindowBackground.new().as(gtk.Widget);
+        a.window_bg.setVisible(0);
+        window_bg.holes = &windowHoles;
+        @import("../ui/workspace.zig").on_layout = &cardsPlaced;
+        const base = gtk.Overlay.new();
+        base.setChild(a.window_bg);
+        base.addOverlay(a.toasts.as(gtk.Widget));
+        base.setMeasureOverlay(a.toasts.as(gtk.Widget), 1);
+        a.window.setContent(base.as(gtk.Widget));
 
         a.addActions();
         a.setTight(settings.current.tight);
@@ -627,6 +639,13 @@ pub const App = struct {
                 h.temporary = true;
             };
         } else for (settings.current.hosts.items) |h| _ = a.addHost(h.label, h.url);
+        // With no server set, use this computer's own, as the rex command does; connecting
+        // starts it when it isn't running.
+        if (a.hosts.items.len == 0) if (@import("manage.zig").localServerUrl()) |url| {
+            defer gpa.free(url);
+            settings.addHost(settings.labelFor(url), url);
+            _ = a.addHost(settings.labelFor(url), url);
+        };
         updates_app = a;
         updates.changed = &updateKnown;
         if (a.hosts.items.len == 0) a.stack.setVisibleChildName("connect");
@@ -794,6 +813,10 @@ pub const App = struct {
     pub fn showBoard(a: *App, on: bool) void {
         if (on == a.board.shown()) return;
         a.board.show(on);
+        // The board is see-through when the window is, so the panes under it are hidden while
+        // it is open, and the window's background has no holes for them.
+        a.stack.as(gtk.Widget).setOpacity(if (on) 0 else 1);
+        a.window_bg.queueDraw();
         // The button shows which it is; setting it runs `boardToggled`, which finds nothing
         // left to do.
         a.board_button.setActive(@intFromBool(on));
@@ -2157,6 +2180,12 @@ pub const App = struct {
     /// Shows the server's address as a QR code for Compy on a phone to scan.
     fn pairDevice(a: *App) bool {
         const s = a.server orelse return false;
+        if (@import("../rex/ws.zig").unixPath(s.url) != null) {
+            const url = gpa.dupeSentinel(u8, s.url, 0) catch return true;
+            defer gpa.free(url);
+            @import("pairing.zig").openLocal(a, url);
+            return true;
+        }
         @import("pairing.zig").open(a.window.as(gtk.Widget), s.url);
         return true;
     }
@@ -3580,13 +3609,41 @@ pub const App = struct {
         };
         var buf: [1024]u8 = undefined;
         const see_through = prefs.window_opacity < 1 or prefs.terminal_opacity < 1;
+        // A Mac window has round corners. On Linux the desktop decides, as Hyprland does with
+        // its own rounding, so the window itself stays square.
+        const radius: f64 = if (builtin.os.tag == .macos) window_radius else 0;
+        // While see-through, one background lies under the whole window, with holes where the
+        // terminals are (`window_bg.zig`): the window, sidebar and board draw none of their own,
+        // so they all show that one layer, and a terminal shows only its own background.
+        a.window_bg.setVisible(@intFromBool(see_through));
+        // Floating cards are cut out of the tiled ones under them too, so they show the desktop.
+        @import("../ui/workspace.zig").cut_floating = see_through;
+        @import("../ui/window_bg.zig").tiled_radius = if (prefs.tight) 0 else 11;
+        @import("../ui/window_bg.zig").floating_radius = if (prefs.tight) 8 else 11;
         const look_text = if (!see_through) "" else std.fmt.bufPrintSentinel(&buf,
-            \\window.renux {{ border-radius: {d}px; }}
-            \\window.renux, window.renux .sidebar-pane {{ background-color: alpha(@renux_shell, {d:.2}); }}
-            \\window.tight .workspace {{ background-color: alpha(@renux_stroke_subtle, {d:.2}); }}
-            \\.pane-card:not(.floating) {{ background-color: transparent; }}
-            \\.pane-card:not(.floating) .pane-title {{ background-color: alpha(@view_bg_color, {d:.2}); }}
-        , .{ window_radius, prefs.window_opacity, prefs.window_opacity, prefs.terminal_opacity }, 0) catch "";
+            \\window.renux, window.renux .sidebar-pane, .board {{ background-color: transparent; }}
+            \\.window-background {{ border-radius: {d}px; background-color: alpha(@renux_shell, {d:.2}); }}
+            \\window.tight .workspace {{ background-color: transparent; }}
+            \\.pane-card, .layer-card {{ background-color: transparent; }}
+            \\.pane-card .pane-title {{ background-color: alpha(@view_bg_color, {d:.2}); }}
+            \\.board-column {{ background-color: alpha(@view_bg_color, {d:.2}); }}
+            \\.board-card {{ background-color: alpha(@window_fg_color, 0.05); }}
+            \\.board-card:hover {{ background-color: alpha(@window_fg_color, 0.09); }}
+        , .{ radius, prefs.window_opacity, prefs.terminal_opacity, prefs.terminal_opacity }, 0) catch "";
+        // No line between the sidebar and what is beside it, the panes or the board: neither the
+        // split view's divider nor the edge libadwaita gives a sidebar. On Linux, no round
+        // corners either.
+        const no_divider =
+            \\window.renux overlay-split-view > border { background: none; }
+            \\window.renux .sidebar-pane, window.renux .sidebar-pane banner > revealer > widget { box-shadow: none; }
+            \\
+        ;
+        const corners: []const u8 = if (builtin.os.tag != .macos)
+            "window.renux { border-radius: 0; }"
+        else if (see_through)
+            std.fmt.comptimePrint("window.renux {{ border-radius: {d}px; }}", .{window_radius})
+        else
+            "";
         // The active pane's border: its color, how strong, whether it fades in, or none at all.
         var color_buf: [32]u8 = undefined;
         const color: []const u8 = if (prefs.highlight_color != 0) (std.fmt.bufPrint(&color_buf, "#{x:0>6}", .{prefs.highlight_color}) catch "@accent_bg_color") else "@accent_bg_color";
@@ -3610,7 +3667,7 @@ pub const App = struct {
             \\.pane-card.floating.to-tray, .pane-card.floating.to-tray.focused { box-shadow: 0 2px 10px alpha(black, 0.3); transition: box-shadow 240ms ease-out; }
             \\.layer-card.to-tray, .layer-card.to-tray.focused { border-color: transparent; transition: none; }
         ;
-        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}\n{s}\n{s}\n{s}", .{ look_text, highlight, sidebar_text, to_tray }, 0) catch return;
+        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}{s}\n{s}\n{s}\n{s}\n{s}", .{ no_divider, corners, look_text, highlight, sidebar_text, to_tray }, 0) catch return;
         defer gpa.free(css_text);
         provider.loadFromString(css_text.ptr);
         if (builtin.os.tag == .macos) if (a.window.as(gtk.Native).getSurface()) |surface| {
@@ -3737,6 +3794,21 @@ fn useAppIcon() void {
 }
 
 var mode_app: ?*App = null;
+
+/// The holes in the window's see-through background: the terminal cards on screen, unless the
+/// board is open over them.
+fn windowHoles(background: *gtk.Widget, out: []@import("../ui/window_bg.zig").Hole) usize {
+    const a = mode_app orelse return 0;
+    if (a.board.shown()) return 0;
+    const ws = a.workspace orelse return 0;
+    return ws.cardBounds(background, out);
+}
+
+/// The cards moved, so the holes under them move too.
+fn cardsPlaced() void {
+    const a = mode_app orelse return;
+    if (a.window_bg.getVisible() != 0) a.window_bg.queueDraw();
+}
 /// Whether $RENUX_OPEN's tab has been shown.
 var open_done = false;
 /// The font size Renux started with, which client.font.reset goes back to.
