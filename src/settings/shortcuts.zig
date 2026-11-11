@@ -84,7 +84,6 @@ pub fn build(a: *App, p: *adw.PreferencesPage, page: *Page) void {
     const s = a.server orelse return;
     const head = adw.PreferencesGroup.new();
     head.setTitle("Key Bindings");
-    head.setDescription("From your Rex config. A shortcut recorded here is Renux's own and takes the place of the config's keys for that action; Copy as Lua puts them in your config for good.");
     const copy = gtk.Button.newWithLabel("Copy Shortcuts as Lua");
     copy.as(gtk.Widget).addCssClass("flat");
     copy.as(gtk.Widget).setValign(.center);

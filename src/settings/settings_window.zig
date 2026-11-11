@@ -185,10 +185,9 @@ fn page() *adw.PreferencesPage {
     return adw.PreferencesPage.new();
 }
 
-fn group(p: *adw.PreferencesPage, title: [:0]const u8, description: ?[:0]const u8) *adw.PreferencesGroup {
+fn group(p: *adw.PreferencesPage, title: [:0]const u8) *adw.PreferencesGroup {
     const g = adw.PreferencesGroup.new();
     g.setTitle(title.ptr);
-    if (description) |d| g.setDescription(d.ptr);
     p.add(g);
     return g;
 }
@@ -510,7 +509,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     @import("../app/server_panel.zig").build(p, a);
     ctx.server_page = p;
 
-    const info = group(p, "Client Info", "How this computer appears in Rex's list of clients. A new label applies on the next connection.");
+    const info = group(p, "Client Info");
     const label = adw.EntryRow.new();
     label.as(adw.PreferencesRow).setTitle("Label");
     if (gpa.dupeSentinel(u8, if (settings.current.client_label.len > 0) settings.current.client_label else std.mem.span(glib.getHostName()), 0)) |current| {
@@ -523,7 +522,7 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, info, "Remote Control", "Let Rex and other clients perform actions in this app", &settings.current.remote_control, null);
 
     @import("../app/manage.zig").agentsGroup(p, a);
-    const more = group(p, "Help", null);
+    const more = group(p, "Help");
     inline for (.{ .{ "Diagnostics", "What Renux knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
         const row = adw.ActionRow.new();
         row.as(adw.PreferencesRow).setTitle(e[0]);
@@ -549,17 +548,17 @@ fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
 
 fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const p = page();
-    const window = group(p, "Window", null);
+    const window = group(p, "Window");
     switchRow(ctx, window, "Show window on launch", "Off starts Renux hidden; renux --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
     switchRow(ctx, window, "Unread badge", "The number of panes that need you, on the Dock or the desktop's launcher", &settings.current.unread_badge, null);
     numberRow(ctx, window, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
 
-    const tabs = group(p, "Tabs", "Each session's windows, as tabs in the sidebar or above the panes");
+    const tabs = group(p, "Tabs");
     cards(ctx, tabs, "Tab style", settings.TabPosition, &settings.current.tab_position, &.{ "Left Side", "Right Side", "Above" }, &.{ .tabs_left, .tabs_right, .tabs_above }, App.tabsChanged);
     switchRow(ctx, tabs, "Fill available space", "Tabs above the panes share the width", &settings.current.tab_fill, App.tabsChanged);
     switchRow(ctx, tabs, "Show each process", "A tab lists every program in its window", &settings.current.tab_processes, App.tabsChanged);
 
-    const panes = group(p, "Panes", null);
+    const panes = group(p, "Panes");
     const Tight = struct {
         fn apply(app: *App) void {
             app.setTight(settings.current.tight);
@@ -571,22 +570,22 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, panes, "Match program backgrounds", "A pane's frame takes the background color of the program in it", &settings.current.match_program_bg, App.applyLook);
     switchRow(ctx, panes, "Autobalance splits", "Panes share space evenly after one opens or closes", &settings.current.autobalance, null);
 
-    const focus = group(p, "Focus", "Which pane has the keyboard, and how the others look");
+    const focus = group(p, "Focus");
     switchRow(ctx, focus, "Focus follows mouse", "Pointing at a pane gives it the keyboard", &settings.current.focus_follows_mouse, null);
     rangePercentRow(ctx, focus, "Fade inactive panes", "How much panes without the keyboard dim, in percent", &settings.current.fade_inactive, 0, 60);
     switchRow(ctx, focus, "Fade panes for inactive windows", "Dim every pane while Renux isn't the window in use", &settings.current.fade_inactive_window, App.redrawAllPub);
 
-    const hl = group(p, "Active Pane Highlight", null);
+    const hl = group(p, "Active Pane Highlight");
     switchRow(ctx, hl, "Show border on active pane", null, &settings.current.highlight_border, App.applyLook);
     switchRow(ctx, hl, "Animate active pane highlight", "The border fades in as focus moves", &settings.current.highlight_animate, App.applyLook);
     rangePercentRow(ctx, hl, "Highlight opacity", null, &settings.current.highlight_opacity, 10, 100);
     colorPicker(ctx, hl, "Highlight color", "The theme's accent unless one is picked", &settings.current.highlight_color, "Use Accent", App.applyLook);
 
-    const trackpad = group(p, "Trackpad", null);
+    const trackpad = group(p, "Trackpad");
     switchRow(ctx, trackpad, "Trackpad gestures", "Swipe sideways with two fingers to switch tabs", &settings.current.trackpad_gestures, null);
     numberRow(ctx, trackpad, "Trackpad scroll speed", "How far text moves for the fingers' movement; 2 is what terminals on a Mac do", &settings.current.scroll_speed, 0.5, 5, 0.25, 2, App.redrawAllPub);
 
-    const go = group(p, "Go to Anything", null);
+    const go = group(p, "Go to Anything");
     switchRow(ctx, go, "Show recently used paths", "Folders your panes were in, to change to again", &settings.current.recent_paths_shown, null);
     return p.as(gtk.Widget);
 }
@@ -599,7 +598,7 @@ fn effectsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     // Each is one layer: the terminals aren't drawn over the window's own background.
     const mac = @import("builtin").os.tag == .macos;
-    const see = group(p, "Transparency", if (mac) "Below 100%, the desktop shows through" else "Below 100%, the desktop shows through. Hyprland and KDE blur it; GNOME doesn't");
+    const see = group(p, "Transparency");
     percentRow(ctx, see, "Window", "One layer over the whole window: the sidebar, the board, and behind the panes", &settings.current.window_opacity);
     percentRow(ctx, see, "Terminals", "The panes and the board's columns, laid over the window's layer, so they're frosted more", &settings.current.terminal_opacity);
     // On Linux the desktop does any blurring, so there's nothing for Renux to switch.
@@ -643,9 +642,9 @@ fn themeNames(ctx: *Ctx, list: *gtk.StringList) void {
 /// cursor. Each is none, one that comes with Renux, or the person's own file, which
 /// settings.ini names. Under each, a slider for every number its file marks as adjustable.
 fn shaderRow(ctx: *Ctx, p: *adw.PreferencesPage) void {
-    const g = group(p, "Shaders", "Drawn over the panes, as Ghostty's custom shaders are, and Ghostty's work here too. For your own, put its path in settings.ini as custom-shader or cursor-shader.");
+    const g = group(p, "Shaders");
     inline for (.{ shader_mod.Kind.pane, shader_mod.Kind.cursor }) |kind| {
-        const params = group(p, "", null);
+        const params = group(p, "");
         const ui = ctx.keep(ParamsUi{ .ctx = ctx, .kind = kind, .group = params }) orelse return;
         shaderPicker(ctx, g, ui);
         ui.rebuild();
@@ -828,7 +827,7 @@ fn slotRow(ctx: *Ctx, g: *adw.PreferencesGroup, title: [:0]const u8, field: *[]u
 }
 
 fn customThemes(ctx: *Ctx, p: *adw.PreferencesPage) void {
-    const g = group(p, "Custom Themes", "Your own themes, saved in ~/.config/renux/themes");
+    const g = group(p, "Custom Themes");
     const new_button = rowButton("New Theme");
     g.setHeaderSuffix(new_button.as(gtk.Widget));
     _ = gtk.Button.signals.clicked.connect(new_button, *Ctx, &newTheme, ctx, .{});
@@ -938,12 +937,12 @@ fn rebuildThemes(ctx: *Ctx) void {
 fn themesPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     ctx.theme_checks.clearRetainingCapacity();
-    const look = group(p, "Appearance", null);
+    const look = group(p, "Appearance");
     cards(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, &.{ .scheme_auto, .scheme_light, .scheme_dark }, App.themeChanged);
     switchRow(ctx, look, "Separate light and dark themes", "Follow the system's appearance with a theme for each", &settings.current.theme_follow_system, App.themeChanged);
     slotRow(ctx, look, "Light theme", &settings.current.theme_light);
     slotRow(ctx, look, "Dark theme", &settings.current.theme_dark);
-    const g = group(p, "Terminal Theme", "Renux follows each host's theme unless you pick one here. A theme picked here only colors Renux; your Rex server keeps its own.");
+    const g = group(p, "Terminal Theme");
     themeRow(ctx, g, "Follow host", "", null);
     for (&themes.builtins) |*t| themeRow(ctx, g, t.name, t.name, t);
     if (std.mem.startsWith(u8, settings.current.theme, "file:")) {
@@ -951,7 +950,7 @@ fn themesPage(ctx: *Ctx) *gtk.Widget {
         themeRow(ctx, g, std.fs.path.basename(path), settings.current.theme, null);
     }
     customThemes(ctx, p);
-    const imp = group(p, "Import Theme", null);
+    const imp = group(p, "Import Theme");
     const row = adw.ActionRow.new();
     row.as(adw.PreferencesRow).setTitle("Import a Ghostty theme file");
     row.setSubtitle("It replaces the colors here and in every pane");
@@ -1042,7 +1041,7 @@ fn imported(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaqu
 
 fn terminalPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
-    const g = group(p, "Typography", null);
+    const g = group(p, "Typography");
     sampleRow(ctx, g, .typography);
     fontRows(ctx, g);
     numberRow(ctx, g, "Line height", "Row height as a multiple of the font's own", &settings.current.line_height, 0.8, 2, 0.05, 2, App.fontChanged);
@@ -1051,12 +1050,12 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, g, "Font smoothing", "Off draws glyphs without antialiasing, for pixel fonts", &settings.current.font_smoothing, App.terminalChanged);
     segments(ctx, g, "Bold and italic", settings.BoldItalic, &settings.current.bold_italic, &.{ "Own Faces", "Regular" }, App.terminalChanged);
 
-    const padding = group(p, "Padding", null);
+    const padding = group(p, "Padding");
     numberRow(ctx, padding, "Horizontal padding", "Points left and right of the text", &settings.current.pad_x, 0, 40, 1, 0, App.terminalChanged);
     numberRow(ctx, padding, "Vertical padding", "Points above and below the text", &settings.current.pad_y, 0, 40, 1, 0, App.terminalChanged);
     segments(ctx, padding, "Padding color", settings.PaddingColor, &settings.current.padding_color, &.{ "Terminal", "Theme" }, App.terminalChanged);
 
-    const c = group(p, "Cursor", null);
+    const c = group(p, "Cursor");
     sampleRow(ctx, c, .cursor);
     segments(ctx, c, "Cursor style", settings.CursorStyle, &settings.current.cursor_style, &.{ "Program", "Block", "Bar", "Underline" }, App.redrawAll);
     numberRow(ctx, c, "Bar width", "In pixels, for the bar and underline cursors. The cursor takes the theme's accent color", &settings.current.cursor_width, 1, 6, 0.5, 1, App.redrawAll);
@@ -1065,17 +1064,17 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, c, "Cursor in other panes", "An outline where the cursor is in panes without the keyboard", &settings.current.inactive_cursor, App.redrawAll);
     colorPicker(ctx, c, "Cursor text color", "The character under a block cursor", &settings.current.cursor_text_color, "Default", App.redrawAllPub);
 
-    const sel = group(p, "Selection", null);
+    const sel = group(p, "Selection");
     sampleRow(ctx, sel, .selection);
     colorPicker(ctx, sel, "Background", "Selected text swaps its colors unless one is picked", &settings.current.selection_bg, "Theme", App.redrawAllPub);
     colorPicker(ctx, sel, "Foreground", null, &settings.current.selection_fg, "Theme", App.redrawAllPub);
     switchRow(ctx, sel, "Rounded corners", "Every corner of a selection's outline, so one over several lines reads as one shape", &settings.current.rounded_selection, App.redrawAllPub);
     numberRow(ctx, sel, "Corner radius", "How round those corners are, in points", &settings.current.selection_radius, 1, 16, 1, 0, App.redrawAllPub);
-    const colors = group(p, "Colors and Bell", null);
+    const colors = group(p, "Colors and Bell");
     switchRow(ctx, colors, "Improve text contrast", "Adjust text that would be hard to read against its background", &settings.current.improve_contrast, App.redrawAll);
     switchRow(ctx, colors, "Extended theme palette", "Make colors 16 to 255 from the theme's own colors", &settings.current.extended_palette, App.terminalChanged);
     switchRow(ctx, colors, "Flash on bell", "Briefly light up a pane when its program rings the bell", &settings.current.visual_bell, null);
-    const paste = group(p, "Copy and Paste", null);
+    const paste = group(p, "Copy and Paste");
     switchRow(ctx, paste, "Animation on copy", "A Copied badge on the pane", &settings.current.copy_animation, null);
     switchRow(ctx, paste, "Copy on select", "Selected text goes straight to the clipboard. Programs that handle the mouse themselves, such as Claude Code, copy their own selections", &settings.current.copy_on_select, null);
     switchRow(ctx, paste, "Ask before pasting several lines", "Unless the program knows it's a paste, each line could run as a command", &settings.current.paste_warning, null);
@@ -1208,7 +1207,7 @@ fn fontChanged(ctx: *Ctx) void {
 
 fn shortcutsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
-    const hint_group = group(p, "Key Hints", null);
+    const hint_group = group(p, "Key Hints");
     switchRow(ctx, hint_group, "Show key sequence hints", "After a prefix such as ctrl+a, list the keys that can follow", &settings.current.key_hints, null);
     shortcuts.build(ctx.app, p, &ctx.shortcuts_page);
     return p.as(gtk.Widget);
@@ -1219,14 +1218,14 @@ fn shortcutsPage(ctx: *Ctx) *gtk.Widget {
 fn notificationsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const st = &settings.current;
-    const g = group(p, "Program Activity", "How status from programs and agents is handled");
+    const g = group(p, "Program Activity");
     switchRow(ctx, g, "Show system notifications", "Only while you're looking elsewhere", &st.alerts, null);
     switchRow(ctx, g, "Play sounds", null, &st.sound, null);
-    const which = group(p, "Notify When", null);
+    const which = group(p, "Notify When");
     statusSwitch(ctx, which, .blocked, "Blocked", "A program needs your permission, an answer or a password", &st.alert_blocked);
     statusSwitch(ctx, which, .failed, "Error", "A program failed", &st.alert_error);
     statusSwitch(ctx, which, .done, "Done", "A program finished", &st.alert_done);
-    const sys = group(p, "Terminal Notifications", null);
+    const sys = group(p, "Terminal Notifications");
     switchRow(ctx, sys, "Notifications from programs", "Programs can send notifications with OSC 9 or OSC 777", &st.terminal_notifications, null);
     return p.as(gtk.Widget);
 }
@@ -1237,7 +1236,7 @@ const HostRow = struct { ctx: *Ctx, index: usize };
 
 fn hostsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
-    const g = group(p, "Remote Hosts", "Every host's sessions show in the sidebar, grouped by host.");
+    const g = group(p, "Remote Hosts");
     for (settings.current.hosts.items, 0..) |h, i| {
         const row = adw.ActionRow.new();
         setRowText(row, h.label, h.url);
