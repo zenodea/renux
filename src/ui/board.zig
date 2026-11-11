@@ -462,7 +462,12 @@ pub const Board = struct {
                         name.as(gtk.Widget).addCssClass("board-session");
                         list.append(name.as(gtk.Widget));
                     }
-                    list.append(c.button.as(gtk.Widget));
+                    // A card moving left, as from Done to Idle, is still in the list of the column
+                    // it left, which is laid out after this one; GTK won't add it here until it
+                    // leaves there, and it would end up in neither.
+                    const w = c.button.as(gtk.Widget);
+                    if (w.getParent()) |parent| @as(*gtk.Box, @ptrCast(parent)).remove(w);
+                    list.append(w);
                 }
             }
             for (sorted.items) |c| {
