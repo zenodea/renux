@@ -31,6 +31,9 @@ pub const Settings = struct {
     cursor_width: f64 = 2,
     /// Row height as a multiple of the font's own line height.
     line_height: f64 = 1,
+    /// A Shadertoy-style GLSL file, as Ghostty's custom-shader, that panes are drawn through;
+    /// empty for none.
+    custom_shader: []u8,
     /// Extra pixels between characters; negative brings them closer.
     letter_spacing: f64 = 0,
     /// How opaque the window behind the panes is, from 0.2 to 1.

@@ -611,6 +611,7 @@ pub const App = struct {
         a.window_bg = window_bg.WindowBackground.new().as(gtk.Widget);
         a.window_bg.setVisible(0);
         window_bg.holes = &windowHoles;
+        @import("../terminal/shader.zig").on_error = &shaderError;
         @import("../ui/workspace.zig").on_layout = &cardsPlaced;
         const base = gtk.Overlay.new();
         base.setChild(a.window_bg);
@@ -3802,6 +3803,15 @@ fn windowHoles(background: *gtk.Widget, out: []@import("../ui/window_bg.zig").Ho
     if (a.board.shown()) return 0;
     const ws = a.workspace orelse return 0;
     return ws.cardBounds(background, out);
+}
+
+/// A custom shader that can't be used says why, once, rather than the panes quietly not
+/// changing.
+fn shaderError(message: []const u8) void {
+    const a = mode_app orelse return;
+    const z = gpa.dupeSentinel(u8, message, 0) catch return;
+    defer gpa.free(z);
+    a.toastText(z);
 }
 
 /// The cards moved, so the holes under them move too.

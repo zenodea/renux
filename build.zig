@@ -52,6 +52,15 @@ pub fn build(b: *std.Build) void {
     vt_header.defineCMacro("GHOSTTY_STATIC", "");
     mod.addImport("vtc", vt_header.createModule());
 
+    // OpenGL through libepoxy, for custom shaders.
+    const gl_header = b.addTranslateC(.{
+        .root_source_file = b.path("src/terminal/gl.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.addImport("gl", gl_header.createModule());
+    mod.linkSystemLibrary("epoxy", .{});
+
     const exe = b.addExecutable(.{ .name = "renux", .root_module = mod });
     b.installArtifact(exe);
 

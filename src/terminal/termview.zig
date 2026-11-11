@@ -23,6 +23,7 @@ const boxdraw = @import("boxdraw.zig");
 const links = @import("links.zig");
 const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
+const shader = @import("shader.zig");
 const fonts = @import("fonts.zig");
 
 const gpa = std.heap.c_allocator;
@@ -126,7 +127,27 @@ const Canvas = extern struct {
     }
 
     fn snapshot(self: *Self, sn: *gtk.Snapshot) callconv(.c) void {
-        if (self.view) |v| snapshotTermImpl(v, sn);
+        const v = self.view orelse return;
+        if (!shader.active()) return snapshotTermImpl(v, sn);
+        // Through the custom shader: the pane draws itself aside, and the shader draws that.
+        const own = gtk.Snapshot.new();
+        snapshotTermImpl(v, own);
+        const node = own.freeToNode() orelse return;
+        defer node.unref();
+        const w = self.as(gtk.Widget);
+        if (!shader.drawPane(&v.shader_pane, w, node, w.hasFocus() != 0, sn)) sn.appendNode(node);
+        // A shader that moves with time draws again every frame.
+        if (shader.animated() and v.shader_tick == 0) v.shader_tick = w.addTickCallback(&shaderTick, v, null);
+    }
+
+    fn shaderTick(widget: *gtk.Widget, _: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        if (!shader.animated()) {
+            v.shader_tick = 0;
+            return 0;
+        }
+        widget.queueDraw();
+        return 1;
     }
 
     fn sizeAllocate(self: *Self, width: c_int, height: c_int, _: c_int) callconv(.c) void {
@@ -296,6 +317,10 @@ pub const TermView = struct {
     scroll_target: f64 = 0,
     scroll_velocity: f64 = 0,
     scroll_tick: c_uint = 0,
+    /// The pane's textures for a custom shader, and the tick that redraws it while the shader
+    /// moves with time.
+    shader_pane: shader.Pane = .{},
+    shader_tick: c_uint = 0,
     last_frame_us: i64 = 0,
     last_total: u64 = 0,
     draw_frac: f64 = 0,
@@ -494,6 +519,8 @@ pub const TermView = struct {
             v.widget().removeTickCallback(v.scroll_tick);
             scroll_ticking -= 1;
         }
+        if (v.shader_tick != 0) v.widget().removeTickCallback(v.shader_tick);
+        v.shader_pane.deinit();
         v.canvas.view = null;
         if (blink_view == v) blink_view = null;
         if (v.own_font) |*f| f.deinit();
