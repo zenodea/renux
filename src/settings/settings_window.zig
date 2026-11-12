@@ -528,6 +528,7 @@ fn interfacePage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const window = group(p, "Window");
     switchRow(ctx, window, "Show window on launch", "Off starts Renux hidden; renux --toggle, bound to a desktop shortcut, shows and hides it", &settings.current.show_on_launch, null);
+    switchRow(ctx, window, "Window buttons", "The close, minimize and maximize buttons in the top left corner", &settings.current.window_buttons, App.windowButtonsChanged);
     switchRow(ctx, window, "Unread badge", "The number of panes that need you, on the Dock or the desktop's launcher", &settings.current.unread_badge, null);
     numberRow(ctx, window, "Sidebar text size", "As a multiple of the normal size", &settings.current.sidebar_text_scale, 0.8, 1.4, 0.05, 2, App.applyLook);
 

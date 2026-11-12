@@ -303,6 +303,8 @@ pub const App = struct {
     /// The window's one cursor, as the cursor shader draws it, over every pane.
     cursor_layer: *gtk.Widget = undefined,
     corner: *gtk.Widget = undefined,
+    /// The window's own buttons in the corner, which Settings can take away.
+    corner_controls: *gtk.Widget = undefined,
     /// Full screen mode: only the panes are drawn, with no sidebar, corner or window background.
     bare: bool = false,
     /// Whether the sidebar was showing when full screen mode came on, to put it back after.
@@ -460,6 +462,8 @@ pub const App = struct {
         const controls = gtk.WindowControls.new(.start);
         controls.setDecorationLayout(cornerLayout().ptr);
         controls.as(gtk.Widget).addCssClass("corner-controls");
+        controls.as(gtk.Widget).setVisible(@intFromBool(settings.current.window_buttons));
+        a.corner_controls = controls.as(gtk.Widget);
         corner.append(controls.as(gtk.Widget));
         corner.append(icons.button(.sidebar, "Toggle sidebar", "app.toggle-sidebar").as(gtk.Widget));
         corner.as(gtk.Widget).setHalign(.start);
@@ -3828,6 +3832,15 @@ pub const App = struct {
         };
         for (a.hosts.items) |h| h.workspace.refreshProgramBgs();
         a.redrawAll();
+    }
+
+    /// Shows or hides the window's close, minimize and maximize buttons, for a desktop that
+    /// has its own ways to do those. The corner is then only the sidebar's button, and what
+    /// makes room for the corner follows.
+    pub fn windowButtonsChanged(a: *App) void {
+        a.corner_controls.setVisible(@intFromBool(settings.current.window_buttons));
+        a.setSidebarWidth(a.split.getMaxSidebarWidth());
+        a.cornerChanged();
     }
 
     pub fn headersChanged(a: *App) void {

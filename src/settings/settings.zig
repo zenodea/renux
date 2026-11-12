@@ -85,6 +85,8 @@ pub const Settings = struct {
     remote_colors: bool = false,
     /// The overview shows each session's tabs together under its name.
     overview_by_session: bool = false,
+    /// The close, minimize and maximize buttons in the window's top left corner are shown.
+    window_buttons: bool = true,
     /// A pane's frame takes its program's background color.
     match_program_bg: bool = false,
     rounded_selection: bool = true,
