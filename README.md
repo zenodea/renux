@@ -31,9 +31,13 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   custom GLSL shaders as in Ghostty: ten ship with Renux, from a CRT to a cursor that smears as
   it moves.
 
-| The overview | The agent board |
+| Agent Board | Overview |
 |---|---|
-| ![Six tabs in a grid, each showing its terminals, with a dot for each agent's state](docs/screenshots/overview.png) | ![Agents sorted into four columns by state](docs/screenshots/board.png) |
+| ![Agents sorted into four columns by state](docs/screenshots/board.png) | ![Six tabs in a grid, each showing its terminals, with a dot for each agent's state](docs/screenshots/overview.png) |
+
+| Shaders | Full screen mode |
+|---|---|
+| ![Three panes drawn through the CRT shader, curved and scanlined](docs/screenshots/shaders.png) | ![Only the terminals: one large pane and two stacked beside it, the desktop showing between them](docs/screenshots/fullscreen.png) |
 
 ![The Settings window on its Themes page](docs/screenshots/settings.png)
 
@@ -78,7 +82,8 @@ rex.bind("ctrl+a>shift+f", "client.fullscreen.toggle") -- only the terminals
 
 Both are in the command palette too, and the overview has a button at the foot of the sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
-Escape goes back.
+Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
+goes to it, and `s` groups the tabs by session.
 
 A remote host answers to its own Rex config. For the same keys everywhere, turn on
 Settings > Remote Hosts > Use this computer's keys on remote hosts.
