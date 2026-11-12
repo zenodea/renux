@@ -9,7 +9,7 @@ through libghostty-vt.
 Renux is an independent project, not made by the Rex team. It is early, so expect rough edges,
 and please report them as [issues](https://github.com/zenodea/renux/issues).
 
-![Three panes side by side: a shell, and two coding agents at work](docs/screenshots/panes.png)
+![Renux over a desktop wallpaper: a sidebar of sessions, a shell, and two coding agents at work](docs/screenshots/panes.png)
 
 ## What it does
 
@@ -17,18 +17,23 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   are the same here, in the Rex app and on a phone. Key bindings come from your Rex config.
 - **Fast terminals.** Text is drawn with libghostty-vt, with selection, find, links, box
   drawing, and your own font and theme.
-- **An eye on your agents.** Panes running coding agents show what they are doing. The agent
-  board sorts them into Idle, Running, Attention and Done; the eye in the sidebar lists only
-  agents, with a dot when one needs you.
+- **Every tab at once.** The overview zooms out from the tab you are on to a grid of all your
+  tabs, each drawn as its live terminals. A dot on a tab shows what each agent in it is doing.
+  Pick a tab and it zooms back in.
+- **Only the terminals.** Full screen mode hides the sidebar, the title rows and the window's
+  own background, so the panes fill the window.
+- **Your agents at a glance.** Panes running coding agents show what they are doing, and the
+  agent board sorts them into Idle, Running, Attention and Done.
 - **Several servers.** Connect to more than one Rex server, on this computer or over Tailscale,
-  and be told when one could be updated.
+  and be told when one could be updated. Remote hosts can answer to this computer's keys and
+  keep their own colors.
 - **Made to look at.** Themes, a see-through window with the desktop's blur behind it, and
   custom GLSL shaders as in Ghostty: ten ship with Renux, from a CRT to a cursor that smears as
   it moves.
 
-| The agent board | Only agents in the sidebar |
+| The overview | The agent board |
 |---|---|
-| ![Agents sorted into four columns by state](docs/screenshots/board.png) | ![The sidebar listing each agent with its task and state](docs/screenshots/agents.png) |
+| ![Six tabs in a grid, each showing its terminals, with a dot for each agent's state](docs/screenshots/overview.png) | ![Agents sorted into four columns by state](docs/screenshots/board.png) |
 
 ![The Settings window on its Themes page](docs/screenshots/settings.png)
 
@@ -59,10 +64,24 @@ see [Rex's installation guide](https://www.superlogical.com/rex/docs/linux/insta
    it asks for your Rex server's address.
 
 `renux --toggle` shows or hides the running window, for a desktop shortcut.
-`renux --version` prints the version.
+Settings are kept in `~/.config/renux`.
 
-The program is called `renux`, and its desktop ID is `dev.renux`. Settings are kept in
-`~/.config/renux`.
+## Keys
+
+Key bindings come from your Rex config, so the keys you know work here. Renux adds two actions
+of its own to bind there:
+
+```lua
+rex.bind("ctrl+a>shift+o", "client.overview.toggle")   -- every tab at once
+rex.bind("ctrl+a>shift+f", "client.fullscreen.toggle") -- only the terminals
+```
+
+Both are in the command palette too, and the overview has a button at the foot of the sidebar.
+In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
+Escape goes back.
+
+A remote host answers to its own Rex config. For the same keys everywhere, turn on
+Settings > Remote Hosts > Use this computer's keys on remote hosts.
 
 ## Building
 
@@ -76,30 +95,6 @@ zig build test
 
 The program is `zig-out/bin/renux`. Add `-Ddev` for the development hooks: screenshots, the
 test script and the frame log.
-
-On a Mac with Homebrew, for development, point pkg-config at Homebrew first:
-
-```sh
-export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig
-```
-
-## Layout
-
-| Path | What it holds |
-|---|---|
-| `src/main.zig` | Where the program starts |
-| `src/app/` | The window and its actions, start-up, local server and pairing pages |
-| `src/ui/` | Panes and their cards, the agent board, the activity panel, the palette and other dialogs, find, hover cards |
-| `src/terminal/` | The terminal widget, the terminal model on libghostty-vt, keys, links, fonts |
-| `src/rex/` | The Rex protocol: control connection, output streams, WebSocket, layout model |
-| `src/settings/` | Settings, their window, shortcuts and the theme editor |
-| `src/theme/` | Colors and built-in themes |
-| `src/icons/` | Interface and program icons, and how they are drawn |
-| `src/platform/` | Parts for one operating system only |
-| `src/util/` | Small helpers: JSON, drawing, subprocesses, QR codes |
-| `data/` | What is installed beside the program: desktop file, app icons, fonts, program icons, shaders |
-| `scripts/` | Generators for the icon tables in `src/icons/` |
-| `third_party/ghostty` | Ghostty, for its terminal library |
 
 ## License
 

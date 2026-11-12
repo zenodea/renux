@@ -17,6 +17,7 @@
     <ul>
       <li>Several hosts side by side, found over Tailscale or added by address</li>
       <li>Splits, floating layers, tabs and a command palette, driven by Rex's own actions</li>
+      <li>An overview of every tab at once, and a full screen mode with only the terminals</li>
       <li>An activity panel and notifications for agents that need you</li>
       <li>Themes that follow the host or the system, and your own custom themes</li>
       <li>A see-through window, and custom shaders over the panes and the cursor</li>
