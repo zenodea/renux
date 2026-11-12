@@ -309,6 +309,17 @@ pub fn setKeyMode(name: []const u8) void {
 var chord_keys: [4][40]u8 = undefined;
 var chord_lens: [4]usize = .{ 0, 0, 0, 0 };
 var chord_len: usize = 0;
+
+/// Whether the first keys of a binding have been pressed and the rest are awaited.
+pub fn chordPending() bool {
+    return chord_len > 0;
+}
+/// Whether a key is the first of one of these bindings: a prefix, or a key bound by itself.
+pub fn beginsBinding(binds: []const Binding, name: []const u8) bool {
+    for (binds) |b| if (b.keys.len > 0 and keys.sameKey(b.keys[0], name)) return true;
+    return false;
+}
+
 /// Told when a sequence starts or ends, to show what's been typed.
 pub var on_chord_changed: ?*const fn (pending: []const u8) void = null;
 

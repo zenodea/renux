@@ -27,6 +27,10 @@ const window_bg = @import("window_bg.zig");
 
 const gpa = std.heap.c_allocator;
 
+/// Set by the overview: whether one of its previews shows a pane, so the window leaves that
+/// pane's terminal alone when it stops showing the pane itself.
+pub var previewed: ?*const fn (server: *Server, block_id: []const u8) bool = null;
+
 /// Space between pane cards; Tight packs them edge to edge with one line between.
 pub var gap: f64 = 8;
 pub var tight = false;
@@ -124,6 +128,10 @@ pub const Workspace = struct {
     }
 
     bg_idle: c_uint = 0,
+    /// Set for a small copy of a tab in the overview, to the workspace of the window itself.
+    /// A preview takes no keyboard, tells the server no sizes, and leaves alone the terminals
+    /// of panes the window still shows.
+    preview_of: ?*Workspace = null,
     /// The colors of frames that match their programs, and the text last loaded into it.
     bg_css: ?*gtk.CssProvider = null,
     bg_css_text: std.ArrayList(u8) = .empty,
@@ -245,6 +253,14 @@ pub const Workspace = struct {
         _ = gtk.EventControllerMotion.signals.motion.connect(motion, *Workspace, &hover, ws, .{});
         _ = gtk.EventControllerMotion.signals.leave.connect(motion, *Workspace, &hoverLeft, ws, .{});
         root.addController(motion.as(gtk.EventController));
+        return ws;
+    }
+
+    /// A preview of one tab, for the overview: see `preview_of`.
+    pub fn createPreview(server: *Server, main: *Workspace) !*Workspace {
+        const ws = try create(server);
+        ws.preview_of = main;
+        ws.root.setCanTarget(0);
         return ws;
     }
 
@@ -593,7 +609,7 @@ pub const Workspace = struct {
         ws.leaving.append(gpa, .{ .frame = p.frame, .cur = p.cur, .size = .{ @round(r[2]), @round(r[3]) }, .alpha = p.alpha, .block_id = p.block_id, .to_layer = to_layer, .face = face, .from_w = p.cur[2] }) catch {
             if (to_layer) |t| gpa.free(t);
             p.frame.unparent();
-            ws.server.parkTerminal(p.block_id);
+            if (!ws.stillShown(p.block_id)) ws.server.parkTerminal(p.block_id);
             gpa.free(p.block_id);
             return;
         };
@@ -608,13 +624,20 @@ pub const Workspace = struct {
             gpa.free(t);
         }
         l.frame.unparent();
-        if (ws.paneOf(l.block_id) == null) ws.server.parkTerminal(l.block_id);
+        if (ws.paneOf(l.block_id) == null and !ws.stillShown(l.block_id)) ws.server.parkTerminal(l.block_id);
         gpa.free(l.block_id);
+    }
+
+    /// Whether a pane leaving this workspace is still on screen elsewhere, in the window itself
+    /// or in a preview of it, which then goes on using its terminal.
+    fn stillShown(ws: *Workspace, block_id: []const u8) bool {
+        if (ws.preview_of) |main| return main.isShown(block_id);
+        return if (previewed) |shows| shows(ws.server, block_id) else false;
     }
 
     fn drop(ws: *Workspace, p: Pane) void {
         p.frame.unparent();
-        ws.server.parkTerminal(p.block_id);
+        if (!ws.stillShown(p.block_id)) ws.server.parkTerminal(p.block_id);
         gpa.free(p.block_id);
         gpa.free(p.layer_id);
     }
@@ -660,6 +683,8 @@ pub const Workspace = struct {
             return;
         };
         const tv = TermView.create(ws.server, session_id, block_id) catch return;
+        // A preview is drawn small; its size is no size for the program to hear about.
+        if (ws.preview_of != null) tv.freeze();
         tv.floating = floating;
         tv.on_bg = .{ .ctx = ws, .f = programBg };
         tv.on_focus = .{ .ctx = ws, .f = clicked };
@@ -865,6 +890,7 @@ pub const Workspace = struct {
     /// so the cursor that blinks is the one that types. Done a moment later, once a new pane
     /// is on screen. A text field, menu or dialog that has the keyboard keeps it.
     fn syncKeyboard(ws: *Workspace) void {
+        if (ws.preview_of != null) return;
         if (ws.keyboard_idle == 0) ws.keyboard_idle = glib.idleAdd(&keyboardLater, ws);
     }
 

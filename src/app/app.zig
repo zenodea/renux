@@ -195,6 +195,18 @@ const css =
     \\.hint-desc { font-size: 0.92em; }
     \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
     \\.connect-box { margin: 0 24px; }
+    \\.overview-name { font-size: 0.9em; font-weight: 600; color: @window_fg_color; text-shadow: 0 1px 4px alpha(black, 0.7); }
+    \\.overview-dots { background-color: alpha(black, 0.38); border-radius: 99px; padding: 4px 6px; }
+    \\.overview-dot { min-width: 7px; min-height: 7px; border-radius: 99px; background-color: alpha(white, 0.32); }
+    \\.overview-dot.working { background-color: #5aa9ff; }
+    \\.overview-dot.blocked { background-color: #ffa424; }
+    \\.overview-dot.failed { background-color: #ff5a52; }
+    \\.overview-dot.done { background-color: #4cc76a; }
+    \\.overview-host { background-color: alpha(black, 0.38); border-radius: 99px; padding: 1px 9px; font-size: 0.75em; font-weight: 600; color: alpha(white, 0.82); }
+    \\.overview-blank { background-color: alpha(@view_bg_color, 0.7); border-radius: 6px; box-shadow: inset 0 0 0 1px @renux_stroke_subtle; }
+    \\.overview-ring { border: 2px solid @accent_bg_color; border-radius: 8px; }
+    \\.overview-button { padding: 4px 16px; font-size: 0.9em; }
+    \\window.renux.bare .content .workspace, window.renux.bare .content.alone .workspace { margin: 0; }
 ;
 
 const Row = struct { host: *Host, session_id: []u8, window_id: []u8, block_id: []u8 = &.{}, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
@@ -287,6 +299,10 @@ pub const App = struct {
     /// The window's one cursor, as the cursor shader draws it, over every pane.
     cursor_layer: *gtk.Widget = undefined,
     corner: *gtk.Widget = undefined,
+    /// Full screen mode: only the panes are drawn, with no sidebar, corner or window background.
+    bare: bool = false,
+    /// Whether the sidebar was showing when full screen mode came on, to put it back after.
+    bare_sidebar: bool = true,
     corner_tick: c_uint = 0,
     corner_until: i64 = 0,
     stack: *gtk.Stack = undefined,
@@ -314,6 +330,8 @@ pub const App = struct {
     /// Session rows show only their menu, which then holds what their other buttons did.
     narrow_rows: bool = false,
     board: *@import("../ui/board.zig").Board = undefined,
+    /// Every tab at once, small, over the panes while it is open.
+    overview: *@import("../ui/overview.zig").Overview = undefined,
     board_button: *gtk.ToggleButton = undefined,
     eye_button: *gtk.ToggleButton = undefined,
     eye_dot: *gtk.Widget = undefined,
@@ -506,6 +524,7 @@ pub const App = struct {
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
         footer.append(a.board_button.as(gtk.Widget));
+        footer.append(icons.button(.overview, "Overview of every tab", "app.overview").as(gtk.Widget));
         a.foot_session = icons.button(.new_session, "New session", "app.new-session").as(gtk.Widget);
         footer.append(a.foot_session);
         a.foot_host = icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget);
@@ -562,6 +581,8 @@ pub const App = struct {
         const body = gtk.Overlay.new();
         body.setChild(a.stack.as(gtk.Widget));
         body.addOverlay(a.board.widget());
+        a.overview = @import("../ui/overview.zig").Overview.create(a);
+        body.addOverlay(a.overview.widget());
         body.as(gtk.Widget).setVexpand(1);
         card.append(body.as(gtk.Widget));
         a.card = card.as(gtk.Widget);
@@ -833,6 +854,8 @@ pub const App = struct {
 
     /// Shows the agent board over the panes, or goes back to them.
     pub fn showBoard(a: *App, on: bool) void {
+        // The board and going to a pane both leave the overview.
+        a.overview.hideNow();
         if (on == a.board.shown()) return;
         a.board.show(on);
         // The board is see-through when the window is, so the panes under it are hidden while
@@ -931,7 +954,28 @@ pub const App = struct {
     /// A key pressed while the keyboard isn't in the highlighted pane goes to that pane, which
     /// takes the keyboard back, so a prefix such as ctrl+a always works. Text fields, menus and
     /// dialogs keep their keys.
+    /// Whether a key is the first of one of Rex's bindings for the host on screen.
+    fn beginsBinding(a: *App, keyval: c_uint, mods: u4) bool {
+        const s = a.server orelse return false;
+        var buf: [40]u8 = undefined;
+        const name = keys.rexName(&buf, keyval, gdk.keyvalToUnicode(keyval), mods) orelse return false;
+        return termview.beginsBinding(s.keyBindings(), name);
+    }
+
     fn strayKey(ctl: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: gdk.ModifierType, a: *App) callconv(.c) c_int {
+        // The overview is over the panes: arrows move between its tabs, Enter goes to one and
+        // Escape goes back. Nothing else is typed into a pane that can't be seen, except Rex's
+        // own keys (one that starts a binding, and what follows a prefix), so the key that
+        // opened it closes it too.
+        if (a.overview.shown()) {
+            const held = keys.modsFromGdk(@bitCast(state));
+            const in_dialog = if (a.window.as(gtk.Root).getFocus()) |f| f.getAncestor(gtk.Popover.getGObjectType()) != null or f.getAncestor(adw.Dialog.getGObjectType()) != null else false;
+            if (!in_dialog) {
+                const chord = termview.chordPending();
+                if (!chord and a.overview.key(keyval, held)) return 1;
+                if (!keys.isModifier(keyval) and !chord and !a.beginsBinding(keyval, held)) return 1;
+            }
+        }
         const ws = a.workspace orelse return 0;
         const tv = ws.focusedView() orelse return 0;
         const pane = tv.widget();
@@ -1005,6 +1049,7 @@ pub const App = struct {
 
     /// Where the corner's buttons end, in window coordinates.
     fn cornerRight(a: *App) f64 {
+        if (a.bare) return 0;
         const width: f64 = @floatFromInt(a.corner.getWidth());
         const root = a.corner.getRoot() orelse return width;
         var x: f64 = 0;
@@ -1144,6 +1189,7 @@ pub const App = struct {
         h.server.observer = null;
         h.server.performer = null;
         const root = h.workspace.root;
+        a.overview.dropHost(h);
         h.workspace.destroy();
         a.stack.remove(root);
         h.server.destroy();
@@ -1243,6 +1289,7 @@ pub const App = struct {
             .sessions => {
                 if (here) _ = a.ensureSelection();
                 a.rebuildSidebar();
+                a.overview.changed();
             },
             .view => {
                 // Picking a session shows it, so it isn't shown a second time below.
@@ -1250,6 +1297,7 @@ pub const App = struct {
                 a.rebuildSidebar();
                 a.activity.changed();
                 a.board.changed();
+                a.overview.changed();
                 a.updateEye();
                 if (here) if (a.session_id) |sel| if (session_id) |sid| if (std.mem.eql(u8, sel, sid)) {
                     if (!shown) a.showSelected();
@@ -1262,6 +1310,7 @@ pub const App = struct {
                 // What happens in the pane being looked at is seen as it happens.
                 if (h.server.blockInfo(block)) |info| if (info.attention and a.lookingAt(h, block)) h.server.clearAttention(block);
                 h.workspace.blockChanged(block);
+                a.overview.blockChanged(h, block);
                 a.refreshRows();
                 a.activity.changed();
                 a.board.changed();
@@ -1599,12 +1648,7 @@ pub const App = struct {
 
     fn showWindowAction(a: *App, session_id: []const u8, window_id: []const u8) void {
         a.showBoard(false);
-        const s = a.server orelse return;
-        a.auto_picked = false;
-        setSlot(&a.session_id, session_id);
-        setSlot(&a.window_id, window_id);
-        s.focusWindow(session_id, window_id);
-        a.showSelected();
+        a.openTab(a.current orelse return, session_id, window_id);
         if (a.workspace) |w| w.grabFocus();
     }
 
@@ -2437,10 +2481,7 @@ pub const App = struct {
         // An agent's row goes to its very pane.
         if (r.block_id.len > 0) return a.jumpTo(r.host, r.session_id, r.window_id, r.block_id);
         if (r.window_id.len == 0) return a.showSession(r.session_id);
-        setSlot(&a.session_id, r.session_id);
-        setSlot(&a.window_id, r.window_id);
-        if (a.server) |s| s.focusWindow(r.session_id, r.window_id);
-        a.showSelected();
+        a.openTab(r.host, r.session_id, r.window_id);
         if (a.workspace) |w| w.grabFocus();
     }
 
@@ -2495,10 +2536,9 @@ pub const App = struct {
             return true;
         }
         if (std.mem.startsWith(u8, action, "client.palette.")) return a.did(openPalette);
-        if (std.mem.eql(u8, action, "client.sidebar.toggle")) {
-            a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
-            return true;
-        }
+        if (std.mem.eql(u8, action, "client.sidebar.toggle")) return a.did(toggleSidebar);
+        if (std.mem.eql(u8, action, "client.fullscreen.toggle")) return a.did(toggleBare);
+        if (std.mem.eql(u8, action, "client.overview.toggle")) return a.did(toggleOverview);
         if (std.mem.eql(u8, action, "client.tab.rename")) {
             const sid = a.session_id orelse return false;
             const w = a.shownWindow() orelse return false;
@@ -3227,6 +3267,8 @@ pub const App = struct {
             .{ "retry", retry, "" },
             .{ "change-server", changeServer, "" },
             .{ "toggle-sidebar", toggleSidebar, "" },
+            .{ "full-screen", toggleBare, "" },
+            .{ "overview", toggleOverview, "" },
             .{ "palette", openPalette, "" },
             .{ "settings", openSettings, "" },
             .{ "add-host", addHostDialog, "" },
@@ -3702,7 +3744,7 @@ pub const App = struct {
             a.look_css = p;
             break :blk p;
         };
-        var buf: [1024]u8 = undefined;
+        var buf: [2048]u8 = undefined;
         const see_through = prefs.window_opacity < 1 or prefs.terminal_opacity < 1;
         // A Mac window has round corners. On Linux the desktop decides, as Hyprland does with
         // its own rounding, so the window itself stays square.
@@ -3710,7 +3752,7 @@ pub const App = struct {
         // While see-through, one even background lies under the whole window (`window_bg.zig`):
         // the window, sidebar and board draw none of their own, so they all show that one layer,
         // and each pane lays its own over it, so the panes are frosted more than the window.
-        a.window_bg.setVisible(@intFromBool(see_through));
+        a.window_bg.setVisible(@intFromBool(see_through and !a.bare));
         // Floating cards are cut out of the tiled ones under them, so a tiled pane's text doesn't
         // show through a floating one.
         @import("../ui/workspace.zig").cut_floating = see_through;
@@ -3753,6 +3795,13 @@ pub const App = struct {
             \\.pane-card.focused { box-shadow: none; }
             \\.pane-card.floating.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
         ;
+        // Full screen mode: the window draws nothing behind the panes. The board, which lies over
+        // them, has no window background to show then, so it gets the window's color itself.
+        var bbuf: [256]u8 = undefined;
+        const bare_text = if (!a.bare) "" else std.fmt.bufPrint(&bbuf,
+            \\window.renux {{ background-color: transparent; }}
+            \\window.renux .board {{ background-color: alpha(@renux_shell, {d:.2}); }}
+        , .{prefs.window_opacity}) catch "";
         var sbuf: [128]u8 = undefined;
         const sidebar_text = std.fmt.bufPrint(&sbuf, ".renux-sidebar list {{ font-size: {d:.2}em; }}", .{prefs.sidebar_text_scale}) catch "";
         // After the highlight's own rules, which these must win over: a card on its way to
@@ -3766,7 +3815,7 @@ pub const App = struct {
             \\.pane-card.floating.to-tray, .pane-card.floating.to-tray.focused { box-shadow: 0 2px 10px alpha(black, 0.3); transition: box-shadow 240ms ease-out; }
             \\.layer-card.to-tray, .layer-card.to-tray.focused { border-color: transparent; transition: none; }
         ;
-        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}{s}\n{s}\n{s}\n{s}\n{s}", .{ no_divider, corners, look_text, highlight, sidebar_text, to_tray }, 0) catch return;
+        const css_text = std.fmt.allocPrintSentinel(gpa, "{s}{s}\n{s}\n{s}\n{s}\n{s}\n{s}", .{ no_divider, corners, look_text, bare_text, highlight, sidebar_text, to_tray }, 0) catch return;
         defer gpa.free(css_text);
         provider.loadFromString(css_text.ptr);
         if (builtin.os.tag == .macos) if (a.window.as(gtk.Native).getSurface()) |surface| {
@@ -3777,8 +3826,10 @@ pub const App = struct {
     }
 
     pub fn headersChanged(a: *App) void {
-        @import("../ui/workspace.zig").show_headers = settings.current.show_headers;
+        // Full screen mode is the terminals and nothing else, so the title rows go too.
+        @import("../ui/workspace.zig").show_headers = settings.current.show_headers and !a.bare;
         for (a.hosts.items) |h| h.workspace.headersChanged();
+        a.overview.headersChanged();
         a.markHeaders();
     }
 
@@ -3865,7 +3916,63 @@ pub const App = struct {
     }
 
     fn toggleSidebar(a: *App) void {
+        // Asking for the sidebar in full screen mode leaves the mode, with the sidebar showing.
+        if (a.bare) {
+            a.bare_sidebar = true;
+            return a.setBare(false);
+        }
         a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
+    }
+
+    fn toggleBare(a: *App) void {
+        a.setBare(!a.bare);
+    }
+
+    fn toggleOverview(a: *App) void {
+        a.overview.toggle();
+    }
+
+    /// The tab the window shows now.
+    pub const Tab = struct { host: *Host, session_id: []const u8, window_id: []const u8 };
+
+    pub fn shownTab(a: *App) ?Tab {
+        const h = a.current orelse return null;
+        const sid = a.session_id orelse return null;
+        const w = a.shownWindow() orelse return null;
+        return .{ .host = h, .session_id = sid, .window_id = w.id };
+    }
+
+    /// Shows a tab of any session on any host, as picking its row in the sidebar does.
+    pub fn openTab(a: *App, h: *Host, session_id: []const u8, window_id: []const u8) void {
+        a.selectHost(h);
+        a.auto_picked = false;
+        setSlot(&a.session_id, session_id);
+        setSlot(&a.window_id, window_id);
+        if (a.server) |s| s.focusWindow(session_id, window_id);
+        a.showSelected();
+    }
+
+    /// Full screen mode: the sidebar, the window's corner, the panes' title rows and the
+    /// background around the panes go away, so the terminals fill the window and only the
+    /// desktop shows between them. The
+    /// window keeps its size; making it cover the screen is left to the desktop.
+    pub fn setBare(a: *App, on: bool) void {
+        if (a.bare == on) return;
+        a.bare = on;
+        const w = a.window.as(gtk.Widget);
+        if (on) {
+            a.bare_sidebar = a.split.getShowSidebar() != 0;
+            a.split.setShowSidebar(0);
+            w.addCssClass("bare");
+        } else {
+            w.removeCssClass("bare");
+            a.split.setShowSidebar(@intFromBool(a.bare_sidebar));
+        }
+        a.corner.setVisible(@intFromBool(!on));
+        a.headersChanged();
+        a.overview.bareChanged();
+        a.applyLook();
+        a.cornerChanged();
     }
 
     fn changeServer(a: *App) void {
@@ -3897,7 +4004,7 @@ var mode_app: ?*App = null;
 /// The pane that has the window's one cursor: the one with the keyboard, while panes show.
 fn cursorPane() ?*termview.TermView {
     const a = mode_app orelse return null;
-    if (a.board.shown()) return null;
+    if (a.board.shown() or a.overview.shown()) return null;
     const ws = a.workspace orelse return null;
     return ws.focusedView();
 }
@@ -4038,19 +4145,20 @@ pub fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8,
     };
     var name_buf: [64]u8 = undefined;
     const known = [_][2][]const u8{
-        .{ "pane.split", "Split" },                        .{ "pane.focus", "Focus" },
-        .{ "pane.resize", "Resize" },                      .{ "pane.focus_next", "Next pane" },
-        .{ "pane.focus_previous", "Previous pane" },       .{ "pane.close", "Close pane" },
-        .{ "pane.zoom", "Zoom pane" },                     .{ "pane.balance", "Balance panes" },
-        .{ "pane.float", "Float or dock" },                .{ "pane.send_key", "Send" },
-        .{ "client.tab.new", "New tab" },                  .{ "client.tab.next", "Next tab" },
-        .{ "client.tab.previous", "Previous tab" },        .{ "client.tab.rename", "Rename tab" },
-        .{ "client.tab.close", "Close tab" },              .{ "client.tab.goto", "Tab" },
-        .{ "client.find.open", "Find" },                   .{ "client.mode.enter", "Mode" },
-        .{ "client.config.reload", "Reload config" },      .{ "client.sidebar.toggle", "Sidebar" },
-        .{ "client.sidebar.activity.toggle", "Activity" }, .{ "client.palette.toggle", "Commands" },
-        .{ "session.new", "New session" },                 .{ "session.switch", "Switch session" },
-        .{ "session.rename", "Rename session" },           .{ "session.next", "Next session" },
+        .{ "pane.split", "Split" },                          .{ "pane.focus", "Focus" },
+        .{ "pane.resize", "Resize" },                        .{ "pane.focus_next", "Next pane" },
+        .{ "pane.focus_previous", "Previous pane" },         .{ "pane.close", "Close pane" },
+        .{ "pane.zoom", "Zoom pane" },                       .{ "pane.balance", "Balance panes" },
+        .{ "pane.float", "Float or dock" },                  .{ "pane.send_key", "Send" },
+        .{ "client.tab.new", "New tab" },                    .{ "client.tab.next", "Next tab" },
+        .{ "client.tab.previous", "Previous tab" },          .{ "client.tab.rename", "Rename tab" },
+        .{ "client.tab.close", "Close tab" },                .{ "client.tab.goto", "Tab" },
+        .{ "client.find.open", "Find" },                     .{ "client.mode.enter", "Mode" },
+        .{ "client.config.reload", "Reload config" },        .{ "client.sidebar.toggle", "Sidebar" },
+        .{ "client.fullscreen.toggle", "Full screen mode" }, .{ "client.overview.toggle", "Overview" },
+        .{ "client.sidebar.activity.toggle", "Activity" },   .{ "client.palette.toggle", "Commands" },
+        .{ "session.new", "New session" },                   .{ "session.switch", "Switch session" },
+        .{ "session.rename", "Rename session" },             .{ "session.next", "Next session" },
         .{ "session.previous", "Previous session" },
     };
     if (title.len == 0) for (known) |k| if (std.mem.eql(u8, k[0], action)) {
@@ -4360,6 +4468,14 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             // A Rex action by name, as a key binding would run it: rex pane.go_to
             const name = it.next() orelse continue;
             if (a.current) |h| _ = App.perform(h, name, null, null);
+            continue;
+        }
+        if (std.mem.eql(u8, cmd, "overview-key")) {
+            // Keys as the open overview hears them: overview-key right enter
+            const named = [_]struct { []const u8, c_uint }{ .{ "left", 0xff51 }, .{ "up", 0xff52 }, .{ "right", 0xff53 }, .{ "down", 0xff54 }, .{ "enter", 0xff0d }, .{ "escape", 0xff1b } };
+            while (it.next()) |name| for (named) |n| {
+                if (std.mem.eql(u8, n[0], name)) _ = a.overview.key(n[1], 0);
+            };
             continue;
         }
         if (std.mem.eql(u8, cmd, "action")) {
