@@ -2056,7 +2056,7 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
     x = 0;
     while (x < f.cols) {
         const cl = f.cell(x, y);
-        if (cl.cp == 0 or cl.cp == ' ' or cl.flags.spacer or cl.flags.invisible) {
+        if (cl.cp == 0 or cl.cp == ' ' or cl.cp == term_mod.image_placeholder or cl.flags.spacer or cl.flags.invisible) {
             x += 1;
             continue;
         }

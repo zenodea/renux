@@ -32,6 +32,12 @@ pub const Cell = struct {
     bg: u32 = 0,
 };
 
+/// The character a program fills cells with to say "an image goes here" (Kitty's Unicode
+/// placeholders, as image.nvim and yazi use inside tmux and the like). The image itself comes
+/// with the others in `images`; the character and the marks on it, which say which part of
+/// the image the cell shows, are never drawn as text.
+pub const image_placeholder: u32 = 0x10EEEE;
+
 /// A Kitty graphics image on screen: which image, where, how big, and which part of it.
 pub const Image = struct {
     id: u32 = 0,
