@@ -257,8 +257,14 @@ pub const Host = struct {
     page: [:0]u8,
     /// Set for a host from $RENUX_SERVER, which isn't saved.
     temporary: bool = false,
+
     /// Its number among every host this run, which no later host shares.
     serial: usize = 0,
+
+    /// Whether the host is another computer: anything not reached through a socket here.
+    pub fn remote(h: *const Host) bool {
+        return !std.mem.startsWith(u8, h.server.url, "unix://");
+    }
 };
 
 /// A host as a dialog remembers it. The host may be removed while the dialog is open, so the
@@ -1088,9 +1094,35 @@ pub const App = struct {
         s.performer = .{ .ctx = h, .perform = perform };
         _ = a.stack.addNamed(ws.root, h.page.ptr);
         a.hosts.appendAssumeCapacity(h);
+        a.remoteOptionsChanged();
         if (a.current == null) a.selectHost(h);
         a.rebuildSidebar();
         return h;
+    }
+
+    /// Applies the two choices about remote hosts. Keys: each host's panes answer to their own
+    /// Rex config, or, with "Use this computer's keys on remote hosts" on, to the config of
+    /// the server on this computer. Colors: a remote host's panes take the theme picked here,
+    /// or, with "Use each remote host's own colors" on, that host's.
+    pub fn remoteOptionsChanged(a: *App) void {
+        var here: ?*Server = null;
+        if (settings.current.local_keys) for (a.hosts.items) |h| {
+            if (here == null and !h.remote()) here = h.server;
+        };
+        var recolor = false;
+        for (a.hosts.items) |h| {
+            h.server.keys_from = if (here != null and here.? != h.server) here else null;
+            const own = settings.current.remote_colors and h.remote();
+            if (own == h.server.own_colors) continue;
+            h.server.own_colors = own;
+            recolor = true;
+            var it = h.server.streams.valueIterator();
+            while (it.next()) |st| st.*.hostColorsChanged();
+        }
+        if (recolor) {
+            a.theme_for = null;
+            a.applyTheme();
+        }
     }
 
     pub fn removeHost(a: *App, h: *Host) void {
@@ -1099,6 +1131,7 @@ pub const App = struct {
             break;
         };
         if (a.filter == h) a.filter = null;
+        a.remoteOptionsChanged();
         // Nothing may still point at the host once it is freed: the activity panel's rows and
         // any open palette, Go to Anything or folder browser let go of it first.
         a.activity.hostRemoved();
@@ -1261,8 +1294,7 @@ pub const App = struct {
 
     /// Colors the whole window from the host's terminal theme, once it is known.
     pub fn applyTheme(a: *App) void {
-        const host = if (a.server) |s| s.host_colors else null;
-        const colors = themes.active orelse host;
+        const colors = if (a.server) |s| s.windowColors() else themes.active;
         if (a.theme_css != null) {
             if (colors == null) return;
             if (a.theme_for) |old| if (std.meta.eql(old, colors.?)) return;
@@ -4069,7 +4101,7 @@ fn chordChanged(pending: []const u8) void {
     const a = mode_app orelse return;
     var items: std.ArrayList(termview.Hint) = .empty;
     defer items.deinit(gpa);
-    if (a.server) |s| termview.nextKeys(s.bindings, &items);
+    if (a.server) |s| termview.nextKeys(s.keyBindings(), &items);
     sortHints(items.items);
     showHints(a, items.items);
     if (pending.len == 0) {
@@ -4098,7 +4130,7 @@ fn modeChanged() void {
     // A key mode's own keys, such as h j k l to resize.
     var items: std.ArrayList(termview.Hint) = .empty;
     defer items.deinit(gpa);
-    if (a.server) |s| for (s.mode_bindings) |b| if (std.mem.eql(u8, b.mode, mode)) {
+    if (a.server) |s| for (s.modeBindings()) |b| if (std.mem.eql(u8, b.mode, mode)) {
         items.append(gpa, .{ .key = b.keys, .action = b.action, .args = b.args, .more = false }) catch break;
     };
     showHints(a, items.items);

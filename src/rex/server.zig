@@ -152,6 +152,12 @@ pub const Server = struct {
     bindings: []Binding = &.{},
     /// The config's keys as the server sent them.
     config_bindings: []Binding = &.{},
+    /// Another server whose keys this one's panes use in place of its own: the server on this
+    /// computer, for a remote host, when the person wants the same keys everywhere.
+    keys_from: ?*Server = null,
+    /// This server's panes, and the window while it shows them, take the host's own colors
+    /// over the theme picked in Settings: set for a remote host when the person asks for it.
+    own_colors: bool = false,
     overrides_arena: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(std.heap.c_allocator),
     hosts_arena: std.heap.ArenaAllocator = .init(gpa),
     /// The other hosts this server knows, from the last hosts.list.
@@ -1527,6 +1533,25 @@ pub const Server = struct {
         setStr(&s.platform, json.str(payload, "platform"));
         s.notify(.state, null);
         @import("updates.zig").check(s.rex_version);
+    }
+
+    /// The colors for the window while it shows this server: the theme picked in Settings, or
+    /// the host's own where those come first or no theme is picked.
+    pub fn windowColors(s: *Server) ?stream_mod.Colors {
+        return stream_mod.chooseColors(s.own_colors, @import("../theme/themes.zig").active, s.host_colors);
+    }
+
+    /// The keys a pane on this server answers to: this server's own, or those of the server
+    /// it takes its keys from once that one's are known.
+    pub fn keyBindings(s: *Server) []Binding {
+        if (s.keys_from) |other| if (other.isLive() and other.bindings.len > 0) return other.bindings;
+        return s.bindings;
+    }
+
+    /// The keys of the key modes, such as resize, from the same place as `keyBindings`.
+    pub fn modeBindings(s: *Server) []ModeBinding {
+        if (s.keys_from) |other| if (other.isLive() and other.bindings.len > 0) return other.mode_bindings;
+        return s.mode_bindings;
     }
 
     pub fn fetchKeymap(s: *Server) void {

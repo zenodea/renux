@@ -85,6 +85,12 @@ pub const Listener = struct {
     changed: *const fn (ctx: *anyopaque) void,
 };
 
+/// The colors to use where there may be both a theme picked in Settings and the host's own:
+/// the picked theme, or the host's first when `own_first`. Whichever is missing gives way.
+pub fn chooseColors(own_first: bool, picked: ?Colors, own: ?Colors) ?Colors {
+    return if (own_first) own orelse picked else picked orelse own;
+}
+
 pub const Stream = struct {
     server: *Server,
     session_id: []u8,
@@ -164,7 +170,7 @@ pub const Stream = struct {
     fn applyColors(s: *Stream) void {
         const t = s.term orelse return;
         const theme = @import("../theme/theme.zig");
-        const c = @import("../theme/themes.zig").active orelse s.theme orelse s.server.host_colors orelse Colors{};
+        const c = chooseColors(s.server.own_colors, @import("../theme/themes.zig").active, s.theme orelse s.server.host_colors) orelse Colors{};
         const fg = if (c.fg != 0) c.fg else theme.default_fg;
         const bg = if (c.bg != 0) c.bg else theme.default_bg;
         // Colors 16 to 255 can be made from the theme's own 16, so they belong to it.
@@ -512,6 +518,17 @@ test "parser splits snapshot, output and messages across chunks" {
     try std.testing.expectEqualStrings("hello \x1b[1mworld!", sink.output.items);
     try std.testing.expectEqual(@as(usize, 2), sink.messages);
     try std.testing.expectEqualStrings("theme", sink.last_type[0..5]);
+}
+
+test "a host's own colors come first only where asked for" {
+    const picked: Colors = .{ .bg = 0x111111 };
+    const own: Colors = .{ .bg = 0xeeeeee };
+    try std.testing.expectEqual(@as(u32, 0x111111), chooseColors(false, picked, own).?.bg);
+    try std.testing.expectEqual(@as(u32, 0xeeeeee), chooseColors(true, picked, own).?.bg);
+    // Whichever is missing gives way to the other.
+    try std.testing.expectEqual(@as(u32, 0x111111), chooseColors(true, picked, null).?.bg);
+    try std.testing.expectEqual(@as(u32, 0xeeeeee), chooseColors(false, null, own).?.bg);
+    try std.testing.expect(chooseColors(true, null, null) == null);
 }
 
 test "theme colors" {

@@ -47,7 +47,7 @@ fn overridden(action: []const u8, args: []const u8) ?settings.Shortcut {
 /// The keys an action has now, such as "⌃A -", joined when it has several.
 fn keysText(s: *Server, buf: []u8, action: []const u8, args: []const u8) [:0]const u8 {
     var n: usize = 0;
-    for (s.bindings) |b| {
+    for (s.keyBindings()) |b| {
         if (!std.mem.eql(u8, b.action, action) or !std.mem.eql(u8, b.args orelse "", args)) continue;
         if (n > 0 and n + 2 < buf.len) {
             @memcpy(buf[n .. n + 2], ", ");

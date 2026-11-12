@@ -78,6 +78,11 @@ pub const Settings = struct {
     highlight_color: u32 = 0,
     /// Splits share space evenly after a pane comes or goes.
     autobalance: bool = false,
+    /// Panes on remote hosts answer to the keys of the Rex config on this computer, not to
+    /// their own host's.
+    local_keys: bool = false,
+    /// Panes on remote hosts take their host's terminal colors, not the theme picked here.
+    remote_colors: bool = false,
     /// A pane's frame takes its program's background color.
     match_program_bg: bool = false,
     rounded_selection: bool = true,

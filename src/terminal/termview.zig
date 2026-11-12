@@ -968,7 +968,7 @@ pub const TermView = struct {
     /// key starts or continues a sequence. A sequence that comes to nothing lets its last key
     /// through, as Rex does.
     fn chord(v: *TermView, name: []const u8) bool {
-        const binds = v.server.bindings;
+        const binds = v.server.keyBindings();
         if (chord_len > 0 and keys.sameKey(name, "escape")) {
             chord_len = 0;
             chordChanged();
@@ -1020,7 +1020,7 @@ pub const TermView = struct {
     fn modeKey(v: *TermView, keyval: c_uint, mods: u4) void {
         var buf: [40]u8 = undefined;
         const name = keys.rexName(&buf, keyval, gdk.keyvalToUnicode(keyval), mods) orelse return;
-        for (v.server.mode_bindings) |b| {
+        for (v.server.modeBindings()) |b| {
             if (!std.mem.eql(u8, b.mode, keyMode()) or !std.mem.eql(u8, b.keys, name)) continue;
             if (std.mem.eql(u8, b.action, "client.mode.exit")) return setKeyMode("");
             return v.runAction(b.action, b.args, false);
