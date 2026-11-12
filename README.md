@@ -39,8 +39,6 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 |---|---|
 | ![Three panes drawn through the CRT shader, curved and scanlined](docs/screenshots/shaders.png) | ![Only the terminals: one large pane and two stacked beside it, the desktop showing between them](docs/screenshots/fullscreen.png) |
 
-![The Settings window on its Themes page](docs/screenshots/settings.png)
-
 ## Installing
 
 There are no packages yet, so Renux is built from source. You need a Rex server to connect to;
