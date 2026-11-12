@@ -264,6 +264,10 @@ pub const App = struct {
     app: *adw.Application,
     window: *adw.ApplicationWindow = undefined,
     toasts: *adw.ToastOverlay = undefined,
+    /// The message showing at the bottom, its text, and how many times in a row it was said.
+    toast_now: ?*adw.Toast = null,
+    toast_text: std.ArrayList(u8) = .empty,
+    toast_count: u32 = 0,
     sidebar: *gtk.ListBox = undefined,
     split: *adw.OverlaySplitView = undefined,
     card: *gtk.Widget = undefined,
@@ -1245,7 +1249,7 @@ pub const App = struct {
                 const s = h.server;
                 const text = gpa.dupeSentinel(u8, s.message.items, 0) catch return;
                 defer gpa.free(text);
-                a.toasts.addToast(adw.Toast.new(text.ptr));
+                a.toast(text);
             },
         }
     }
@@ -1927,7 +1931,7 @@ pub const App = struct {
             std.fmt.bufPrintSentinel(&buf, "No new hosts on {s}", .{h.label}, 0) catch return
         else
             std.fmt.bufPrintSentinel(&buf, "Added {d} host{s} from {s}", .{ added, if (added == 1) "" else "s", h.label }, 0) catch return;
-        a.toasts.addToast(adw.Toast.new(text.ptr));
+        a.toast(text);
     }
 
     pub fn hasHostUrl(a: *App, url: []const u8) bool {
@@ -2621,8 +2625,43 @@ pub const App = struct {
         a.toast(text);
     }
 
-    fn toast(a: *App, text: [:0]const u8) void {
-        a.toasts.addToast(adw.Toast.new(text.ptr));
+    /// Shows a message at the bottom. Messages don't wait in line: one that says what is
+    /// already showing adds to its count and keeps it up a while longer, and a different one
+    /// takes its place. So an error that keeps happening is one line, not a queue of them.
+    pub fn toast(a: *App, text: [:0]const u8) void {
+        if (a.toast_now) |showing| {
+            if (std.mem.eql(u8, a.toast_text.items, text)) {
+                a.toast_count += 1;
+                var buf: [600]u8 = undefined;
+                if (std.fmt.bufPrintSentinel(&buf, "{s} ({d} times)", .{ text, a.toast_count }, 0)) |counted| showing.setTitle(counted.ptr) else |_| {}
+                // Adding a message that is showing starts its time again. The overlay takes
+                // a reference each time it is given one.
+                _ = showing.as(gobject.Object).ref();
+                a.toasts.addToast(showing);
+                return;
+            }
+            showing.dismiss();
+            // Dismissing may tell `toastGone` at once, or only when the message has slid away.
+            if (a.toast_now == showing) {
+                a.toast_now = null;
+                showing.as(gobject.Object).unref();
+            }
+        }
+        const fresh = adw.Toast.new(text.ptr);
+        a.toast_text.clearRetainingCapacity();
+        a.toast_text.appendSlice(gpa, text) catch {};
+        a.toast_count = 1;
+        a.toast_now = fresh;
+        _ = fresh.as(gobject.Object).ref();
+        _ = adw.Toast.signals.dismissed.connect(fresh, *App, &toastGone, a, .{});
+        a.toasts.addToast(fresh);
+    }
+
+    /// A message left, by itself or because it was closed.
+    fn toastGone(gone: *adw.Toast, a: *App) callconv(.c) void {
+        if (a.toast_now != gone) return;
+        a.toast_now = null;
+        gone.as(gobject.Object).unref();
     }
 
     /// The next or previous session on this host, in the sidebar's order.
