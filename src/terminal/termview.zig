@@ -493,6 +493,8 @@ pub const TermView = struct {
     copy_node: ?*gsk.RenderNode = null,
     copy_spans: std.ArrayList(CopySpan) = .empty,
     copy_top: f64 = 0,
+    /// Where the text sat when it was copied; see `textAnchor`.
+    copy_anchor: f64 = 0,
     copy_started: i64 = 0,
     copy_tick: c_uint = 0,
 
@@ -1750,13 +1752,32 @@ pub const TermView = struct {
             }
         }
         if (v.copy_spans.items.len == 0) return;
+        // Taking the picture draws the pane, and a draw ends a lift whose text has moved: the
+        // text counts as being where it is now, before the picture and again after it.
+        v.copy_anchor = v.textAnchor();
         const own = gtk.Snapshot.new();
         snapshotTermImpl(v, own);
         v.copy_node = own.freeToNode() orelse return v.endCopyAnimation();
         v.copy_top = pad_y + v.draw_frac;
+        v.copy_anchor = v.textAnchor();
         v.copy_started = glib.getMonotonicTime();
         if (v.copy_tick == 0) v.copy_tick = v.widget().addTickCallback(&copyTick, v, null);
         v.widget().queueDraw();
+    }
+
+    /// A number that stays the same for as long as the text on screen stays where it is: it
+    /// changes when the pane is scrolled, and when new output pushes the text up. Output that
+    /// arrives while looking back through history moves nothing, and doesn't change it.
+    fn textAnchor(v: *TermView) f64 {
+        return v.scroll_px - @as(f64, @floatFromInt(v.last_total)) * v.cell_h;
+    }
+
+    /// The lift is drawn from a picture of where the copied text was. Once the text has moved,
+    /// the picture would hang over other text, so the lift ends there.
+    fn dropMovedCopy(v: *TermView) void {
+        // No picture yet means the copy is only now being taken, and nothing has moved.
+        if (v.copy_node == null) return;
+        if (@abs(v.textAnchor() - v.copy_anchor) > 0.5) v.endCopyAnimation();
     }
 
     fn endCopyAnimation(v: *TermView) void {
@@ -2362,6 +2383,10 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
 /// selection. The cache of drawn rows keys on the cells, so it stays right.
 fn renderFrame(v: *TermView, t: *term_mod.Term) void {
     _ = t.render(true);
+    // Where the text is now is known only once the terminal is read, so a lift whose text has
+    // moved ends here, before its cells are emptied, not a frame late.
+    v.followOutput(t.frame.scroll_total);
+    v.dropMovedCopy();
     // From the copy's picture until the lifted text is back down, there's no cursor: not in
     // the picture, and not jumping about under or beside the text while it moves.
     if (v.copy_spans.items.len > 0) t.frame.cursor_visible = false;
