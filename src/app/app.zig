@@ -106,7 +106,7 @@ const css =
     \\.content .workspace { margin: 6px 8px 8px 0; }
     \\.content.alone .workspace { margin: 6px 8px 8px 8px; }
     \\window.no-headers .content.alone .workspace { margin-top: 52px; }
-    \\window.tight .content.alone .workspace { margin: 7px 0 0 0; }
+    \\window.tight .content.alone .workspace { margin: 0; }
     \\.window-corner { min-height: 52px; padding: 0 6px 0 12px; }
     \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @renux_stroke_subtle; }
     \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
@@ -132,7 +132,12 @@ const css =
     \\.chip-face { box-shadow: none; }
     \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
     \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
-    \\window.tight .content .workspace { margin: 7px 0 0 0; }
+    \\window.tight .content .workspace { margin: 0; }
+    \\window.tight.no-headers .content.alone .workspace { margin-top: 38px; }
+    \\window.tight:not(.tabs-above) .window-corner { min-height: 38px; }
+    \\window.tight:not(.tabs-above) .renux-sidebar headerbar { min-height: 38px; }
+    \\window.tight:not(.tabs-above) .renux-sidebar headerbar > windowhandle > box { padding-top: 0; padding-bottom: 0; }
+    \\window.tight:not(.tabs-above) .renux-sidebar headerbar button { margin-top: 0; margin-bottom: 0; }
     \\window.tight .pane-card { border-radius: 0; border: none; box-shadow: none; }
     \\window.tight .workspace { background-color: @renux_stroke_subtle; }
     \\window.tight .pane-card.focused .pane-title .title { color: @accent_color; }
@@ -3720,7 +3725,11 @@ pub const App = struct {
         const sidebar_text = std.fmt.bufPrint(&sbuf, ".renux-sidebar list {{ font-size: {d:.2}em; }}", .{prefs.sidebar_text_scale}) catch "";
         // After the highlight's own rules, which these must win over: a card on its way to
         // the tray has no outline or highlight, only the shadow a floating card casts.
+        // Compact panes sit edge to edge with no outline, and say which has the keyboard by
+        // their title's color. The highlight's own rules above would give the active one its
+        // glow back, which showed as a line along whichever of its edges had room for it.
         const to_tray =
+            \\window.tight .pane-card.focused:not(.floating) { box-shadow: none; }
             \\.pane-card.to-tray, .pane-card.to-tray.focused { border-color: transparent; box-shadow: none; transition: none; border-radius: 10px; }
             \\.pane-card.floating.to-tray, .pane-card.floating.to-tray.focused { box-shadow: 0 2px 10px alpha(black, 0.3); transition: box-shadow 240ms ease-out; }
             \\.layer-card.to-tray, .layer-card.to-tray.focused { border-color: transparent; transition: none; }
