@@ -83,6 +83,8 @@ pub const Settings = struct {
     local_keys: bool = false,
     /// Panes on remote hosts take their host's terminal colors, not the theme picked here.
     remote_colors: bool = false,
+    /// The overview shows each session's tabs together under its name.
+    overview_by_session: bool = false,
     /// A pane's frame takes its program's background color.
     match_program_bg: bool = false,
     rounded_selection: bool = true,

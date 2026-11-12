@@ -203,6 +203,8 @@ const css =
     \\.overview-dot.failed { background-color: #ff5a52; }
     \\.overview-dot.done { background-color: #4cc76a; }
     \\.overview-host { background-color: alpha(black, 0.38); border-radius: 99px; padding: 1px 9px; font-size: 0.75em; font-weight: 600; color: alpha(white, 0.82); }
+    \\.overview-group { background-color: alpha(@window_fg_color, 0.05); border-radius: 14px; box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.07); }
+    \\.overview-hint { font-size: 0.8em; color: alpha(@window_fg_color, 0.5); text-shadow: 0 1px 3px alpha(black, 0.6); }
     \\.overview-blank { background-color: alpha(@view_bg_color, 0.7); border-radius: 6px; box-shadow: inset 0 0 0 1px @renux_stroke_subtle; }
     \\.overview-ring { border: 2px solid @accent_bg_color; border-radius: 8px; }
     \\.overview-button { padding: 4px 16px; font-size: 0.9em; }
@@ -272,6 +274,8 @@ pub const Host = struct {
 
     /// Its number among every host this run, which no later host shares.
     serial: usize = 0,
+    /// Holds the last frame drawn of the host's panes, for the overview to zoom out from.
+    shot: *gtk.WidgetPaintable,
 
     /// Whether the host is another computer: anything not reached through a socket here.
     pub fn remote(h: *const Host) bool {
@@ -1133,7 +1137,7 @@ pub const App = struct {
             gpa.destroy(h);
             return null;
         };
-        h.* = .{ .app = a, .label = host_label, .server = s, .workspace = ws, .page = page, .serial = a.next_page };
+        h.* = .{ .app = a, .label = host_label, .server = s, .workspace = ws, .page = page, .serial = a.next_page, .shot = gtk.WidgetPaintable.new(ws.root) };
         a.next_page += 1;
         s.observer = .{ .ctx = h, .changed = serverChanged };
         s.performer = .{ .ctx = h, .perform = perform };
@@ -1190,6 +1194,7 @@ pub const App = struct {
         h.server.performer = null;
         const root = h.workspace.root;
         a.overview.dropHost(h);
+        h.shot.unref();
         h.workspace.destroy();
         a.stack.remove(root);
         h.server.destroy();
@@ -4472,7 +4477,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         }
         if (std.mem.eql(u8, cmd, "overview-key")) {
             // Keys as the open overview hears them: overview-key right enter
-            const named = [_]struct { []const u8, c_uint }{ .{ "left", 0xff51 }, .{ "up", 0xff52 }, .{ "right", 0xff53 }, .{ "down", 0xff54 }, .{ "enter", 0xff0d }, .{ "escape", 0xff1b } };
+            const named = [_]struct { []const u8, c_uint }{ .{ "left", 0xff51 }, .{ "up", 0xff52 }, .{ "right", 0xff53 }, .{ "down", 0xff54 }, .{ "enter", 0xff0d }, .{ "escape", 0xff1b }, .{ "x", 'x' }, .{ "c", 'c' }, .{ "s", 's' } };
             while (it.next()) |name| for (named) |n| {
                 if (std.mem.eql(u8, n[0], name)) _ = a.overview.key(n[1], 0);
             };

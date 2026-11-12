@@ -105,6 +105,7 @@ test {
     _ = @import("icons/programs.zig");
     _ = @import("icons/blockicon.zig");
     _ = @import("ui/palette.zig");
+    _ = @import("ui/overview.zig");
     _ = @import("settings/settings.zig");
     _ = @import("theme/themes.zig");
     _ = @import("settings/settings_window.zig");

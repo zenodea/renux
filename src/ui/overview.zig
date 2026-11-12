@@ -25,6 +25,7 @@ const workspace_mod = @import("workspace.zig");
 const Workspace = workspace_mod.Workspace;
 const K = @import("../terminal/keys.zig");
 const programs = @import("../icons/programs.zig");
+const settings = @import("../settings/settings.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -33,11 +34,16 @@ const pad: f64 = 36;
 const gap: f64 = 28;
 const name_room: f64 = 30;
 const bottom_room: f64 = 64;
+/// Room under a tab for its name inside a session's group, where there is less to spare.
+const group_name_room: f64 = 26;
 const zoom_ms: f64 = 300;
 /// How far the ring stands off the tab it is around.
 const ring_gap: f64 = 4;
 /// The most pictures of tabs kept between one opening of the overview and the next.
-const max_thumbs = 40;
+const max_thumbs = 24;
+/// How much finer than its size in the grid a tab's picture is taken, up to the screen's own
+/// sharpness: the zoom enlarges the tabs beside the one it goes into.
+const picture_detail: f64 = 1.7;
 
 /// The one overview, for `previewShows`.
 var current: ?*Overview = null;
@@ -65,13 +71,19 @@ const Tile = struct {
     badges_for: u64 = 0,
     /// A plain card in the tab's place, shown until there is a picture or a preview of it.
     blank: *gtk.Widget,
-    /// The live copy of the tab, made once the grid is still.
+    /// The live copy of the tab, made once the grid is still, and what holds the last frame
+    /// drawn of it, for taking its picture.
     ws: ?*Workspace = null,
     root: ?*gtk.Widget = null,
+    shot: ?*gtk.WidgetPaintable = null,
     /// Whether the preview has been given its place and size, and so can be drawn.
     placed: bool = false,
-    /// Its place in the grid.
+    /// Its place in the grid, and where it is drawn now: on its way there after the grid has
+    /// changed, growing in when it is new, shrinking away when its tab has closed.
     rect: [4]f64 = .{ 0, 0, 0, 0 },
+    cur: [4]f64 = .{ 0, 0, 0, 0 },
+    alpha: f64 = 1,
+    seen: bool = false,
     /// A picture of the tab's panes at about the size they have in the grid: the one taken
     /// when the overview last closed, until a newer one is.
     picture: ?*gdk.Texture = null,
@@ -79,12 +91,51 @@ const Tile = struct {
     sharp: ?*gdk.Texture = null,
 };
 
+/// The tabs of one session, shown together with the session's name while tabs are grouped.
+const Group = struct {
+    /// Its tabs: `count` of them in `tiles`, from `first`.
+    first: usize,
+    count: usize,
+    rect: [4]f64 = .{ 0, 0, 0, 0 },
+    card: *gtk.Widget,
+    label: *gtk.Label,
+};
+
+/// A new tab was asked for in a session. It is gone to when the server shows it: the first tab
+/// of that session that isn't one of those it had.
+const Awaited = struct {
+    host: *app_mod.Host,
+    session_id: []u8,
+    had: std.ArrayList([]u8) = .empty,
+
+    fn deinit(w: *Awaited) void {
+        gpa.free(w.session_id);
+        for (w.had.items) |id| gpa.free(id);
+        w.had.deinit(gpa);
+    }
+};
+
 pub const Overview = struct {
     app: *app_mod.App,
     area: *Area,
     ring: *gtk.Widget,
     button: *gtk.Button,
+    /// Groups the tabs by session, or not; the keys the overview answers to, said once.
+    group_button: *gtk.ToggleButton,
+    hint: *gtk.Label,
     tiles: std.ArrayList(Tile) = .empty,
+    /// One for each session while tabs are grouped by session, none otherwise.
+    groups: std.ArrayList(Group) = .empty,
+    awaited: ?Awaited = null,
+    /// Tabs that have closed, fading out of the grid.
+    leaving: std.ArrayList(Tile) = .empty,
+    /// The grid changed while open, and its tabs are gliding to their new places.
+    gliding: bool = false,
+    last_frame: i64 = 0,
+    /// The grid has been shown: tabs added from now on grow in, and the grid's changes glide.
+    settled: bool = false,
+    /// A new tab to go to once it has grown in, by its name's widget.
+    go_after: ?*gtk.Label = null,
     /// Tabs of an overview that has closed, freed once its last frame is out.
     dead: std.ArrayList(Tile) = .empty,
     reap_idle: c_uint = 0,
@@ -125,7 +176,18 @@ pub const Overview = struct {
         button.as(gtk.Widget).setFocusable(0);
         button.as(gtk.Actionable).setActionName("app.full-screen");
         button.as(gtk.Widget).setParent(w);
-        o.* = .{ .app = a, .area = area, .ring = ring.as(gtk.Widget), .button = button };
+        const group_button = gtk.ToggleButton.newWithLabel("By session");
+        group_button.as(gtk.Widget).addCssClass("pill");
+        group_button.as(gtk.Widget).addCssClass("overview-button");
+        group_button.as(gtk.Widget).setFocusable(0);
+        group_button.setActive(@intFromBool(settings.current.overview_by_session));
+        group_button.as(gtk.Widget).setParent(w);
+        const hint = gtk.Label.new("Enter  open     X  close     C  new tab     S  by session");
+        hint.as(gtk.Widget).addCssClass("overview-hint");
+        hint.as(gtk.Widget).setCanTarget(0);
+        hint.as(gtk.Widget).setParent(w);
+        o.* = .{ .app = a, .area = area, .ring = ring.as(gtk.Widget), .button = button, .group_button = group_button, .hint = hint };
+        _ = gtk.ToggleButton.signals.toggled.connect(group_button, *Overview, &groupToggled, o, .{});
         area.overview = o;
         current = o;
         workspace_mod.previewed = &previewShows;
@@ -163,7 +225,7 @@ pub const Overview = struct {
         o.size = .{ @floatFromInt(stack.getWidth()), @floatFromInt(stack.getHeight()) };
         o.measureContent();
         // The tab on screen, as it is drawn now: the one picture the zoom out moves.
-        const sharp: ?*gdk.Texture = if (a.workspace) |main| o.shoot(main.root, o.screenScale()) else null;
+        const sharp: ?*gdk.Texture = if (a.current) |h| o.shoot(h.shot, h.workspace.root, o.screenScale()) else null;
         o.widget().setVisible(1);
         o.sync();
         if (o.tiles.items.len == 0) {
@@ -180,6 +242,13 @@ pub const Overview = struct {
         o.selected = here orelse 0;
         o.focus = o.selected;
         o.computeRects();
+        for (o.tiles.items) |*t| {
+            t.cur = t.rect;
+            t.alpha = 1;
+            t.seen = true;
+        }
+        o.settled = true;
+        o.gliding = false;
         o.zoom = 1;
         o.animating = false;
         if (sharp) |p| {
@@ -230,7 +299,13 @@ pub const Overview = struct {
         o.to = 0;
         o.started = 0;
         o.animating = true;
-        o.takePictures();
+        o.gliding = false;
+        o.go_after = null;
+        for (o.tiles.items) |*t| {
+            t.cur = t.rect;
+            t.alpha = 1;
+        }
+        o.takePictures(true);
         o.startTick();
     }
 
@@ -239,6 +314,11 @@ pub const Overview = struct {
         if (!o.open) return;
         o.open = false;
         o.animating = false;
+        o.gliding = false;
+        o.settled = false;
+        o.go_after = null;
+        for (o.leaving.items) |*t| o.free(t);
+        o.leaving.clearRetainingCapacity();
         if (o.tick != 0) o.widget().removeTickCallback(o.tick);
         o.tick = 0;
         // Freeing a dozen previews takes a moment, which would show as a stutter in the last
@@ -251,6 +331,9 @@ pub const Overview = struct {
             };
         }
         o.tiles.clearRetainingCapacity();
+        o.regroup();
+        if (o.awaited) |*w| w.deinit();
+        o.awaited = null;
         if (o.reap_idle == 0 and o.dead.items.len > 0) o.reap_idle = glib.idleAdd(&reap, o);
         o.widget().setVisible(0);
         const a = o.app;
@@ -278,8 +361,11 @@ pub const Overview = struct {
             0xff53, 'l' => o.step(1, 0),
             0xff52, 'k' => o.step(0, -1),
             0xff54, 'j' => o.step(0, 1),
-            0xff09 => o.select((o.selected + 1) % @max(1, o.tiles.items.len)), // Tab
-            0xfe20 => o.select((o.selected + o.tiles.items.len -| 1) % @max(1, o.tiles.items.len)), // Shift+Tab
+            0xff09 => o.cycle(1), // Tab
+            0xfe20 => o.cycle(-1), // Shift+Tab
+            'x' => o.closeSelected(),
+            'c' => o.newTab(),
+            's' => o.setGrouped(!settings.current.overview_by_session),
             else => return false,
         }
         return true;
@@ -304,6 +390,150 @@ pub const Overview = struct {
             }
         }
         if (best) |i| o.select(i);
+    }
+
+    /// Moves the ring to the next or the previous tab.
+    fn cycle(o: *Overview, by: isize) void {
+        const n: isize = @intCast(o.tiles.items.len);
+        if (n > 0) o.select(@intCast(@mod(@as(isize, @intCast(o.selected)) + by, n)));
+    }
+
+    /// Closes the tab the ring is on, with every pane in it.
+    fn closeSelected(o: *Overview) void {
+        if (o.selected >= o.tiles.items.len) return;
+        const t = o.tiles.items[o.selected];
+        t.host.server.closeWindow(t.session_id, t.window_id);
+    }
+
+    /// Opens a new tab in the session of the tab the ring is on, and goes to it once the
+    /// server has made it.
+    fn newTab(o: *Overview) void {
+        if (o.selected >= o.tiles.items.len) return;
+        const t = o.tiles.items[o.selected];
+        if (o.awaited) |*old| old.deinit();
+        var w: Awaited = .{ .host = t.host, .session_id = gpa.dupe(u8, t.session_id) catch return };
+        for (o.tiles.items) |other| if (other.host == t.host and std.mem.eql(u8, other.session_id, t.session_id)) {
+            w.had.append(gpa, gpa.dupe(u8, other.window_id) catch continue) catch {};
+        };
+        o.awaited = w;
+        t.host.server.newWindow(t.session_id);
+    }
+
+    /// Goes to the tab that was asked for, if it is among the tabs now.
+    fn followNew(o: *Overview) void {
+        const w = &(o.awaited orelse return);
+        for (o.tiles.items, 0..) |t, i| {
+            if (t.host != w.host or !std.mem.eql(u8, t.session_id, w.session_id)) continue;
+            const old = for (w.had.items) |id| {
+                if (std.mem.eql(u8, id, t.window_id)) break true;
+            } else false;
+            if (old) continue;
+            w.deinit();
+            o.awaited = null;
+            // The ring goes to the new tab, which is gone to once it has grown into its place.
+            o.selected = i;
+            o.focus = i;
+            o.go_after = t.label;
+            return o.startGlide();
+        }
+    }
+
+    /// Starts the tabs moving to the places the grid has for them now. They are drawn from
+    /// pictures while they move, as in the zoom.
+    fn startGlide(o: *Overview) void {
+        if (!o.open or o.animating) return;
+        if (!o.gliding) o.takePictures(false);
+        o.gliding = true;
+        o.last_frame = 0;
+        o.startTick();
+        o.widget().queueAllocate();
+    }
+
+    /// Moves every tab a step toward its place, new ones toward full size and closed ones
+    /// away. False once nothing is left to move.
+    fn glide(o: *Overview, dt: f64) bool {
+        const k = 1 - @exp(-dt / 0.06);
+        var moving = false;
+        for (o.tiles.items) |*t| {
+            for (0..4) |i| {
+                const d = t.rect[i] - t.cur[i];
+                if (@abs(d) > 0.4) {
+                    t.cur[i] += d * k;
+                    moving = true;
+                } else t.cur[i] = t.rect[i];
+            }
+            if (t.alpha < 0.99) {
+                t.alpha += (1 - t.alpha) * k;
+                moving = true;
+            } else t.alpha = 1;
+        }
+        var i: usize = 0;
+        while (i < o.leaving.items.len) {
+            const t = &o.leaving.items[i];
+            t.alpha *= 1 - k;
+            t.cur = shrunk(t.cur, 1 - 0.1 * k);
+            if (t.alpha > 0.03) {
+                moving = true;
+                i += 1;
+                continue;
+            }
+            var gone = o.leaving.orderedRemove(i);
+            o.free(&gone);
+        }
+        return moving;
+    }
+
+    fn groupToggled(button: *gtk.ToggleButton, o: *Overview) callconv(.c) void {
+        o.setGrouped(button.getActive() != 0);
+    }
+
+    /// Shows the tabs one by one, or together by session, each session under its name.
+    fn setGrouped(o: *Overview, on: bool) void {
+        if (settings.current.overview_by_session != on) {
+            settings.current.overview_by_session = on;
+            settings.save();
+        }
+        // Setting the button runs `groupToggled`, which comes back here with nothing to save.
+        if ((o.group_button.getActive() != 0) != on) return o.group_button.setActive(@intFromBool(on));
+        if (!o.open) return;
+        // The tabs' names change with the grouping, and the tabs glide to their new places.
+        o.sync();
+        o.startGlide();
+    }
+
+    /// Makes the groups match the tabs: one for each session, in order, while grouping is on.
+    fn regroup(o: *Overview) void {
+        for (o.groups.items) |g| {
+            g.card.unparent();
+            g.label.as(gtk.Widget).unparent();
+        }
+        o.groups.clearRetainingCapacity();
+        if (!settings.current.overview_by_session) return;
+        var i: usize = 0;
+        while (i < o.tiles.items.len) {
+            const first = o.tiles.items[i];
+            var j = i + 1;
+            while (j < o.tiles.items.len and o.tiles.items[j].host == first.host and std.mem.eql(u8, o.tiles.items[j].session_id, first.session_id)) j += 1;
+            const card = gtk.Box.new(.horizontal, 0);
+            card.as(gtk.Widget).addCssClass("overview-group");
+            card.as(gtk.Widget).setCanTarget(0);
+            card.as(gtk.Widget).setParent(o.widget());
+            const label = gtk.Label.new(null);
+            label.as(gtk.Widget).addCssClass("overview-name");
+            label.as(gtk.Widget).setCanTarget(0);
+            label.setEllipsize(.end);
+            var name: [200]u8 = undefined;
+            const session = for (first.host.server.sessions.items) |se| {
+                if (std.mem.eql(u8, se.id, first.session_id)) break se.label;
+            } else "Session";
+            if (std.fmt.bufPrintSentinel(&name, "{s}", .{session}, 0)) |z| label.setText(z.ptr) else |_| {}
+            label.as(gtk.Widget).setParent(o.widget());
+            o.groups.append(gpa, .{ .first = i, .count = j - i, .card = card.as(gtk.Widget), .label = label }) catch {
+                card.as(gtk.Widget).unparent();
+                label.as(gtk.Widget).unparent();
+            };
+            i = j;
+        }
     }
 
     fn select(o: *Overview, index: usize) void {
@@ -368,7 +598,7 @@ pub const Overview = struct {
 
     /// A host is about to go: its tabs leave the grid while its server is still there.
     pub fn dropHost(o: *Overview, h: *app_mod.Host) void {
-        inline for (.{ &o.tiles, &o.dead }) |list| {
+        inline for (.{ &o.tiles, &o.dead, &o.leaving }) |list| {
             var i: usize = 0;
             while (i < list.items.len) {
                 if (list.items[i].host != h) {
@@ -401,13 +631,19 @@ pub const Overview = struct {
     /// each preview there is show its tab as it is now. Tabs that are still there are kept.
     fn sync(o: *Overview) void {
         const a = o.app;
+        const was_selected = o.selected;
         const had_selected = if (o.selected < o.tiles.items.len) o.tiles.items[o.selected].label else null;
         const had_focus = if (o.focus < o.tiles.items.len) o.tiles.items[o.focus].label else null;
         var next: std.ArrayList(Tile) = .empty;
+        var differs = false;
+        const grouped = settings.current.overview_by_session;
         for (a.hosts.items) |h| for (h.server.sessions.items) |*session| {
             const v = h.server.sessionView(session.id) orelse continue;
             for (v.windows) |*w| {
-                var tile = o.take(h, session.id, w.id) orelse o.make(h, session.id, w.id);
+                var tile = o.take(h, session.id, w.id) orelse made: {
+                    differs = true;
+                    break :made o.make(h, session.id, w.id);
+                };
                 if (tile.ws) |ws| ws.show(session.id, w);
                 var key_buf: [320]u8 = undefined;
                 if (tile.picture == null) if (o.thumbs.get(thumbKey(&key_buf, h, session.id, w.id))) |kept| {
@@ -417,23 +653,41 @@ pub const Overview = struct {
                 var name: [300]u8 = undefined;
                 var tab: [256]u8 = undefined;
                 const tab_name = app_mod.windowLabel(h, &tab, w, v);
-                const text = std.fmt.bufPrintSentinel(&name, "{s} · {s}", .{ session.label, tab_name }, 0) catch "Tab";
+                // Grouped, a tab is under its session's name already and says only its own.
+                const text = if (grouped)
+                    std.fmt.bufPrintSentinel(&name, "{s}", .{tab_name}, 0) catch "Tab"
+                else
+                    std.fmt.bufPrintSentinel(&name, "{s} · {s}", .{ session.label, tab_name }, 0) catch "Tab";
                 tile.label.setText(text.ptr);
                 o.markAgents(&tile, w);
                 next.append(gpa, tile) catch o.free(&tile);
             }
         };
-        // What is left belongs to tabs that are gone.
-        for (o.tiles.items) |*t| o.free(t);
+        // What is left belongs to tabs that are gone. With the grid on screen they fade out of
+        // it, as pictures: their previews have nothing left to show.
+        for (o.tiles.items) |*t| {
+            differs = true;
+            if (!o.settled) {
+                o.free(t);
+                continue;
+            }
+            freePreview(t);
+            inline for (.{ t.label.as(gtk.Widget), t.badges.as(gtk.Widget), t.host_chip.as(gtk.Widget) }) |mark| mark.setVisible(0);
+            o.leaving.append(gpa, t.*) catch o.free(t);
+        }
         o.tiles.deinit(gpa);
         o.tiles = next;
-        o.selected = 0;
-        o.focus = 0;
+        // The ring stays on its tab, or where that tab was if it is gone.
+        o.selected = @min(was_selected, o.tiles.items.len -| 1);
+        o.focus = o.selected;
         for (o.tiles.items, 0..) |t, i| {
             if (t.label == had_selected) o.selected = i;
             if (t.label == had_focus) o.focus = i;
         }
+        o.regroup();
         o.widget().queueAllocate();
+        if (differs and o.settled) o.startGlide();
+        o.followNew();
     }
 
     fn take(o: *Overview, h: *app_mod.Host, session_id: []const u8, window_id: []const u8) ?Tile {
@@ -487,12 +741,16 @@ pub const Overview = struct {
         ws.root.setParent(o.widget());
         t.ws = ws;
         t.root = ws.root;
+        t.shot = gtk.WidgetPaintable.new(ws.root);
         t.placed = false;
         if (t.host.server.sessionView(t.session_id)) |v| if (v.window(t.window_id)) |w| ws.show(t.session_id, w);
         o.widget().queueAllocate();
     }
 
-    fn free(_: *Overview, t: *Tile) void {
+    /// Lets a tab's preview go, keeping the rest of the tab.
+    fn freePreview(t: *Tile) void {
+        if (t.shot) |shot| shot.unref();
+        t.shot = null;
         if (t.ws) |ws| {
             // The workspace goes while its widget is still in place; see `Workspace.destroy`.
             ws.destroy();
@@ -500,6 +758,11 @@ pub const Overview = struct {
         }
         t.ws = null;
         t.root = null;
+        t.placed = false;
+    }
+
+    fn free(_: *Overview, t: *Tile) void {
+        freePreview(t);
         t.label.as(gtk.Widget).unparent();
         t.host_chip.as(gtk.Widget).unparent();
         t.badges.as(gtk.Widget).unparent();
@@ -524,7 +787,9 @@ pub const Overview = struct {
     fn tileAt(o: *Overview, x: f64, y: f64) ?usize {
         for (o.tiles.items, 0..) |t, i| {
             const r = t.rect;
-            if (x >= r[0] and x < r[0] + r[2] and y >= r[1] and y < r[1] + r[3] + name_room) return i;
+            // A tab's name under it counts as the tab.
+            const below: f64 = if (o.groups.items.len > 0) group_name_room else name_room;
+            if (x >= r[0] and x < r[0] + r[2] and y >= r[1] and y < r[1] + r[3] + below) return i;
         }
         return null;
     }
@@ -553,38 +818,18 @@ pub const Overview = struct {
         const full_w = o.size[0];
         const full_h = o.size[1];
         if (full_w < 1 or full_h < 1 or n == 0) return;
-        const count: f64 = @floatFromInt(n);
-        var cols: usize = 1;
-        var scale: f64 = 0;
-        for (1..n + 1) |c| {
-            const cf: f64 = @floatFromInt(c);
-            const rows = @ceil(count / cf);
-            const cell_w = (full_w - 2 * pad - (cf - 1) * gap) / cf;
-            const cell_h = (full_h - pad - bottom_room - (rows - 1) * gap) / rows - name_room;
-            const s = @min(cell_w / full_w, cell_h / full_h);
-            if (s > scale) {
-                scale = s;
-                cols = c;
-            }
+        const area = [4]f64{ pad, pad, full_w - 2 * pad, full_h - pad - bottom_room };
+        if (o.groups.items.len == 0) {
+            const grid = Grid.fit(n, area, o.size, gap, name_room);
+            for (o.tiles.items, 0..) |*t, i| t.rect = grid.cell(i);
+            return;
         }
-        scale = std.math.clamp(scale, 0.04, 0.86);
-        const tile_w = full_w * scale;
-        const tile_h = full_h * scale;
-        const rows: f64 = @ceil(count / @as(f64, @floatFromInt(cols)));
-        const grid_h = rows * (tile_h + name_room) + (rows - 1) * gap;
-        const top = @max(pad, pad + (full_h - pad - bottom_room - grid_h) / 2);
-        for (o.tiles.items, 0..) |*t, i| {
-            const row = i / cols;
-            const col = i % cols;
-            const in_row: f64 = @floatFromInt(@min(cols, n - row * cols));
-            const row_w = in_row * tile_w + (in_row - 1) * gap;
-            const left = (full_w - row_w) / 2;
-            t.rect = .{
-                @round(left + @as(f64, @floatFromInt(col)) * (tile_w + gap)),
-                @round(top + @as(f64, @floatFromInt(row)) * (tile_h + name_room + gap)),
-                tile_w,
-                tile_h,
-            };
+        // Grouped: each session has a cell of the grid, and its tabs a smaller grid inside it.
+        const outer = Grid.fit(o.groups.items.len, area, o.size, gap, name_room);
+        for (o.groups.items, 0..) |*g, k| {
+            g.rect = outer.cell(k);
+            const inner = Grid.fit(g.count, .{ g.rect[0] + 12, g.rect[1] + 12, g.rect[2] - 24, g.rect[3] - 24 }, o.size, 10, group_name_room);
+            for (o.tiles.items[g.first .. g.first + g.count], 0..) |*t, i| t.rect = inner.cell(i);
         }
     }
 
@@ -593,8 +838,8 @@ pub const Overview = struct {
         return .{ r[0] + o.content[0] * r[2], r[1] + o.content[1] * r[3], o.content[2] * r[2], o.content[3] * r[3] };
     }
 
-    /// Gives every child its place: the previews, the plain cards, names and dots, the ring
-    /// and the button.
+    /// Gives every child its place: the previews, the plain cards, names and dots, the
+    /// sessions' cards, the ring, and the buttons and keys at the foot.
     fn layout(o: *Overview) void {
         const n = o.tiles.items.len;
         const full_w = o.size[0];
@@ -605,21 +850,21 @@ pub const Overview = struct {
         o.measureContent();
         var min: c_int = 0;
         for (o.tiles.items) |*t| {
-            const c = o.contentRect(t.rect);
+            if (!t.seen) {
+                // A tab that joins a grid already on screen grows into its place.
+                t.seen = true;
+                t.cur = if (o.settled) shrunk(t.rect, 0.86) else t.rect;
+                t.alpha = if (o.settled) 0 else 1;
+            } else if (!o.gliding) t.cur = t.rect;
+            const c = o.contentRect(t.cur);
             if (t.root) |root| {
                 // The preview has the window's full size, so its panes are laid out exactly as
                 // in the window, and is drawn small.
-                place(root, full_w, full_h, t.rect[0], t.rect[1], t.rect[2] / full_w);
+                place(root, full_w, full_h, t.cur[0], t.cur[1], t.cur[2] / full_w);
                 t.placed = true;
             }
             place(t.blank, c[2], c[3], c[0], c[1], 1);
-            const lw = t.label.as(gtk.Widget);
-            var nat_w: c_int = 0;
-            var nat_h: c_int = 0;
-            lw.measure(.horizontal, -1, &min, &nat_w, null, null);
-            lw.measure(.vertical, -1, &min, &nat_h, null, null);
-            const w = @min(@as(f64, @floatFromInt(nat_w)), c[2]);
-            place(lw, w, @floatFromInt(nat_h), @round(c[0] + (c[2] - w) / 2), @round(c[1] + c[3] + 10), 1);
+            placeUnder(t.label.as(gtk.Widget), c);
             const bw = t.badges.as(gtk.Widget);
             var badges_w: c_int = 0;
             var badges_h: c_int = 0;
@@ -635,18 +880,33 @@ pub const Overview = struct {
             const chip_room = @max(1, c[2] - 24 - @as(f64, @floatFromInt(badges_w)));
             place(cw, @min(@as(f64, @floatFromInt(chip_w)), chip_room), @floatFromInt(chip_h), @round(c[0] + 8), @round(c[1] + 8), 1);
         }
+        for (o.leaving.items) |t| {
+            const c = o.contentRect(t.cur);
+            place(t.blank, c[2], c[3], c[0], c[1], 1);
+        }
+        for (o.groups.items) |g| {
+            place(g.card, g.rect[2], g.rect[3], g.rect[0], g.rect[1], 1);
+            placeUnder(g.label.as(gtk.Widget), g.rect);
+        }
         // The ring goes around the panes themselves, a little off them, not around the tab's
         // whole place, which is larger by the margins the panes keep in the window.
-        const sel = if (o.selected < n) o.contentRect(o.tiles.items[o.selected].rect) else [4]f64{ 0, 0, 1, 1 };
+        const sel = if (o.selected < n) o.contentRect(o.tiles.items[o.selected].cur) else [4]f64{ 0, 0, 1, 1 };
         place(o.ring, @round(sel[2]) + 2 * ring_gap, @round(sel[3]) + 2 * ring_gap, @round(sel[0]) - ring_gap, @round(sel[1]) - ring_gap, 1);
-        const bw = o.button.as(gtk.Widget);
-        var nat_w: c_int = 0;
-        var nat_h: c_int = 0;
-        bw.measure(.horizontal, -1, &min, &nat_w, null, null);
-        bw.measure(.vertical, -1, &min, &nat_h, null, null);
-        const button_w: f64 = @floatFromInt(nat_w);
-        const button_h: f64 = @floatFromInt(nat_h);
-        place(bw, button_w, button_h, @round((full_w - button_w) / 2), @round(full_h - button_h - 16), 1);
+        // The two buttons side by side in the middle of the foot, the keys at its right end.
+        const buttons = [_]*gtk.Widget{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget) };
+        var sizes: [2][2]f64 = undefined;
+        var row_w: f64 = 8;
+        for (buttons, 0..) |b, i| {
+            sizes[i] = natural(b);
+            row_w += sizes[i][0];
+        }
+        var x = @round((full_w - row_w) / 2);
+        for (buttons, 0..) |b, i| {
+            place(b, sizes[i][0], sizes[i][1], x, @round(full_h - sizes[i][1] - 16), 1);
+            x += sizes[i][0] + 8;
+        }
+        const hint = natural(o.hint.as(gtk.Widget));
+        place(o.hint.as(gtk.Widget), hint[0], hint[1], @round(full_w - hint[0] - 22), @round(full_h - hint[1] - 22), 1);
     }
 
     /// The part of the grid on screen now: the focus tab's place when zoomed in, all of it
@@ -673,8 +933,24 @@ pub const Overview = struct {
 
     fn onTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
         const o: *Overview = @ptrCast(@alignCast(data.?));
+        const now = clock.getFrameTime();
+        if (o.gliding and !o.animating) {
+            const dt = if (o.last_frame == 0) 1.0 / 60.0 else std.math.clamp(@as(f64, @floatFromInt(now - o.last_frame)) / 1_000_000, 0.001, 0.05);
+            o.last_frame = now;
+            o.widget().queueAllocate();
+            if (o.glide(dt)) return 1;
+            o.gliding = false;
+            // A tab made with the overview open is gone to now that it is in its place.
+            if (o.go_after) |label| {
+                o.go_after = null;
+                for (o.tiles.items, 0..) |t, i| if (t.label == label) {
+                    o.pick(i);
+                    return 1;
+                };
+            }
+            return 1;
+        }
         if (o.animating) {
-            const now = clock.getFrameTime();
             if (o.started == 0) o.started = now;
             const p = std.math.clamp(@as(f64, @floatFromInt(now - o.started)) / (zoom_ms * 1000), 0, 1);
             o.zoom = o.from + (o.to - o.from) * ease(p);
@@ -717,20 +993,26 @@ pub const Overview = struct {
     }
 
     fn screenScale(o: *Overview) f64 {
+        // A development screenshot is drawn larger than the hidden display it is taken on, and
+        // the pictures have to be as sharp as the screenshot to be judged in it.
+        if (@import("build_options").dev) if (std.c.getenv("RENUX_SHOT_SCALE")) |text| {
+            if (std.fmt.parseFloat(f64, std.mem.span(text))) |scale| return std.math.clamp(scale, 1, 4) else |_| {}
+        };
         const native = o.widget().getNative() orelse return 1;
         return if (native.getSurface()) |s| s.getScale() else 1;
     }
 
-    /// A picture of a widget as it was last drawn, `q` pixels to each of its own. Null for a
-    /// widget that hasn't been drawn yet.
-    fn shoot(o: *Overview, source: *gtk.Widget, q: f64) ?*gdk.Texture {
+    /// A picture of a widget as it was last drawn, `q` pixels to each of its own, from the
+    /// paintable that has followed it. Null for a widget that hasn't been drawn yet. The
+    /// paintable has to be one kept since before that drawing: GTK forgets a widget's last
+    /// frame as soon as anything in it asks to be drawn again, as a blinking cursor does, and
+    /// a paintable made now would have nothing to show.
+    fn shoot(o: *Overview, paintable: *gtk.WidgetPaintable, source: *gtk.Widget, q: f64) ?*gdk.Texture {
         const native = o.app.window.as(gtk.Native);
         const renderer = native.getRenderer() orelse return null;
         var own: graphene.Rect = undefined;
         if (source.computeBounds(source, &own) == 0) return null;
         if (own.f_size.f_width < 1 or own.f_size.f_height < 1) return null;
-        const paintable = gtk.WidgetPaintable.new(source);
-        defer paintable.unref();
         const sn = gtk.Snapshot.new();
         sn.scale(@floatCast(q), @floatCast(q));
         paintable.as(gdk.Paintable).snapshot(sn.as(gdk.Snapshot), own.f_size.f_width, own.f_size.f_height);
@@ -742,18 +1024,20 @@ pub const Overview = struct {
 
     /// Takes a picture of every preview, for the zoom in to move in place of the live panes,
     /// and keeps each for the next time the overview opens.
-    fn takePictures(o: *Overview) void {
+    fn takePictures(o: *Overview, sharp_too: bool) void {
         const screen = o.screenScale();
         for (o.tiles.items, 0..) |*t, i| {
             const root = t.root orelse continue;
+            const shot = t.shot orelse continue;
             if (!t.placed) continue;
             const small = t.rect[2] / @max(1, o.size[0]);
-            if (o.shoot(root, @max(0.2, small * screen))) |picture| {
+            // Larger than the tab is in the grid, so it stays readable as the zoom enlarges it.
+            if (o.shoot(shot, root, @min(screen, @max(0.2, small * screen * picture_detail)))) |picture| {
                 if (t.picture) |old| old.unref();
                 t.picture = picture;
                 o.keep(t, picture);
             }
-            if (i == o.focus) if (o.shoot(root, screen)) |sharp| {
+            if (sharp_too and i == o.focus) if (o.shoot(shot, root, screen)) |sharp| {
                 if (t.sharp) |old| old.unref();
                 t.sharp = sharp;
             };
@@ -801,52 +1085,139 @@ pub const Overview = struct {
         sn.save();
         sn.scale(k, k);
         sn.translate(&.{ .f_x = @floatCast(-v[0]), .f_y = @floatCast(-v[1]) });
+        // Each session's card lies under its tabs, and fades with the names.
+        if (o.groups.items.len > 0 and o.zoom > 0.01) {
+            sn.pushOpacity(o.zoom);
+            for (o.groups.items) |g| w.snapshotChild(g.card, sn);
+            sn.pop();
+        }
         for (o.tiles.items) |t| {
             // At rest a tab is its live preview, once there is one. While the zoom runs, and
             // until then, it is a picture, or failing that a plain card.
-            if (!o.animating and t.placed) {
+            if (!o.animating and !o.gliding and t.placed) {
                 if (t.root) |root| {
                     w.snapshotChild(root, sn);
                     continue;
                 }
             }
-            const c = o.contentRect(t.rect);
+            if (t.alpha < 1) sn.pushOpacity(t.alpha);
+            defer if (t.alpha < 1) sn.pop();
+            const c = o.contentRect(t.cur);
             const bounds: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(c[0]), .f_y = @floatCast(c[1]) }, .f_size = .{ .f_width = @floatCast(c[2]), .f_height = @floatCast(c[3]) } };
+            // Pictures are drawn as plain textures. A texture node that names a way of scaling
+            // is first made into a picture the size of its bounds, in the grid's own units,
+            // and that picture is then enlarged by the zoom and by the screen's scale, which
+            // blurs it badly. A plain one is drawn straight from its own pixels.
             if (t.sharp) |sharp| {
-                if (t.picture) |picture| {
-                    // The sharp picture while the tab is large, the grid's own as it nears
-                    // its place there, so neither end of the zoom shows a change of picture.
-                    sn.pushCrossFade(std.math.pow(f64, o.zoom, 2));
-                    sn.appendScaledTexture(sharp, .trilinear, &bounds);
+                // The sharp picture all the way, giving way to the grid's own only as the tab
+                // settles into the grid, so neither end of the zoom shows a change of picture
+                // and the text stays crisp in between.
+                const near_grid = std.math.clamp((o.zoom - 0.8) / 0.2, 0, 1);
+                if (t.picture != null and near_grid > 0) {
+                    sn.pushCrossFade(near_grid * near_grid);
+                    sn.appendTexture(sharp, &bounds);
                     sn.pop();
-                    sn.appendScaledTexture(picture, .linear, &bounds);
+                    sn.appendTexture(t.picture.?, &bounds);
                     sn.pop();
-                } else sn.appendScaledTexture(sharp, .trilinear, &bounds);
+                } else sn.appendTexture(sharp, &bounds);
             } else if (t.picture) |picture| {
-                sn.appendScaledTexture(picture, .linear, &bounds);
+                sn.appendTexture(picture, &bounds);
             } else w.snapshotChild(t.blank, sn);
         }
         // The names, dots and ring belong to the grid, and fade as a tab comes to fill the
         // window.
         if (o.zoom > 0.01) {
             sn.pushOpacity(o.zoom);
+            // A closed tab fades out where it was, as its last picture or a plain card.
+            for (o.leaving.items) |t| {
+                sn.pushOpacity(t.alpha);
+                if (t.picture) |picture| {
+                    const c = o.contentRect(t.cur);
+                    sn.appendTexture(picture, &.{ .f_origin = .{ .f_x = @floatCast(c[0]), .f_y = @floatCast(c[1]) }, .f_size = .{ .f_width = @floatCast(c[2]), .f_height = @floatCast(c[3]) } });
+                } else w.snapshotChild(t.blank, sn);
+                sn.pop();
+            }
             for (o.tiles.items) |t| {
-                w.snapshotChild(t.label.as(gtk.Widget), sn);
-                inline for (.{ t.badges.as(gtk.Widget), t.host_chip.as(gtk.Widget) }) |mark| {
+                if (t.alpha < 1) sn.pushOpacity(t.alpha);
+                inline for (.{ t.label.as(gtk.Widget), t.badges.as(gtk.Widget), t.host_chip.as(gtk.Widget) }) |mark| {
                     if (mark.getVisible() != 0) w.snapshotChild(mark, sn);
                 }
+                if (t.alpha < 1) sn.pop();
             }
+            for (o.groups.items) |g| w.snapshotChild(g.label.as(gtk.Widget), sn);
             w.snapshotChild(o.ring, sn);
             sn.pop();
         }
         sn.restore();
         if (o.zoom > 0.01) {
             sn.pushOpacity(o.zoom);
-            w.snapshotChild(o.button.as(gtk.Widget), sn);
+            inline for (.{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
             sn.pop();
         }
     }
 };
+
+/// A grid of same-sized cells, each the window's own shape, centered in an area.
+const Grid = struct {
+    n: usize,
+    cols: usize,
+    cell_w: f64,
+    cell_h: f64,
+    area: [4]f64,
+    top: f64,
+    between: f64,
+    under: f64,
+
+    /// As many columns as make the cells largest. `between` is the room between cells and
+    /// `under` the room kept below each, for a name.
+    fn fit(n: usize, area: [4]f64, shape: [2]f64, between: f64, under: f64) Grid {
+        const count: f64 = @floatFromInt(@max(1, n));
+        var cols: usize = 1;
+        var scale: f64 = 0;
+        for (1..@max(1, n) + 1) |c| {
+            const cf: f64 = @floatFromInt(c);
+            const rows = @ceil(count / cf);
+            const w = (area[2] - (cf - 1) * between) / cf;
+            const h = (area[3] - (rows - 1) * between) / rows - under;
+            const s = @min(w / shape[0], h / shape[1]);
+            if (s > scale) {
+                scale = s;
+                cols = c;
+            }
+        }
+        scale = std.math.clamp(scale, 0.02, 0.86);
+        const rows: f64 = @ceil(count / @as(f64, @floatFromInt(cols)));
+        const cell_h = shape[1] * scale;
+        const grid_h = rows * (cell_h + under) + (rows - 1) * between;
+        return .{ .n = @max(1, n), .cols = cols, .cell_w = shape[0] * scale, .cell_h = cell_h, .area = area, .top = area[1] + @max(0, (area[3] - grid_h) / 2), .between = between, .under = under };
+    }
+
+    /// The place of cell `i`; the last row is centered when it is short.
+    fn cell(g: Grid, i: usize) [4]f64 {
+        const row = i / g.cols;
+        const col = i % g.cols;
+        const in_row: f64 = @floatFromInt(@min(g.cols, g.n - row * g.cols));
+        const row_w = in_row * g.cell_w + (in_row - 1) * g.between;
+        const left = g.area[0] + (g.area[2] - row_w) / 2;
+        return .{
+            @round(left + @as(f64, @floatFromInt(col)) * (g.cell_w + g.between)),
+            @round(g.top + @as(f64, @floatFromInt(row)) * (g.cell_h + g.under + g.between)),
+            g.cell_w,
+            g.cell_h,
+        };
+    }
+};
+
+test "a grid's cells have the window's shape and stay inside the area" {
+    const grid = Grid.fit(5, .{ 36, 36, 1368, 800 }, .{ 1440, 900 }, 28, 30);
+    try std.testing.expect(grid.cols >= 2);
+    for (0..5) |i| {
+        const c = grid.cell(i);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.6), c[2] / c[3], 0.001);
+        try std.testing.expect(c[0] >= 35 and c[0] + c[2] <= 36 + 1368 + 1);
+        try std.testing.expect(c[1] >= 35 and c[1] + c[3] + 30 <= 36 + 800 + 1);
+    }
+}
 
 /// How far along the zoom is at a share `p` of its time: off quickly, then a long, gentle
 /// arrival. The curve is cubic-bezier(0.2, 0, 0, 1).
@@ -870,6 +1241,30 @@ fn ease(p: f64) f64 {
 /// host and session are part of it.
 fn thumbKey(buf: []u8, h: *app_mod.Host, session_id: []const u8, window_id: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{x}/{s}/{s}", .{ @intFromPtr(h), session_id, window_id }) catch window_id;
+}
+
+/// A widget's own size.
+fn natural(w: *gtk.Widget) [2]f64 {
+    var min: c_int = 0;
+    var nat_w: c_int = 0;
+    var nat_h: c_int = 0;
+    w.measure(.horizontal, -1, &min, &nat_w, null, null);
+    w.measure(.vertical, -1, &min, &nat_h, null, null);
+    return .{ @floatFromInt(nat_w), @floatFromInt(nat_h) };
+}
+
+/// Places a name under a rectangle, centered, no wider than it.
+fn placeUnder(label: *gtk.Widget, r: [4]f64) void {
+    const size = natural(label);
+    const w = @min(size[0], r[2]);
+    place(label, w, size[1], @round(r[0] + (r[2] - w) / 2), @round(r[1] + r[3] + 10), 1);
+}
+
+/// A rectangle scaled about its middle.
+fn shrunk(r: [4]f64, by: f64) [4]f64 {
+    const w = r[2] * by;
+    const h = r[3] * by;
+    return .{ r[0] + (r[2] - w) / 2, r[1] + (r[3] - h) / 2, w, h };
 }
 
 fn center(r: [4]f64) [2]f64 {
