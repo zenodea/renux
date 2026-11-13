@@ -625,14 +625,34 @@ pub const Server = struct {
         try std.testing.expectEqualStrings("codex", programName("codex", "/opt/bin/codex-cli"));
     }
 
+    /// What a program is running, where that says more than its own name: an interpreter's
+    /// script, or failing that the name the program has given itself when it differs from its
+    /// file's, as pi does (it runs as `node` and calls itself `pi`).
+    fn runs(name: []const u8, script: ?[]const u8, argv0: ?[]const u8) ?[]const u8 {
+        if (script) |s| return if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| s[i + 1 ..] else s;
+        const given = argv0 orelse return null;
+        const base = if (std.mem.lastIndexOfScalar(u8, given, '/')) |i| given[i + 1 ..] else given;
+        // A login shell's "-zsh" is still zsh.
+        const own = std.mem.trimStart(u8, base, "-");
+        return if (own.len == 0 or std.mem.eql(u8, own, name)) null else own;
+    }
+
+    test runs {
+        try std.testing.expectEqualStrings("server.js", runs("node", "/srv/app/server.js", "node").?);
+        try std.testing.expectEqualStrings("pi", runs("node", null, "pi").?);
+        try std.testing.expect(runs("zsh", null, "-zsh") == null);
+        try std.testing.expect(runs("nvim", null, "/usr/bin/nvim") == null);
+        try std.testing.expect(runs("htop", null, null) == null);
+    }
+
     /// An interpreter's script says more than its name, so node running claude counts as claude.
     fn setProgram(_: *Server, b: *BlockInfo, foreground: ?json.Value) void {
         const name = programName(json.str(foreground, "name") orelse return, json.str(foreground, "invoked_path"));
         var buf: [256]u8 = undefined;
-        const text = if (json.str(foreground, "script")) |script| blk: {
-            const base = if (std.mem.lastIndexOfScalar(u8, script, '/')) |i| script[i + 1 ..] else script;
-            break :blk std.fmt.bufPrint(&buf, "{s}/{s}", .{ name, base }) catch name;
-        } else name;
+        const text = if (runs(name, json.str(foreground, "script"), json.str(foreground, "argv0"))) |what|
+            std.fmt.bufPrint(&buf, "{s}/{s}", .{ name, what }) catch name
+        else
+            name;
         setStr(&b.program, text);
     }
 

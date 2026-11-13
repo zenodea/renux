@@ -25,6 +25,20 @@ const aliases = std.StaticStringMap([]const u8).initComptime(.{
     .{ "dune", "ocaml" },         .{ "opam", "ocaml" },          .{ "composer", "php" },
     .{ "scp", "ssh" },            .{ "sftp", "ssh" },            .{ "mosh", "ssh" },
     .{ "codex-cli", "codex" },    .{ "btop", "htop" },           .{ "top", "htop" },
+    .{ "sh", "bash" },            .{ "dash", "bash" },           .{ "ghc", "haskell" },
+    .{ "ghci", "haskell" },       .{ "cabal", "haskell" },       .{ "stack", "haskell" },
+    .{ "glab", "gitlab" },        .{ "lazydocker", "docker" },   .{ "tig", "git" },
+    .{ "delta", "git" },          .{ "yay", "pacman" },          .{ "paru", "pacman" },
+    .{ "apt-get", "apt" },        .{ "apt-cache", "apt" },       .{ "dpkg", "apt" },
+    .{ "gmake", "make" },         .{ "mvnw", "mvn" },            .{ "rg", "ripgrep" },
+    .{ "journalctl", "systemd" }, .{ "systemctl", "systemd" },   .{ "nnn", "ranger" },
+    .{ "lf", "ranger" },          .{ "ls", "eza" },              .{ "exa", "eza" },
+    .{ "lsd", "eza" },            .{ "more", "less" },           .{ "pico", "nano" },
+    .{ "emacsclient", "emacs" },  .{ "rscript", "r" },           .{ "z", "zoxide" },
+    .{ "az", "azure" },           .{ "gsutil", "gcloud" },       .{ "bq", "gcloud" },
+    .{ "yq", "jq" },              .{ "sk", "fzf" },              .{ "py.test", "pytest" },
+    .{ "go-task", "task" },       .{ "batcat", "bat" },          .{ "qwen-code", "qwen" },
+    .{ "kiro-cli", "kiro" },      .{ "tailf", "tail" },
 });
 
 /// Simple Icons names for programs whose icon is named differently.
@@ -33,6 +47,9 @@ const slugs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "gemini", "googlegemini" }, .{ "kube", "kubernetes" },     .{ "mistral", "mistralai" },
     .{ "nix", "nixos" },           .{ "postgres", "postgresql" }, .{ "brew", "homebrew" },
     .{ "clang", "cplusplus" },     .{ "java", "openjdk" },        .{ "fish", "fishshell" },
+    .{ "emacs", "gnuemacs" },      .{ "pacman", "archlinux" },    .{ "apt", "debian" },
+    .{ "gcloud", "googlecloud" },  .{ "mvn", "apachemaven" },     .{ "make", "gnu" },
+    .{ "lldb", "llvm" },
 });
 
 /// Coding agents by the names their programs go by, for telling an agent's pane from a shell's.
@@ -143,8 +160,16 @@ pub fn drawTile(cr: *cairo.Context, icon: ?*const table.Icon, x: f64, y: f64, si
 }
 
 /// A program's own name from what a block reports (`name/script`, a login shell as `-zsh`).
+/// A coding agent that an interpreter runs goes by the agent's name: pi, not node.
 pub fn programName(process: []const u8) []const u8 {
-    return std.mem.trimStart(u8, process[0 .. std.mem.indexOfScalar(u8, process, '/') orelse process.len], "-");
+    const slash = std.mem.indexOfScalar(u8, process, '/') orelse process.len;
+    if (slash < process.len) {
+        const script = process[slash + 1 ..];
+        const base = if (std.mem.lastIndexOfScalar(u8, script, '.')) |dot| script[0..dot] else script;
+        var buf: [64]u8 = undefined;
+        if (agents.has(lower(&buf, base))) return base;
+    }
+    return std.mem.trimStart(u8, process[0..slash], "-");
 }
 
 /// What runs in a pane and where, such as "zsh ~/renux": the program's name, then its folder
@@ -180,6 +205,17 @@ test "program names map to icons" {
     try std.testing.expectEqualStrings("claude", iconFor("Claude", "node").?.slug);
     try std.testing.expectEqualStrings("neovim", iconFor(null, "nvim").?.slug);
     try std.testing.expectEqualStrings("codex", iconFor("codex", "node").?.slug);
+    try std.testing.expectEqualStrings("pi", iconFor(null, "node/pi").?.slug);
+    // Programs that share an icon, brands under their own names, and glyphs drawn for Renux.
+    try std.testing.expectEqualStrings("gnubash", iconFor(null, "sh").?.slug);
+    try std.testing.expectEqualStrings("archlinux", iconFor(null, "yay").?.slug);
+    try std.testing.expectEqualStrings("gnuemacs", iconFor(null, "emacs").?.slug);
+    try std.testing.expectEqualStrings("systemd", iconFor(null, "journalctl").?.slug);
+    try std.testing.expectEqualStrings("goose", iconFor(null, "goose").?.slug);
+    try std.testing.expectEqualStrings("r", iconFor(null, "R").?.slug);
+    // Every agent Renux knows has an icon.
+    for (agents.keys()) |agent| try std.testing.expect(iconFor(null, agent) != null);
+    try std.testing.expect(isAgent("node/pi"));
     try std.testing.expectEqualStrings("rust", iconFor(null, "cargo").?.slug);
     try std.testing.expectEqualStrings("fishshell", iconFor(null, "-fish").?.slug);
     try std.testing.expectEqualStrings("lazygit", iconFor(null, "lazygit").?.slug);
@@ -199,7 +235,9 @@ test "program names map to icons" {
 test "titles name the program and its folder" {
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("zsh", programName("-zsh"));
-    try std.testing.expectEqualStrings("node", programName("node/claude.js"));
+    try std.testing.expectEqualStrings("node", programName("node/server.js"));
+    try std.testing.expectEqualStrings("claude", programName("node/claude.js"));
+    try std.testing.expectEqualStrings("pi ~/renux", displayTitle(&buf, "node/pi", "/home/someone/renux"));
     try std.testing.expectEqualStrings("zsh ~/renux", displayTitle(&buf, "-zsh", "/home/someone/renux"));
     try std.testing.expectEqualStrings("claude", displayTitle(&buf, "claude", null));
     try std.testing.expectEqualStrings("shell /etc", displayTitle(&buf, null, "/etc"));
