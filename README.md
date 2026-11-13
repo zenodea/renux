@@ -41,8 +41,7 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 
 ## Installing
 
-There are no packages yet, so Renux is built from source. You need a Rex server to connect to;
-see [Rex's installation guide](https://www.superlogical.com/rex/docs/linux/installation.md).
+There are no packages yet, so Renux is built from source. You need a Rex server to connect to.
 
 1. Install Zig 0.17 and the libraries, with their development files:
 
