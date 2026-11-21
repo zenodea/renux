@@ -19,6 +19,8 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 
 - **Your Rex sessions, as they are.** Sessions, tabs and panes live on the Rex server, so they
   are the same here, in the Rex app and on a phone. Key bindings come from your Rex config.
+  New tabs, splits and floating shells start in the source pane's current directory when
+  Rex can report it, even without shell integration.
 - **Fast terminals.** Text is drawn with libghostty-vt, with selection, find, links, box
   drawing, and your own font and theme.
 - **Keyboard copying.** Copy mode holds the scrollback still while the program keeps running.

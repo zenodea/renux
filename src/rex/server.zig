@@ -165,8 +165,6 @@ pub const Server = struct {
     listed_hosts: []ListedHost = &.{},
     /// Runs the client.* actions a key binding or script asks this client for. True if done.
     performer: ?Performer = null,
-    /// Room for the folder a new pane starts in, while its request is written.
-    cwd_buf: [2048]u8 = undefined,
     /// Terminals kept live though their panes are off screen, oldest first. See `parkTerminal`.
     parked: std.ArrayList(*Stream) = .empty,
 
@@ -1282,17 +1280,7 @@ pub const Server = struct {
     /// Splits the pane showing `anchor_id` and types a command into the new pane's shell. The
     /// new pane goes after the old one: to its right, or below it.
     pub fn newSplitRunning(s: *Server, session_id: []const u8, anchor_id: []const u8, horizontal: bool, text: []const u8) void {
-        s.call("session.new_split", .{
-            .session_id = session_id,
-            .anchor_id = anchor_id,
-            .direction = if (horizontal) "horizontal" else "vertical",
-            .side = "after",
-            .layout = s.shellIn(anchor_id),
-            .focus = true,
-        }, Running, .{
-            .session_id = gpa.dupe(u8, session_id) catch return,
-            .text = gpa.dupe(u8, text) catch return,
-        }, runningWindowMade);
+        s.newShell(session_id, .{ .split = .{ .anchor = anchor_id, .horizontal = horizontal, .before = false } }, text);
     }
 
     /// Folders (and files, if asked) in a directory as the terminal's shell sees it. `readable`
@@ -1418,12 +1406,133 @@ pub const Server = struct {
     };
     const shell_layout: ShellLayout = .{};
 
-    /// A new shell that starts in the folder the pane `near` is in, as a new pane beside
-    /// one is expected to; in its home folder when that pane's folder isn't known.
-    fn shellIn(s: *Server, near: ?[]const u8) ShellLayout {
-        const info = s.blocks.getPtr(near orelse return .{}) orelse return .{};
-        const folder = folderPath(&s.cwd_buf, info.folder orelse return .{}) orelse return .{};
-        return .{ .block = .{ .options = .{ .cwd = folder } } };
+    const ShellTarget = union(enum) {
+        window: ?[]const u8,
+        split: struct { anchor: []const u8, horizontal: bool, before: bool },
+        floating: struct { window: []const u8, bounds: [4]f64 },
+    };
+
+    const NewShell = struct {
+        arena: std.heap.ArenaAllocator,
+        server: *Server,
+        session_id: []const u8,
+        target: ShellTarget,
+        text: ?[]const u8,
+        source_block: ?[]const u8 = null,
+
+        fn release(p: *NewShell) void {
+            var arena = p.arena;
+            arena.deinit();
+        }
+    };
+
+    fn newShell(s: *Server, session_id: []const u8, target: ShellTarget, text: ?[]const u8) void {
+        if (s.control == null) return s.showMessage("Not connected to the server");
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        const a = arena.allocator();
+        const p = makeShellRequest(a, s, session_id, target, text) catch {
+            arena.deinit();
+            return;
+        };
+        p.arena = arena;
+        s.whenAttached(p.session_id, *NewShell, p, shellAttached);
+    }
+
+    fn makeShellRequest(a: std.mem.Allocator, s: *Server, session_id: []const u8, target: ShellTarget, text: ?[]const u8) !*NewShell {
+        const p = try a.create(NewShell);
+        p.* = .{
+            .arena = undefined,
+            .server = s,
+            .session_id = try a.dupe(u8, session_id),
+            .target = switch (target) {
+                .window => |id| .{ .window = if (id) |w| try a.dupe(u8, w) else null },
+                .split => |t| .{ .split = .{ .anchor = try a.dupe(u8, t.anchor), .horizontal = t.horizontal, .before = t.before } },
+                .floating => |t| .{ .floating = .{ .window = try a.dupe(u8, t.window), .bounds = t.bounds } },
+            },
+            .text = if (text) |t| try a.dupe(u8, t) else null,
+        };
+        return p;
+    }
+
+    fn shellAttached(s: *Server, pending: **NewShell, failure: ?control.Failure) void {
+        const p = pending.*;
+        if (failure) |f| {
+            defer p.release();
+            return s.showMessage(f.message);
+        }
+        const near = switch (p.target) {
+            .window => |id| s.focusedIn(p.session_id, id),
+            .split => |t| t.anchor,
+            .floating => |t| s.focusedIn(p.session_id, t.window),
+        };
+        const c = s.control orelse {
+            defer p.release();
+            return s.showMessage("Not connected to the server");
+        };
+        const block = near orelse return sendShell(c, p, null);
+        // Process cwd is live on the host and does not require shell integration.
+        p.source_block = switch (p.target) {
+            .split => |t| t.anchor,
+            else => p.arena.allocator().dupe(u8, block) catch null,
+        };
+        c.callTimeout("com.superlogical.terminal.process", .{ .session_id = p.session_id, .block_id = block }, 1_000, control.Callback.of(NewShell, p, shellDirectory));
+    }
+
+    fn shellDirectory(p: *NewShell, r: Result) void {
+        const s = p.server;
+        const c = s.control orelse {
+            defer p.release();
+            return s.showMessage("Not connected to the server");
+        };
+        const cwd = switch (r) {
+            .ok => |result| processDirectory(result),
+            .err => |e| blk: {
+                if (eql(e.code, "disconnected")) {
+                    defer p.release();
+                    return s.showMessage(e.message);
+                }
+                break :blk null;
+            },
+        };
+        if (cwd) |dir| return sendShell(c, p, dir);
+        const block = p.source_block orelse return sendShell(c, p, null);
+        const info = s.blocks.getPtr(block) orelse return sendShell(c, p, null);
+        const folder = info.folder orelse return sendShell(c, p, null);
+        var buf: [2048]u8 = undefined;
+        sendShell(c, p, folderPath(&buf, folder));
+    }
+
+    fn processDirectory(result: ?json.Value) ?[]const u8 {
+        const cwd = json.str(json.get(result, "child") orelse return null, "cwd") orelse return null;
+        return if (cwd.len != 0 and cwd[0] == '/') cwd else null;
+    }
+
+    fn sendShell(c: *Control, p: *NewShell, cwd: ?[]const u8) void {
+        const layout: ShellLayout = if (cwd) |dir| .{ .block = .{ .options = .{ .cwd = dir } } } else shell_layout;
+        const cb = control.Callback.of(NewShell, p, shellCreated);
+        switch (p.target) {
+            .window => c.call("session.new_window", .{ .session_id = p.session_id, .layout = layout }, cb),
+            .split => |t| c.call("session.new_split", .{
+                .session_id = p.session_id,
+                .anchor_id = t.anchor,
+                .direction = if (t.horizontal) "horizontal" else "vertical",
+                .side = if (t.before) "before" else "after",
+                .layout = layout,
+                .focus = true,
+            }, cb),
+            .floating => |t| c.call("session.new_layer", .{ .session_id = p.session_id, .window_id = t.window, .bounds = t.bounds, .layout = layout, .focus = true }, cb),
+        }
+    }
+
+    fn shellCreated(p: *NewShell, r: Result) void {
+        defer p.release();
+        switch (r) {
+            .ok => |result| if (p.text) |text| {
+                const ids = json.array(result, "block_ids");
+                if (ids.len > 0 and ids[0] == .string) p.server.writeText(p.session_id, ids[0].string, text);
+            },
+            .err => |e| p.server.showMessage(e.message),
+        }
     }
 
     /// The path in what a shell reports as its folder, which is a URL such as
@@ -1457,20 +1566,13 @@ pub const Server = struct {
     /// The pane with the keyboard in a window of a session, or in the session's shown window.
     fn focusedIn(s: *Server, session_id: []const u8, window_id: ?[]const u8) ?[]const u8 {
         const v = s.views.get(session_id) orelse return null;
-        const w = (if (window_id) |id| v.window(id) else null) orelse v.activeWindow() orelse return null;
+        const w = (if (window_id) |id| v.window(id) else v.activeWindow()) orelse return null;
         return w.focused_block_id;
     }
 
     /// Splits the pane showing `anchor_id`, putting a new shell beside it or below it.
     pub fn newSplit(s: *Server, session_id: []const u8, anchor_id: []const u8, horizontal: bool, before: bool) void {
-        s.act(session_id, "session.new_split", .{
-            .session_id = session_id,
-            .anchor_id = anchor_id,
-            .direction = if (horizontal) "horizontal" else "vertical",
-            .side = if (before) "before" else "after",
-            .layout = s.shellIn(anchor_id),
-            .focus = true,
-        });
+        s.newShell(session_id, .{ .split = .{ .anchor = anchor_id, .horizontal = horizontal, .before = before } }, null);
     }
 
     pub fn resizePane(s: *Server, session_id: []const u8, horizontal: bool, before_id: []const u8, after_id: []const u8, ratio: f64) void {
@@ -1504,7 +1606,7 @@ pub const Server = struct {
 
     /// A new shell in its own floating layer of the shown window.
     pub fn newFloating(s: *Server, session_id: []const u8, window_id: []const u8, bounds: view.Rect) void {
-        s.act(session_id, "session.new_layer", .{ .session_id = session_id, .window_id = window_id, .bounds = layerBounds(bounds), .layout = s.shellIn(s.focusedIn(session_id, window_id)), .focus = true });
+        s.newShell(session_id, .{ .floating = .{ .window = window_id, .bounds = layerBounds(bounds) } }, null);
     }
 
     /// Moves a window just before another in the session's order, or to the end.
@@ -1555,8 +1657,8 @@ pub const Server = struct {
         s.act(session_id, "session.swap_blocks", .{ .session_id = session_id, .block_id = a, .other_block_id = b });
     }
 
-    pub fn newWindow(s: *Server, session_id: []const u8) void {
-        s.act(session_id, "session.new_window", .{ .session_id = session_id, .layout = s.shellIn(s.focusedIn(session_id, null)) });
+    pub fn newWindow(s: *Server, session_id: []const u8, source_window: ?[]const u8) void {
+        s.newShell(session_id, .{ .window = source_window }, null);
     }
 
     pub fn renameWindow(s: *Server, session_id: []const u8, window_id: []const u8, label: []const u8) void {

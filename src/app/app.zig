@@ -3838,8 +3838,9 @@ pub const App = struct {
     fn newWindow(a: *App) void {
         const s = a.server orelse return;
         const sid = a.session_id orelse return;
+        const shown = a.shownWindow();
         setSlot(&a.window_id, null); // follow the new active window
-        s.newWindow(sid);
+        s.newWindow(sid, if (shown) |w| w.id else null);
     }
 
     /// Asks for the new session's name first; left empty, the server picks one.
@@ -4354,7 +4355,7 @@ pub const App = struct {
         a.auto_picked = false;
         setSlot(&a.session_id, session_id);
         setSlot(&a.window_id, null); // follow the new active window
-        s.newWindow(session_id);
+        s.newWindow(session_id, null);
     }
 
     fn toggleSession(a: *App, session_id: []const u8) void {

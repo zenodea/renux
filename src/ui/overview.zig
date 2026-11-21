@@ -474,7 +474,7 @@ pub const Overview = struct {
             w.had.append(gpa, gpa.dupe(u8, other.window_id) catch continue) catch {};
         };
         o.awaited = w;
-        t.host.server.newWindow(t.session_id);
+        t.host.server.newWindow(t.session_id, t.window_id);
     }
 
     /// Goes to the tab that was asked for, if it is among the tabs now.
