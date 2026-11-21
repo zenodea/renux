@@ -8,7 +8,8 @@ const json = @import("../util/json.zig");
 const gpa = std.heap.c_allocator;
 
 pub const protocol = "rex.control.v1";
-pub const api_revision = 10;
+pub const api_revision = 17;
+pub const min_api_revision = 10;
 const call_timeout_ms = 15_000;
 
 pub const Welcome = struct {

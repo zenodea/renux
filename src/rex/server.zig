@@ -102,6 +102,12 @@ pub const Performer = struct {
     perform: *const fn (ctx: *anyopaque, action: []const u8, args: ?json.Value, session_id: ?[]const u8) bool,
 };
 
+pub const PromptPresenter = struct {
+    ctx: *anyopaque,
+    show: *const fn (*anyopaque, []const u8, json.Value) bool,
+    dismiss: *const fn (*anyopaque, ?[]const u8) void,
+};
+
 pub const Server = struct {
     url: []u8,
     client_label: []u8,
@@ -167,6 +173,7 @@ pub const Server = struct {
     performer: ?Performer = null,
     /// Room for the folder a new pane starts in, while its request is written.
     cwd_buf: [2048]u8 = undefined,
+    prompt_presenter: ?PromptPresenter = null,
     /// Terminals kept live though their panes are off screen, oldest first. See `parkTerminal`.
     parked: std.ArrayList(*Stream) = .empty,
 
@@ -188,6 +195,8 @@ pub const Server = struct {
     }
 
     pub fn destroy(s: *Server) void {
+        if (s.prompt_presenter) |p| p.dismiss(p.ctx, null);
+        s.prompt_presenter = null;
         @import("upload.zig").cancelForServer(s);
         @import("download.zig").cancelForServer(s);
         @import("fetch.zig").cancelForServer(s);
@@ -387,6 +396,7 @@ pub const Server = struct {
         if (from != s.attempt) return;
         s.attempt = null;
         s.control = null;
+        if (s.prompt_presenter) |p| p.dismiss(p.ctx, null);
         from.abandon();
         s.scheduleReconnect(reason);
     }
@@ -403,7 +413,7 @@ pub const Server = struct {
         }
         // A newer server still speaks this revision. An older one lacks calls Renux makes, so say
         // so once per server rather than let things fail one by one with no reason given.
-        if (w.api_revision > 0 and w.api_revision < control.api_revision and !s.warned_old) {
+        if (w.api_revision > 0 and w.api_revision < control.min_api_revision and !s.warned_old) {
             s.warned_old = true;
             s.showMessage("This Rex server is older than Renux expects, so some things may not work. Update Rex on that computer.");
         }
@@ -496,6 +506,17 @@ pub const Server = struct {
             s.fetchKeymap();
         } else if (eql(kind, "client_perform_requested")) {
             s.handlePerform(payload orelse return);
+        } else if (eql(kind, "client_prompt_requested")) {
+            const call_id = json.str(payload, "call_id") orelse return;
+            if (@import("../settings/settings.zig").current.remote_control) {
+                if (s.prompt_presenter) |p| if (json.get(payload, "prompt")) |spec| {
+                    if (p.show(p.ctx, call_id, spec)) return;
+                };
+            }
+            s.reply(call_id, "not_supported", "Renux cannot show this prompt");
+        } else if (eql(kind, "client_prompt_ended")) {
+            const call_id = json.str(payload, "call_id") orelse return;
+            if (s.prompt_presenter) |p| p.dismiss(p.ctx, call_id);
         } else if (eql(kind, "client_call_requested")) {
             // Renux never lists other servers with an action, but the action would wait for an answer.
             s.reply(json.str(payload, "call_id") orelse return, "not_supported", "Renux can't call other servers");
@@ -827,6 +848,21 @@ pub const Server = struct {
             c.fire("client.reply", .{ .call_id = call_id, .@"error" = .{ .code = k, .message = message orelse "" } });
         } else {
             c.fire("client.reply", .{ .call_id = call_id, .result = null });
+        }
+    }
+
+    pub const PromptAnswer = union(enum) {
+        cancelled,
+        text: []const u8,
+        ids: []const []const u8,
+    };
+
+    pub fn answerPrompt(s: *Server, call_id: []const u8, answer: PromptAnswer) void {
+        const c = s.control orelse return;
+        switch (answer) {
+            .cancelled => c.fire("client.reply", .{ .call_id = call_id, .result = .{ .cancelled = true } }),
+            .text => |text| c.fire("client.reply", .{ .call_id = call_id, .result = .{ .text = text } }),
+            .ids => |ids| c.fire("client.reply", .{ .call_id = call_id, .result = .{ .ids = ids } }),
         }
     }
 

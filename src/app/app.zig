@@ -25,6 +25,8 @@ const theme = @import("../theme/theme.zig");
 const icons = @import("../icons/icons.zig");
 const keys = @import("../terminal/keys.zig");
 const Palette = @import("../ui/palette.zig").Palette;
+const prompt_ui = @import("../ui/prompt.zig");
+const prompt_json = @import("../util/json.zig");
 const reorder = @import("../ui/reorder.zig");
 const sidebar_tools = @import("../ui/sidebar_tools.zig");
 const sidebar_slide = @import("../ui/sidebar_slide.zig");
@@ -350,6 +352,7 @@ const HostRef = struct { host: *Host, serial: usize };
 pub const App = struct {
     app: *adw.Application,
     window: *adw.ApplicationWindow = undefined,
+    active_prompt: ?*ActivePrompt = null,
     toasts: *adw.ToastOverlay = undefined,
     /// The message showing at the bottom, its text, and how many times in a row it was said.
     toast_now: ?*adw.Toast = null,
@@ -1372,6 +1375,7 @@ pub const App = struct {
         a.next_page += 1;
         s.observer = .{ .ctx = h, .changed = serverChanged };
         s.performer = .{ .ctx = h, .perform = perform };
+        s.prompt_presenter = .{ .ctx = h, .show = showPrompt, .dismiss = dismissPrompt };
         _ = a.stack.addNamed(ws.root, h.page.ptr);
         a.hosts.appendAssumeCapacity(h);
         a.remoteOptionsChanged();
@@ -2848,6 +2852,92 @@ pub const App = struct {
         if (r.window_id.len == 0) return a.showSession(r.session_id);
         a.openTab(r.host, r.session_id, r.window_id);
         if (a.workspace) |w| w.grabFocus();
+    }
+
+    const ActivePrompt = struct {
+        host: *Host,
+        call_id: []u8,
+        picker: *prompt_ui.Picker,
+
+        fn destroy(p: *ActivePrompt) void {
+            gpa.free(p.call_id);
+            gpa.destroy(p);
+        }
+    };
+
+    fn showPrompt(ctx: *anyopaque, call_id: []const u8, payload: prompt_json.Value) bool {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        const a = h.app;
+        if (a.active_prompt != null) return false;
+        const kind = prompt_json.str(payload, "kind") orelse return false;
+        const multiple = prompt_json.boolean(payload, "multiple") orelse false;
+        const allow_other = prompt_json.boolean(payload, "allow_other") orelse false;
+        const mode: @FieldType(prompt_ui.Spec, "mode") = if (std.mem.eql(u8, kind, "input"))
+            .input
+        else if (!std.mem.eql(u8, kind, "pick") or (multiple and allow_other))
+            return false
+        else if (multiple)
+            .multiple
+        else if (allow_other)
+            .other
+        else
+            .single;
+        const title = prompt_json.str(payload, "title") orelse return false;
+        const rows = if (mode == .input) &.{} else prompt_json.array(payload, "items");
+        if (rows.len > 2000) return false;
+        const items = gpa.alloc(prompt_ui.Item, rows.len) catch return false;
+        defer gpa.free(items);
+        for (rows, items) |row, *item| {
+            const id = if (row == .string) row.string else prompt_json.str(row, "id") orelse return false;
+            item.* = .{
+                .id = id,
+                .title = prompt_json.str(row, "title") orelse id,
+                .subtitle = prompt_json.str(row, "subtitle") orelse "",
+                .detail = prompt_json.str(row, "detail") orelse "",
+                .icon = prompt_json.str(row, "icon"),
+                .selected = prompt_json.boolean(row, "selected") orelse false,
+            };
+        }
+        const p = gpa.create(ActivePrompt) catch return false;
+        const owned_id = gpa.dupe(u8, call_id) catch {
+            gpa.destroy(p);
+            return false;
+        };
+        p.* = .{ .host = h, .call_id = owned_id, .picker = undefined };
+        p.picker = prompt_ui.Picker.open(a.window.as(gtk.Widget), .{
+            .title = title,
+            .placeholder = prompt_json.str(payload, "placeholder") orelse "",
+            .value = prompt_json.str(payload, "value") orelse "",
+            .confirm = prompt_json.str(payload, "confirm"),
+            .mode = mode,
+            .items = items,
+        }, p, promptAnswered) catch {
+            p.destroy();
+            return false;
+        };
+        a.active_prompt = p;
+        return true;
+    }
+
+    fn promptAnswered(ctx: *anyopaque, result: prompt_ui.Result) void {
+        const p: *ActivePrompt = @ptrCast(@alignCast(ctx));
+        p.host.app.active_prompt = null;
+        p.host.server.answerPrompt(p.call_id, switch (result) {
+            .cancelled => .cancelled,
+            .text => |text| .{ .text = text },
+            .ids => |ids| .{ .ids = ids },
+        });
+        p.destroy();
+    }
+
+    fn dismissPrompt(ctx: *anyopaque, call_id: ?[]const u8) void {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        const p = h.app.active_prompt orelse return;
+        if (p.host != h) return;
+        if (call_id) |id| if (!std.mem.eql(u8, id, p.call_id)) return;
+        h.app.active_prompt = null;
+        p.picker.dismiss();
+        p.destroy();
     }
 
     // client.* actions. Key bindings live in the person's Lua config on the server; the server
