@@ -3149,7 +3149,7 @@ fn rowHash(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) u64 {
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
-        hasher.update(std.mem.asBytes(&[_]u32{ cl.cp, cl.fg, cl.bg, @as(u16, @bitCast(cl.flags)) }));
+        hasher.update(std.mem.asBytes(&[_]u32{ cl.cp, cl.fg, cl.bg, cl.ul, @as(u16, @bitCast(cl.flags)) }));
         if (cl.extra_len > 1) for (f.grapheme(cl)) |cp| hasher.update(std.mem.asBytes(&cp));
     }
     return hasher.final();
