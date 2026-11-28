@@ -212,6 +212,8 @@ fn drawSample(area: *gtk.DrawingArea, cr: *cairo.Context, wi: c_int, hi: c_int, 
     const font = termview.font orelse return;
     const layout = pangocairo.createLayout(cr);
     defer layout.as(@import("gobject").Object).unref();
+    // Ligatures and the font's features as the terminal draws them.
+    termview.setTextAttrs(layout, 0);
 
     // The row height the terminal uses, from the font and the line height setting.
     layout.setFontDescription(font.regular);

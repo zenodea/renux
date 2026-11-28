@@ -298,12 +298,16 @@ const coast_fade_per_second = 0.05;
 const most_rows_a_step = 8.0;
 const coast_slowest_px_per_second = 15.0;
 
+/// The four faces text is drawn in.
+pub const Face = enum(u2) { regular, bold, italic, bold_italic };
+
 pub const Font = struct {
     regular: *pango.FontDescription,
     bold: *pango.FontDescription,
     italic: *pango.FontDescription,
     bold_italic: *pango.FontDescription,
-    /// What the font is (family, size, style), for telling drawings made with another font apart.
+    /// What the font is (families, size, styles, features), for telling drawings made with
+    /// another font apart.
     id: u64,
 
     pub fn init(name: [:0]const u8) Font {
@@ -328,13 +332,29 @@ pub const Font = struct {
     }
 
     fn fromDesc(regular: *pango.FontDescription) Font {
-        const bold = regular.copy().?;
-        bold.setWeight(.bold);
-        const italic = regular.copy().?;
-        italic.setStyle(.italic);
-        const bold_italic = bold.copy().?;
-        bold_italic.setStyle(.italic);
-        return .{ .regular = regular, .bold = bold, .italic = italic, .bold_italic = bold_italic, .id = regular.hash() };
+        const st = &settings.current;
+        const own = st.custom_style_fonts;
+        const bold = styled(regular, if (own) st.font_bold else "", true, false);
+        const italic = styled(regular, if (own) st.font_italic else "", false, true);
+        const bold_italic = styled(regular, if (own) st.font_bold_italic else "", true, true);
+        var hasher = std.hash.Wyhash.init(0);
+        for ([_]*pango.FontDescription{ regular, bold, italic, bold_italic }) |d| hasher.update(std.mem.asBytes(&d.hash()));
+        hasher.update(st.font_features);
+        return .{ .regular = regular, .bold = bold, .italic = italic, .bold_italic = bold_italic, .id = hasher.final() };
+    }
+
+    /// The regular face made bold, italic or both, in `family` when one is named.
+    fn styled(regular: *pango.FontDescription, family: []const u8, bold: bool, italic: bool) *pango.FontDescription {
+        const d = regular.copy().?;
+        if (bold) d.setWeight(.bold);
+        if (italic) d.setStyle(.italic);
+        const name = std.mem.trim(u8, family, " ");
+        // The font's own families stay behind the named one, for what that one doesn't have.
+        if (name.len > 0) if (regular.getFamily()) |rest| {
+            var buf: [512]u8 = undefined;
+            if (std.fmt.bufPrintSentinel(&buf, "{s},{s}", .{ name, std.mem.span(rest) }, 0)) |both| d.setFamily(both.ptr) else |_| {}
+        };
+        return d;
     }
 
     /// Frees the four descriptions. Layouts copy what they're given, so nothing else holds them.
@@ -346,12 +366,21 @@ pub const Font = struct {
         f.* = undefined;
     }
 
-    fn pick(f: Font, flags: term_mod.Flags) *pango.FontDescription {
-        if (settings.current.bold_italic == .plain) return f.regular;
-        if (flags.bold and flags.italic) return f.bold_italic;
-        if (flags.bold) return f.bold;
-        if (flags.italic) return f.italic;
-        return f.regular;
+    fn faceOf(flags: term_mod.Flags) Face {
+        if (settings.current.bold_italic == .plain) return .regular;
+        if (flags.bold and flags.italic) return .bold_italic;
+        if (flags.bold) return .bold;
+        if (flags.italic) return .italic;
+        return .regular;
+    }
+
+    fn of(f: Font, face: Face) *pango.FontDescription {
+        return switch (face) {
+            .regular => f.regular,
+            .bold => f.bold,
+            .italic => f.italic,
+            .bold_italic => f.bold_italic,
+        };
     }
 };
 
@@ -688,6 +717,9 @@ pub const TermView = struct {
     layout: ?*pango.Layout = null,
     /// The letter spacing the layout was given, in pixels.
     spacing: f64 = 0,
+    /// The letter spacing each face is drawn with. A bold or italic face from another family
+    /// can be wider or narrower than a cell, and this makes up the difference.
+    face_spacing: [4]f64 = @splat(0),
     /// Whether the pane floats over the others.
     floating: bool = false,
     /// Textures of the Kitty images this pane shows, by image and generation.
@@ -1076,6 +1108,14 @@ pub const TermView = struct {
         // Taller rows keep the text in their middle.
         v.baseline = @as(f64, @floatFromInt(layout.getBaseline())) / pango.SCALE + @floor((v.cell_h - natural_h) / 2);
         v.spacing = prefs.letter_spacing;
+        v.face_spacing = @splat(v.spacing);
+        if (prefs.custom_style_fonts) for ([_]Face{ .bold, .italic, .bold_italic }) |face| {
+            layout.setFontDescription(f.of(face));
+            var face_w: c_int = 0;
+            layout.getSize(&face_w, null);
+            const apart = @as(f64, @floatFromInt(w - face_w)) / pango.SCALE / 40.0;
+            if (@abs(apart) > 0.005) v.face_spacing[@backingInt(face)] = v.spacing + apart;
+        };
         if (v.layout) |l| setSpacing(l, v.spacing);
     }
 
@@ -2911,12 +2951,49 @@ fn setSpacing(layout: *pango.Layout, px: f64) void {
         pangocairo.contextSetFontOptions(ctx, opts);
         layout.contextChanged();
     }
-    if (px == 0 and prefs.ligatures) return layout.setAttributes(null);
+    setTextAttrs(layout, px);
+}
+
+/// Gives a layout what the settings ask of every run of text: `px` between its characters,
+/// and the font's features.
+pub fn setTextAttrs(layout: *pango.Layout, px: f64) void {
+    var buf: [512]u8 = undefined;
+    const features = fontFeatures(&buf, settings.current.ligatures, settings.current.font_features);
+    if (px == 0 and features == null) return layout.setAttributes(null);
     const list = pango.AttrList.new();
     defer list.unref();
     if (px != 0) list.insert(pango.attrLetterSpacingNew(@intFromFloat(@round(px * pango.SCALE))));
-    if (!prefs.ligatures) list.insert(pango.AttrFontFeatures.new("liga 0, clig 0, calt 0, dlig 0"));
+    if (features) |z| list.insert(pango.AttrFontFeatures.new(z.ptr));
     layout.setAttributes(list);
+}
+
+/// The OpenType features asked of the font: ligatures off when they are, then the ones named
+/// in the settings, which come last and so win.
+fn fontFeatures(buf: []u8, ligatures: bool, named_raw: []const u8) ?[:0]const u8 {
+    const off = if (ligatures) "" else "liga 0, clig 0, calt 0, dlig 0";
+    const named = std.mem.trim(u8, named_raw, " ,");
+    if (off.len == 0 and named.len == 0) return null;
+    return std.fmt.bufPrintSentinel(buf, "{s}{s}{s}", .{ off, if (off.len > 0 and named.len > 0) ", " else "", named }, 0) catch null;
+}
+
+test "font features join the ligature switch and the named ones" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(fontFeatures(&buf, true, "") == null);
+    try std.testing.expect(fontFeatures(&buf, true, " , ") == null);
+    try std.testing.expectEqualStrings("ss01, zero", fontFeatures(&buf, true, " ss01, zero,").?);
+    try std.testing.expectEqualStrings("liga 0, clig 0, calt 0, dlig 0", fontFeatures(&buf, false, "").?);
+    try std.testing.expectEqualStrings("liga 0, clig 0, calt 0, dlig 0, ss01", fontFeatures(&buf, false, "ss01").?);
+}
+
+/// Sets a layout up to draw in `face`. `faceDone` puts it back after the drawing.
+fn useFace(v: *TermView, layout: *pango.Layout, f_font: Font, face: Face) void {
+    layout.setFontDescription(f_font.of(face));
+    const px = v.face_spacing[@backingInt(face)];
+    if (px != v.spacing) setTextAttrs(layout, px);
+}
+
+fn faceDone(v: *TermView, layout: *pango.Layout, face: Face) void {
+    if (v.face_spacing[@backingInt(face)] != v.spacing) setTextAttrs(layout, v.spacing);
 }
 
 /// Places a layout with its baseline at `baseline`. Fallback fonts have other ascents, so
@@ -3202,11 +3279,13 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
             if (n.cp >= 0x80) break;
         }
         const left = pad_x + @as(f64, @floatFromInt(start)) * v.cell_w;
-        layout.setFontDescription(f_font.pick(cl.flags));
         text.append(gpa, 0) catch break;
+        const face = Font.faceOf(cl.flags);
+        useFace(v, layout, f_font, face);
         layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
         const alpha: f64 = if (cl.flags.faint) 0.6 else 1;
         layoutOnBaseline(sn, layout, rgba(colors.fg, alpha), left, v.baseline);
+        faceDone(v, layout, face);
         const run_w = @as(f64, @floatFromInt(x - start)) * v.cell_w;
         if (cl.flags.underline or cl.flags.link) fillRect(sn, colors.fg, alpha, left, v.baseline + 1.5, run_w, 1);
         if (cl.flags.strike) fillRect(sn, colors.fg, alpha, left, v.cell_h / 2, run_w, 1);
@@ -3828,10 +3907,12 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
                     appendCell(&text, f, under);
                     text.append(gpa, 0) catch return;
                     const layout = layoutOf(v);
-                    layout.setFontDescription(f_font.pick(under.flags));
+                    const face = Font.faceOf(under.flags);
+                    useFace(v, layout, f_font, face);
                     layout.setText(@ptrCast(text.items.ptr), @intCast(text.items.len - 1));
                     const under_color = if (prefs.cursor_text_color != 0) prefs.cursor_text_color else f.bg;
                     layoutOnBaseline(sn, layout, rgba(under_color, 1), cx, cy + v.baseline);
+                    faceDone(v, layout, face);
                 }
             },
         }

@@ -1035,8 +1035,10 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     numberRow(ctx, g, "Line height", "Row height as a multiple of the font's own", &settings.current.line_height, 0.8, 2, 0.05, 2, App.fontChanged);
     numberRow(ctx, g, "Letter spacing", "Extra pixels between characters", &settings.current.letter_spacing, -2, 6, 0.5, 1, App.fontChanged);
     switchRow(ctx, g, "Font ligatures", "Join character pairs such as => when the font has them", &settings.current.ligatures, App.terminalChanged);
+    featuresRow(ctx, g);
     switchRow(ctx, g, "Font smoothing", "Off draws glyphs without antialiasing, for pixel fonts", &settings.current.font_smoothing, App.terminalChanged);
     segments(ctx, g, "Bold and italic", settings.BoldItalic, &settings.current.bold_italic, &.{ "Own Faces", "Regular" }, App.terminalChanged);
+    styleFontRows(ctx, g);
 
     const padding = group(p, "Padding");
     numberRow(ctx, padding, "Horizontal padding", "Points left and right of the text", &settings.current.pad_x, 0, 40, 1, 0, App.terminalChanged);
@@ -1154,6 +1156,94 @@ fn fontRows(ctx: *Ctx, g: *adw.PreferencesGroup) void {
 
     _ = gobject.Object.signals.notify.connect(family, *Ctx, &familyChanged, ctx, .{ .detail = "selected" });
     _ = gobject.Object.signals.notify.connect(size, *Ctx, &sizeChanged, ctx, .{ .detail = "value" });
+}
+
+/// The font's optional features by their OpenType names, such as a font's script italics.
+fn featuresRow(ctx: *Ctx, g: *adw.PreferencesGroup) void {
+    const row = adw.EntryRow.new();
+    row.as(adw.PreferencesRow).setTitle("Font features, such as ss01, zero, -calt");
+    if (gpa.dupeSentinel(u8, settings.current.font_features, 0)) |current| {
+        defer gpa.free(current);
+        row.as(gtk.Editable).setText(current.ptr);
+    } else |_| {}
+    row.setShowApplyButton(1);
+    _ = adw.EntryRow.signals.apply.connect(row, *Ctx, &featuresApplied, ctx, .{});
+    g.add(row.as(gtk.Widget));
+}
+
+fn featuresApplied(row: *adw.EntryRow, ctx: *Ctx) callconv(.c) void {
+    settings.setString(&settings.current.font_features, std.mem.trim(u8, std.mem.span(row.as(gtk.Editable).getText()), " ,"));
+    ctx.app.fontChanged();
+    redrawArt(ctx);
+}
+
+/// Bold, italic and bold italic text in families of their own, under a switch. Off, the font
+/// picked above draws all of them. It comes after `fontRows`, which lists the families.
+fn styleFontRows(ctx: *Ctx, g: *adw.PreferencesGroup) void {
+    const st = &settings.current;
+    const row = adw.ExpanderRow.new();
+    row.as(adw.PreferencesRow).setTitle("Custom bold and italic fonts");
+    row.setSubtitle("Off, the font above draws every style");
+    row.setShowEnableSwitch(1);
+    row.setEnableExpansion(@intFromBool(st.custom_style_fonts));
+    g.add(row.as(gtk.Widget));
+    styleFontRow(ctx, row, "Bold", &st.font_bold);
+    styleFontRow(ctx, row, "Italic", &st.font_italic);
+    styleFontRow(ctx, row, "Bold italic", &st.font_bold_italic);
+    // Switched on, the three fonts show without a click on the arrow.
+    row.setExpanded(@intFromBool(st.custom_style_fonts));
+    const t = ctx.keep(Bound(bool){ .ctx = ctx, .field = &st.custom_style_fonts, .after = App.fontChanged }) orelse return;
+    _ = gobject.Object.signals.notify.connect(row, *Bound(bool), &styleFontsToggled, t, .{ .detail = "enable-expansion" });
+}
+
+fn styleFontsToggled(row: *adw.ExpanderRow, _: *gobject.ParamSpec, t: *Bound(bool)) callconv(.c) void {
+    const on = row.getEnableExpansion() != 0;
+    if (on == t.field.*) return;
+    t.field.* = on;
+    t.changed();
+}
+
+/// One style's family and the row that picks it.
+const StyleFont = struct { ctx: *Ctx, field: *[]u8 };
+
+/// A style's family: the main font, first in the list, or any of the monospace families.
+fn styleFontRow(ctx: *Ctx, parent: *adw.ExpanderRow, title: [:0]const u8, field: *[]u8) void {
+    const names = &ctx.font_names;
+    const list = gtk.StringList.new(null);
+    list.append("Main font");
+    var selected: c_uint = 0;
+    for (names.items, 1..) |n, i| {
+        list.append(n.ptr);
+        if (std.ascii.eqlIgnoreCase(n, field.*)) selected = @intCast(i);
+    }
+    if (field.len > 0 and selected == 0) {
+        // Keep a family that isn't listed, such as one set by hand in the settings file.
+        const z = ctx.al().dupeSentinel(u8, field.*, 0) catch return;
+        names.append(ctx.al(), z) catch return;
+        list.append(z.ptr);
+        selected = @intCast(names.items.len);
+    }
+    const row = adw.ComboRow.new();
+    row.as(adw.PreferencesRow).setTitle(title.ptr);
+    row.setModel(list.as(gio.ListModel));
+    list.as(gobject.Object).unref();
+    row.setExpression(gtk.PropertyExpression.new(gtk.StringObject.getGObjectType(), null, "string").as(gtk.Expression));
+    row.setEnableSearch(1);
+    row.setSelected(selected);
+    parent.addRow(row.as(gtk.Widget));
+    const sf = ctx.keep(StyleFont{ .ctx = ctx, .field = field }) orelse return;
+    _ = gobject.Object.signals.notify.connect(row, *StyleFont, &styleFontPicked, sf, .{ .detail = "selected" });
+}
+
+fn styleFontPicked(row: *adw.ComboRow, _: *gobject.ParamSpec, sf: *StyleFont) callconv(.c) void {
+    const names = sf.ctx.font_names.items;
+    const i = row.getSelected();
+    // The first entry is the main font, which the setting says by naming none.
+    const name: []const u8 = if (i == 0 or i > names.len) "" else names[i - 1];
+    if (std.mem.eql(u8, name, sf.field.*)) return;
+    settings.setString(sf.field, name);
+    sf.ctx.app.fontChanged();
+    redrawArt(sf.ctx);
 }
 
 /// Some fixed-width families, Nerd Fonts among them, don't say they're monospace; their names do.

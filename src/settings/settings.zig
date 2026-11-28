@@ -114,6 +114,15 @@ pub const Settings = struct {
     font_smoothing: bool = true,
     /// Bold and italic text in their own faces, or all in the regular one.
     bold_italic: BoldItalic = .fonts,
+    /// OpenType features switched on or off in every face, split by commas as HarfBuzz reads
+    /// them: `ss01, zero, -calt`. Empty leaves the font's own defaults.
+    font_features: []u8,
+    /// Bold, italic and bold italic text each take the family named below instead of the
+    /// font's own. Off, or a name left empty, uses the font's own face.
+    custom_style_fonts: bool = false,
+    font_bold: []u8,
+    font_italic: []u8,
+    font_bold_italic: []u8,
     cursor_blink_ms: f64 = 530,
     /// The character under a block cursor; 0 uses the terminal's background.
     cursor_text_color: u32 = 0,
