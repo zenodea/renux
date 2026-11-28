@@ -6,6 +6,19 @@ const glib = @import("glib");
 const gpa = std.heap.c_allocator;
 const longest_hold_us = 1_000_000;
 
+/// How an underline is drawn, matching SGR 4:n and GhosttySgrUnderline. Non-exhaustive,
+/// so a style a newer libghostty knows about decodes instead of tripping an assert; the
+/// renderer draws anything it doesn't know as a straight line.
+pub const Underline = enum(u3) {
+    none = 0,
+    single = 1,
+    double = 2,
+    curly = 3,
+    dotted = 4,
+    dashed = 5,
+    _,
+};
+
 pub const Flags = packed struct(u16) {
     bold: bool = false,
     italic: bool = false,
@@ -15,12 +28,12 @@ pub const Flags = packed struct(u16) {
     invisible: bool = false,
     strike: bool = false,
     overline: bool = false,
-    underline: bool = false,
     selected: bool = false,
     wide: bool = false,
     spacer: bool = false,
     link: bool = false,
-    _: u3 = 0,
+    underline: Underline = .none,
+    _: u1 = 0,
 };
 
 pub const Cell = struct {
@@ -32,6 +45,8 @@ pub const Cell = struct {
     /// 0xRRGGBB with the top byte set, or 0 for the terminal's default.
     fg: u32 = 0,
     bg: u32 = 0,
+    /// The underline's own color (SGR 58), or 0 to underline in `fg`.
+    ul: u32 = 0,
 };
 
 /// The character a program fills cells with to say "an image goes here" (Kitty's Unicode
@@ -109,6 +124,9 @@ pub const Term = struct {
     image_iter: c.GhosttyRenderStateImageIterator = null,
     /// Kitty graphics images on screen, as of the last render.
     images: std.ArrayList(Image) = .empty,
+    /// The palette last given to `setColors`, kept because a style's color can be an
+    /// index into it and the render state hands those over unresolved.
+    palette: ?[256]u32 = null,
 
     pub fn create(cols: u16, rows: u16) ?*Term {
         var t: c.GhosttyTerminal = null;
@@ -272,6 +290,7 @@ pub const Term = struct {
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, if (fg == 0) null else &f);
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, if (bg == 0) null else &b);
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, if (cursor == 0) null else &k);
+        self.palette = if (palette) |p| p.* else null;
         if (palette) |p| {
             var pal: [256]c.GhosttyColorRgb = undefined;
             for (p, 0..) |v, i| pal[i] = rgbOf(v);
@@ -605,7 +624,8 @@ pub const Term = struct {
                     out.flags.invisible = s & (1 << 5) != 0;
                     out.flags.strike = s & (1 << 6) != 0;
                     out.flags.overline = s & (1 << 7) != 0;
-                    out.flags.underline = (s >> 8) & 0x7 != 0;
+                    out.flags.underline = @fromBackingInt(@intCast(@as(u3, @truncate(s >> 8))));
+                    out.ul = styleColor(self, style.underline_color);
                 }
                 var raw: c.GhosttyCell = 0;
                 if (c.ghostty_render_state_row_cells_get(self.cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw) == c.GHOSTTY_SUCCESS) {
@@ -623,6 +643,17 @@ pub const Term = struct {
         return true;
     }
 };
+
+/// A style's color as 0xRRGGBB, or 0 when the style chooses none and the caller should
+/// fall back to the cell's foreground. A palette index needs the palette the client last
+/// set; with none recorded, it falls back too.
+fn styleColor(self: *Term, sc: c.GhosttyStyleColor) u32 {
+    if (sc.tag == c.GHOSTTY_STYLE_COLOR_RGB) return rgb(sc.value.rgb);
+    if (sc.tag == c.GHOSTTY_STYLE_COLOR_PALETTE) {
+        if (self.palette) |p| return p[sc.value.palette];
+    }
+    return 0;
+}
 
 fn rgb(v: c.GhosttyColorRgb) u32 {
     return 0xFF000000 | (@as(u32, v.r) << 16) | (@as(u32, v.g) << 8) | v.b;

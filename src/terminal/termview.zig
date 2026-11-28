@@ -2933,6 +2933,47 @@ fn decodePng(_: ?*anyopaque, allocator: [*c]const term_mod.Term.Allocator, data:
 
 var png_decoder_set = false;
 
+/// Draws `w` of underline at `y` in `color`, in the style a program asked for with SGR 4:n.
+/// Straight and double stay rectangles, as every underline was before styles were decoded,
+/// and so do the dash patterns: a handful of rects beats setting up cairo for a run. Only
+/// the wave needs a path.
+fn drawUnderline(sn: *gtk.Snapshot, style: term_mod.Underline, color: u32, alpha: f64, x: f64, y: f64, w: f64) void {
+    switch (style) {
+        .none => {},
+        .double => {
+            fillRect(sn, color, alpha, x, y, w, 1);
+            fillRect(sn, color, alpha, x, y + 2, w, 1);
+        },
+        .dotted, .dashed => {
+            const on: f64 = if (style == .dotted) 1 else 3;
+            const step = on * 2;
+            var t: f64 = 0;
+            while (t < w) : (t += step) fillRect(sn, color, alpha, x + t, y, @min(on, w - t), 1);
+        },
+        .curly => {
+            // A sine sampled every pixel. The bounds are a pixel proud of the wave on each
+            // side so the stroke's width isn't clipped at the extremes.
+            const amp: f64 = 1.2;
+            const period: f64 = 6;
+            const cr = sn.appendCairo(&.{
+                .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y - amp - 1) },
+                .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(amp * 2 + 2) },
+            });
+            defer cr.destroy();
+            setColor(cr, color, alpha);
+            cr.setLineWidth(1);
+            const mid = y;
+            cr.moveTo(x, mid);
+            var t: f64 = 1;
+            while (t < w) : (t += 1) cr.lineTo(x + t, mid + amp * @sin(t / period * std.math.tau));
+            cr.lineTo(x + w, mid + amp * @sin(w / period * std.math.tau));
+            cr.stroke();
+        },
+        // A style only a newer libghostty knows: underline it, plainly.
+        else => fillRect(sn, color, alpha, x, y, w, 1),
+    }
+}
+
 fn fillRect(sn: *gtk.Snapshot, color: u32, alpha: f64, x: f64, y: f64, w: f64, h: f64) void {
     const c = rgba(color, alpha);
     sn.appendColor(&c, &.{ .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(w), .f_height = @floatCast(h) } });
@@ -3185,7 +3226,7 @@ fn rowHash(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) u64 {
     var x: usize = 0;
     while (x < f.cols) : (x += 1) {
         const cl = f.cell(x, y);
-        hasher.update(std.mem.asBytes(&[_]u32{ cl.cp, cl.fg, cl.bg, @as(u16, @bitCast(cl.flags)) }));
+        hasher.update(std.mem.asBytes(&[_]u32{ cl.cp, cl.fg, cl.bg, cl.ul, @as(u16, @bitCast(cl.flags)) }));
         if (cl.extra_len > 1) for (f.grapheme(cl)) |cp| hasher.update(std.mem.asBytes(&cp));
     }
     return hasher.final();
@@ -3287,7 +3328,14 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
         layoutOnBaseline(sn, layout, rgba(colors.fg, alpha), left, v.baseline);
         faceDone(v, layout, face);
         const run_w = @as(f64, @floatFromInt(x - start)) * v.cell_w;
-        if (cl.flags.underline or cl.flags.link) fillRect(sn, colors.fg, alpha, left, v.baseline + 1.5, run_w, 1);
+        const ul_style: term_mod.Underline = if (cl.flags.underline != .none)
+            cl.flags.underline
+        else if (cl.flags.link) .single else .none;
+        if (ul_style != .none) {
+            // SGR 58 gives the underline its own color; without one it follows the text.
+            const ul_color = if (cl.ul != 0) cl.ul else colors.fg;
+            drawUnderline(sn, ul_style, ul_color, alpha, left, v.baseline + 1.5, run_w);
+        }
         if (cl.flags.strike) fillRect(sn, colors.fg, alpha, left, v.cell_h / 2, run_w, 1);
     }
     return sn.freeToNode();
@@ -4026,7 +4074,8 @@ fn mix(a: u32, b: u32, t: f64) u32 {
 
 fn sameStyle(a: term_mod.Cell, b: term_mod.Cell) bool {
     return a.flags.bold == b.flags.bold and a.flags.italic == b.flags.italic and a.flags.faint == b.flags.faint and
-        a.flags.underline == b.flags.underline and a.flags.strike == b.flags.strike and a.flags.link == b.flags.link;
+        a.flags.underline == b.flags.underline and a.flags.strike == b.flags.strike and a.flags.link == b.flags.link and
+        a.ul == b.ul;
 }
 
 fn appendCell(text: *std.ArrayList(u8), f: *const term_mod.Frame, cl: term_mod.Cell) void {
